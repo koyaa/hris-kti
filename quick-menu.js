@@ -130,8 +130,12 @@
     FADE_MEDIUM: 250,
   });
 
+  /** sessionStorage schema version for cache invalidation. */
+  const STORAGE_SCHEMA_VERSION = 1;
+
   /** sessionStorage key constants. */
   const STORAGE = Object.freeze({
+    SCHEMA_VERSION: 'qm_schema_version',
     EMP_JK: 'qm_jk_',
     EMP_NAMA: 'qm_nama_',
     EMP_BAG: 'qm_bag_',
@@ -570,7 +574,15 @@
     const params = new URLSearchParams();
     const headers = { 'Content-Type': 'application/x-www-form-urlencoded', 'X-Requested-With': 'XMLHttpRequest' };
     const csrfMeta = doc.querySelector('meta[name="csrf-token"], meta[name="csrf-test-name"]');
-    if (csrfMeta) headers['X-CSRF-TOKEN'] = csrfMeta.getAttribute('content');
+    if (csrfMeta) {
+      const tokenValue = csrfMeta.getAttribute('content');
+      if (!tokenValue) throw new Error('Token CSRF tidak ditemukan. Struktur halaman mungkin berubah.');
+      headers['X-CSRF-TOKEN'] = tokenValue;
+    } else {
+      const csrfHidden = form.querySelector('input[name="_token"], input[name="csrf_token"], input[name="csrf-token"]');
+      if (!csrfHidden || !csrfHidden.value) throw new Error('Token CSRF tidak ditemukan. Struktur halaman mungkin berubah.');
+      headers['X-CSRF-TOKEN'] = csrfHidden.value;
+    }
     form.querySelectorAll('input, select, textarea').forEach(el => {
       if (!el.name || el.type === 'submit' || el.type === 'button') return;
       if ((el.type === 'checkbox' || el.type === 'radio') && !el.checked) return;
@@ -3974,6 +3986,14 @@
       const token = csrfMeta.getAttribute('content');
       headers['X-CSRF-TOKEN'] = token;
       headers['X-XSRF-TOKEN'] = token;
+    } else {
+      const csrfHidden = form.querySelector('input[name="_token"], input[name="csrf_token"], input[name="csrf-token"]');
+      if (csrfHidden && csrfHidden.value) {
+        headers['X-CSRF-TOKEN'] = csrfHidden.value;
+        headers['X-XSRF-TOKEN'] = csrfHidden.value;
+      } else {
+        throw new Error('Token CSRF tidak ditemukan. Struktur halaman mungkin berubah.');
+      }
     }
 
     form.querySelectorAll('input, select, textarea').forEach(el => {
@@ -5251,9 +5271,63 @@
   }
 
   /* ============================================================
+   * 23A. STORAGE & DOM VALIDATION
+   * ============================================================ */
+
+  /**
+   * Validates sessionStorage schema version. Clears all qm_* keys if
+   * the version is missing or does not match the current STORAGE_SCHEMA_VERSION.
+   * @returns {boolean} true if schema was already valid, false if it was cleared.
+   */
+  function validateStorageSchema() {
+    const stored = sessionStorage.getItem(STORAGE.SCHEMA_VERSION);
+    if (stored === String(STORAGE_SCHEMA_VERSION)) return true;
+
+    const keysToRemove = [];
+    for (let i = 0; i < sessionStorage.length; i++) {
+      const key = sessionStorage.key(i);
+      if (key && key.startsWith('qm_')) keysToRemove.push(key);
+    }
+    keysToRemove.forEach(k => sessionStorage.removeItem(k));
+    sessionStorage.setItem(STORAGE.SCHEMA_VERSION, String(STORAGE_SCHEMA_VERSION));
+    Logger.info(`Schema versi lama (${stored || 'kosong'}) dihapus. Versi baru: ${STORAGE_SCHEMA_VERSION}`);
+    return false;
+  }
+
+  /**
+   * Validates critical DOM selectors based on the current page type.
+   * @returns {{ valid: boolean, missing: string[] }}
+   */
+  function validateDomStructure() {
+    const missing = [];
+
+    if (isAttendancePagePath()) {
+      if (!document.querySelector('table tbody tr')) missing.push('table tbody tr (tabel kehadiran)');
+    }
+    if (isBarcodeCreatePagePath()) {
+      if (!document.querySelector('form')) missing.push('form (barcode create)');
+    }
+    if (isDistribusiKalenderPagePath()) {
+      if (!document.querySelector('form')) missing.push('form (distribusi kalender)');
+    }
+    if (isSpklPagePath()) {
+      if (!document.querySelector('table')) missing.push('table (SPKL)');
+    }
+
+    const valid = missing.length === 0;
+    if (!valid) {
+      Logger.warn('Validasi DOM gagal. Elemen tidak ditemukan: ' + missing.join(', '));
+      UI.showResult('warning', 'Struktur Halaman Berubah', 'Elemen kritis tidak ditemukan: ' + missing.join(', ') + '. Beberapa fitur mungkin tidak berfungsi.');
+    }
+    return { valid, missing };
+  }
+
+  /* ============================================================
    * 23. INIT
    * ============================================================ */
   function init() {
+
+    const schemaValid = validateStorageSchema();
 
     spklHighlight();
     autoFillTargetPage();
@@ -5382,6 +5456,15 @@
       delegate('click', '#qm-btn-export-logs', onExportLogs);
     }
     detectAnomalies();
+
+    if (!schemaValid) {
+      UI.showResult('warning', 'Data Direset', 'Versi data sesi tidak cocok. Data lama telah dibersihkan.');
+    }
+
+    // Validate DOM structure after a short delay to allow dynamic content to load
+    if (isAttendancePagePath() || isBarcodeCreatePagePath() || isDistribusiKalenderPagePath() || isSpklPagePath()) {
+      setTimeout(validateDomStructure, 500);
+    }
 
     document.addEventListener('keydown', onKeydownDocument);
     document.addEventListener('click', onDocumentClick);
@@ -6137,6 +6220,10 @@
       }
     });
 
+    if (!headers['X-CSRF-TOKEN']) {
+      throw new Error('Token CSRF tidak ditemukan. Struktur halaman mungkin berubah.');
+    }
+
     const submitBtn = form.querySelector('button[type="submit"], input[type="submit"]');
     if (submitBtn && submitBtn.name) {
       postData.set(submitBtn.name, submitBtn.value || 'Start Distribusi');
@@ -6326,6 +6413,10 @@
         params.append(el.name, val);
       }
     });
+
+    if (!headers['X-CSRF-TOKEN']) {
+      throw new Error('Token CSRF tidak ditemukan. Struktur halaman mungkin berubah.');
+    }
 
     const action = form.getAttribute('action') || editUrl;
     const targetUrl = action.startsWith('http') ? action : `https://hris.kti.co.id${action}`;
