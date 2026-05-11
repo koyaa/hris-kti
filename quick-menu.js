@@ -217,7 +217,7 @@
    * ============================================================ */
 
   /** Parse "HH:MM" or "HH.MM" into decimal hours. */
-  function parseTime(t) {
+  function parseTimeToDecimal(t) {
     if (!t) return null;
     const parts = t.replace(':', '.').split('.');
     if (parts.length >= 2) {
@@ -231,7 +231,7 @@
 
 
   /** Simple HTML escape helper. */
-  function escHtml(str) {
+  function escapeHtml(str) {
     if (!str) return '';
     return String(str).replace(/[&<>"']/g, m => ({
       '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
@@ -330,27 +330,27 @@
     return path.includes('/distribusikalenderkerja');
   }
 
-  function getSpklAddPageKind(path = getCurrentPath()) {
+  function spklAddPageKind(path = getCurrentPath()) {
     if (path === '/spkl/add') return 'internal';
     if (path === '/spkloutsource/add') return 'outsource';
     return null;
   }
 
 
-  function getAbsenCreatePageKind(path = getCurrentPath()) {
+  function absenCreatePageKind(path = getCurrentPath()) {
     if (path === '/absenbarcode/create') return 'internal';
     if (path === '/absenbarcodeos/create') return 'outsource';
     return null;
   }
 
 
-  function isSuccessResponse(text) {
+  function isHrisSuccess(text) {
     return SUCCESS_KEYWORDS.some(kw => text.includes(kw));
   }
 
   /** Parse CSS class/style/bgcolor attributes to detect Libur/HalfDay status.
-   *  Used by both countLibur() and getRowStatus() to avoid duplicated regex. */
-  function parseRowCssFlags(tr) {
+   *  Used by both countHolidays() and getAttendanceRowStatus() to avoid duplicated regex. */
+  function getRowFlags(tr) {
     const trStr = ((tr.getAttribute('class') || '') + (tr.getAttribute('style') || '') + (tr.getAttribute('bgcolor') || '')).toLowerCase();
     const tds = tr.querySelectorAll('td');
     const td0Str = tds.length > 0 ? ((tds[0].getAttribute('class') || '') + (tds[0].getAttribute('style') || '') + (tds[0].getAttribute('bgcolor') || '')).toLowerCase() : '';
@@ -362,14 +362,14 @@
   }
 
 
-  function getMedian(values) {
+  function median(values) {
     if (!values.length) return 0;
     const sorted = [...values].sort((a, b) => a - b);
     const mid = Math.floor(sorted.length / 2);
     return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
   }
 
-  function getPerfNow() {
+  function perfNow() {
     return (typeof performance !== 'undefined' && typeof performance.now === 'function')
       ? performance.now()
       : Date.now();
@@ -396,7 +396,7 @@
 
 
   /** Safely set innerHTML using DOM-based sanitization via parseHTML. */
-  function setInnerHTML(el, html) {
+  function renderSafe(el, html) {
     if (!el) return;
     if (!html && html !== '') { el.innerHTML = html; return; }
     const doc = parseHTML(`<div>${html}</div>`);
@@ -409,19 +409,19 @@
 
   /** Set a form field value and dispatch the given events.
    *  Replaces the repeated pattern: el.value = val; el.dispatchEvent(new Event(...)) */
-  function setFieldValue(el, value, events = ['change']) {
+  function setField(el, value, events = ['change']) {
     if (!el) return;
     el.value = value;
     events.forEach(e => el.dispatchEvent(new Event(e, { bubbles: true })));
     // Auto-refresh SelectPicker if applicable
     if (el.tagName === 'SELECT' && el.classList.contains('selectpicker')) {
-      selectPickerRefresh(el);
+      refreshPicker(el);
     }
   }
 
   /** Find an option in a select element matching a predicate, select it, and dispatch change.
    *  Returns true if a match was found. */
-  function selectOption(select, matchFn) {
+  function pickOption(select, matchFn) {
     if (!select) return false;
     const options = select.querySelectorAll('option');
     for (const opt of options) {
@@ -436,7 +436,7 @@
 
 
   /** Refresh a bootstrap-selectpicker if jQuery is available. */
-  function selectPickerRefresh(select) {
+  function refreshPicker(select) {
     if (typeof window.$ !== 'undefined' && window.$(select).selectpicker) {
       window.$(select).selectpicker('refresh');
     }
@@ -444,7 +444,7 @@
 
 
   /** Custom Event Delegation helper. */
-  function delegate(eventName, selector, handler) {
+  function on(eventName, selector, handler) {
     document.addEventListener(eventName, function (e) {
       let target = e.target;
       while (target && target !== document) {
@@ -459,7 +459,7 @@
 
 
   /** Wait for element using MutationObserver (replaces setInterval polling). */
-  function waitForElement(selector, timeout = 5000) {
+  function waitFor(selector, timeout = 5000) {
     return new Promise((resolve, reject) => {
       const el = document.querySelector(selector);
       if (el) return resolve(el);
@@ -565,7 +565,7 @@
    * 4. ROUTE BUILDERS
    * ============================================================ */
 
-  function getEmployeeRouteSet(nrp) {
+  function employeeRoutes(nrp) {
     return isOutsourceNrp(nrp)
       ? {
         search: ROUTES.KARYAWANOS_SEARCH(nrp),
@@ -583,22 +583,22 @@
 
 
   /** Shorthand: select internal or OS route based on NRP type. */
-  function getRoute(nrp, internalRoute, osRoute) {
+  function routeByNrp(nrp, internalRoute, osRoute) {
     return isOutsourceNrp(nrp) ? osRoute : internalRoute;
   }
 
-  function getAttendanceUrl(bulan, tahun, nrp) {
-    return getRoute(nrp, ROUTES.TABEL_HADIR, ROUTES.TABEL_HADIR_OS)(bulan, tahun, nrp);
+  function attendanceUrl(bulan, tahun, nrp) {
+    return routeByNrp(nrp, ROUTES.TABEL_HADIR, ROUTES.TABEL_HADIR_OS)(bulan, tahun, nrp);
   }
 
-  function getDistribusiBaseUrl(nrp) {
-    return getRoute(nrp, ROUTES.DISTRIBUSI, ROUTES.DISTRIBUSI_OS)(nrp);
+  function distribusiUrl(nrp) {
+    return routeByNrp(nrp, ROUTES.DISTRIBUSI, ROUTES.DISTRIBUSI_OS)(nrp);
   }
 
   /** Build auto-distribusi link for a given date + shift. */
-  function getDistribusiLink(ctx, tglAwal, shiftVal, tglAkhir = null) {
+  function buildDistribusiLink(ctx, tglAwal, shiftVal, tglAkhir = null) {
     if (!ctx.nrp) return '';
-    const base = getDistribusiBaseUrl(ctx.nrp);
+    const base = distribusiUrl(ctx.nrp);
 
     // If tglAwal is already a full date (YYYY-MM-DD), use it directly
     const dAwal = (tglAwal && tglAwal.includes('-')) ? tglAwal : `${ctx.tahun}-${String(ctx.bulan).padStart(2, '0')}-${String(tglAwal).padStart(2, '0')}`;
@@ -609,7 +609,7 @@
 
 
   /** Build Kehadiran (Barcode) link for a given context. */
-  function getKehadiranLink(ctx) {
+  function buildKehadiranLink(ctx) {
     if (!ctx.nrp) return '';
     return (isOutsourceNrp(ctx.nrp) ? ROUTES.ABSEN_BARCODE_OS : ROUTES.ABSEN_BARCODE)(ctx.tahun, String(ctx.bulan).padStart(2, '0'), ctx.nrp);
   }
@@ -622,32 +622,32 @@
     return ROUTES.SPKL_ONLINE(ctx.tahun, bulan, min, max, ctx.nrp);
   }
 
-  function getEmployeeEditUrl(nrp, id) {
-    return getEmployeeRouteSet(nrp).edit(id);
+  function employeeEditUrl(nrp, id) {
+    return employeeRoutes(nrp).edit(id);
   }
 
-  function getSpklBaseUrl(nrp) {
-    return getRoute(nrp, ROUTES.SPKL_BASE, ROUTES.SPKL_OS_BASE);
+  function spklBaseUrl(nrp) {
+    return routeByNrp(nrp, ROUTES.SPKL_BASE, ROUTES.SPKL_OS_BASE);
   }
 
-  function getSpklCreateUrl(nrp) {
-    return getRoute(nrp, ROUTES.SPKL_CREATE, ROUTES.SPKL_OS_CREATE);
+  function spklCreateUrl(nrp) {
+    return routeByNrp(nrp, ROUTES.SPKL_CREATE, ROUTES.SPKL_OS_CREATE);
   }
 
-  function getSpklAddUrlByKind(kind) {
+  function spklAddUrl(kind) {
     return kind === 'outsource' ? ROUTES.SPKL_OS_ADD : ROUTES.SPKL_ADD;
   }
 
-  function getAbsenCreateUrl(nrp) {
-    return getRoute(nrp, ROUTES.ABSEN_BARCODE_CREATE, ROUTES.ABSEN_BARCODE_OS_CREATE);
+  function absenCreateUrl(nrp) {
+    return routeByNrp(nrp, ROUTES.ABSEN_BARCODE_CREATE, ROUTES.ABSEN_BARCODE_OS_CREATE);
   }
 
   function getAbsenCreateUrlByKind(kind) {
     return kind === 'outsource' ? ROUTES.ABSEN_BARCODE_OS_CREATE : ROUTES.ABSEN_BARCODE_CREATE;
   }
 
-  function getAbsenAddUrl(nrp) {
-    return getRoute(nrp, ROUTES.ABSEN_BARCODE_ADD, ROUTES.ABSEN_BARCODE_OS_ADD);
+  function absenAddUrl(nrp) {
+    return routeByNrp(nrp, ROUTES.ABSEN_BARCODE_ADD, ROUTES.ABSEN_BARCODE_OS_ADD);
   }
 
   /* ============================================================
@@ -656,7 +656,7 @@
 
 
   /** Fetch wrapper with timeout. Returns response text. */
-  async function req(url, timeout = 15000) {
+  async function hrisFetch(url, timeout = 15000) {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), timeout);
     try {
@@ -681,7 +681,7 @@
     }
   }
 
-  function buildFormPayload(doc, overrides = {}) {
+  function extractForm(doc, overrides = {}) {
     const form = doc.querySelector('form');
     if (!form) throw new Error('Form tidak ditemukan.');
     const params = new URLSearchParams();
@@ -725,8 +725,8 @@
     }).finally(() => UI.hideGlobalLoader());
   }
 
-  function buildEmployeeUrls(nrp) {
-    const routeSet = getEmployeeRouteSet(nrp);
+  function employeeUrlSet(nrp) {
+    const routeSet = employeeRoutes(nrp);
     return {
       isOS: isOutsourceNrp(nrp),
       searchUrl: routeSet.search,
@@ -739,7 +739,7 @@
     };
   }
 
-  function findDetailUrl(doc, nrp) {
+  function findEmployeeDetailLink(doc, nrp) {
     let detailUrl = '';
     const rows = doc.querySelectorAll('table tbody tr');
     rows.forEach(function (row) {
@@ -764,7 +764,7 @@
 
 
   /** Unified field value extractor (input or select). */
-  function getFieldValue(doc, fieldName) {
+  function extractFieldValue(doc, fieldName) {
     const el = doc.querySelector(`[name="${fieldName}"]`);
     if (!el) return '';
     if (el.tagName === 'SELECT') {
@@ -774,7 +774,7 @@
     return el.value.trim();
   }
 
-  function getNamaKaryawan(doc) {
+  function extractEmployeeName(doc) {
     const selectors = ['input[name="name"]', 'input[name="nama"]', 'input[name="nama_karyawan"]'];
     for (const sel of selectors) {
       const el = doc.querySelector(sel);
@@ -798,18 +798,18 @@
   }
 
   /** Unified employee data fetcher with sessionStorage cache. */
-  async function getEmp(nrp) {
+  async function fetchEmployee(nrp) {
     const cached = readEmployeeCache(nrp);
     if (cached) return { found: true, ...cached };
-    const urls = buildEmployeeUrls(nrp);
+    const urls = employeeUrlSet(nrp);
     let searchDoc, detailUrl;
 
     // Retry logic for NRP search (Bug Fix 1)
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
-        const html = await req(urls.searchUrl);
+        const html = await hrisFetch(urls.searchUrl);
         searchDoc = parseHTML(html);
-        detailUrl = findDetailUrl(searchDoc, nrp);
+        detailUrl = findEmployeeDetailLink(searchDoc, nrp);
         if (detailUrl) break;
       } catch (e) {
         if (attempt === 3) throw e;
@@ -820,8 +820,8 @@
     if (!detailUrl) return { found: false };
     const id = detailUrl.split('?')[0].split('/').filter(Boolean).pop();
     const [genHtml, profHtml] = await Promise.all([
-      req(urls.buildGeneralUrl(id)),
-      req(urls.buildProfileUrl(id))
+      hrisFetch(urls.buildGeneralUrl(id)),
+      hrisFetch(urls.buildProfileUrl(id))
     ]);
     const doc = parseHTML(genHtml);
     const profDoc = parseHTML(profHtml);
@@ -838,12 +838,12 @@
       found: true,
       id: id,
       editUrl: editUrl,
-      jk: getFieldValue(doc, 'kode_jam_kerja').split('-')[0].trim(),
-      KK: getFieldValue(doc, 'kode_kalender_kerja'),
-      nama: getNamaKaryawan(profDoc) || getNamaKaryawan(doc),
-      bagian: getFieldValue(doc, 'kode_bagian') || '',
-      seksi: getFieldValue(doc, 'kode_seksi') || '',
-      group: getFieldValue(doc, 'kode_group') || ''
+      jk: extractFieldValue(doc, 'kode_jam_kerja').split('-')[0].trim(),
+      KK: extractFieldValue(doc, 'kode_kalender_kerja'),
+      nama: extractEmployeeName(profDoc) || extractEmployeeName(doc),
+      bagian: extractFieldValue(doc, 'kode_bagian') || '',
+      seksi: extractFieldValue(doc, 'kode_seksi') || '',
+      group: extractFieldValue(doc, 'kode_group') || ''
     };
     writeEmployeeCache(nrp, emp);
     return emp;
@@ -854,9 +854,9 @@
   async function fetchAttendance(nrp, bulan, tahun, bagian, seksi) {
     const prof = startProfile('fetchAttendance', { nrp, bulan, tahun });
     try {
-      const html = await req(getAttendanceUrl(bulan, tahun, nrp));
+      const html = await hrisFetch(attendanceUrl(bulan, tahun, nrp));
       const doc = parseHTML(html);
-      return scanAttendanceTable(doc, { tahun, bulan, nrp, bagian, seksi });
+      return scanAttendance(doc, { tahun, bulan, nrp, bagian, seksi });
     } finally {
       finishProfile(prof, { nrp });
     }
@@ -973,14 +973,14 @@
 
   function startProfile(label, meta = {}) {
     if (!state.debug) return null;
-    return { label, meta, startedAt: getPerfNow() };
+    return { label, meta, startedAt: perfNow() };
   }
 
 
   function finishProfile(token, meta = {}) {
     if (!token) return 0;
 
-    const duration = getPerfNow() - token.startedAt;
+    const duration = perfNow() - token.startedAt;
     if (!state.profileStats) state.profileStats = {};
     if (!state.profileFlags) state.profileFlags = {};
 
@@ -999,12 +999,12 @@
     state.profileStats[token.label] = stats;
 
     const recent = stats.samples.slice(-PROFILE_CONFIG.MEDIAN_SAMPLE_SIZE);
-    const median = recent.length >= PROFILE_CONFIG.MEDIAN_SAMPLE_SIZE ? getMedian(recent) : null;
+    const medianVal = recent.length >= PROFILE_CONFIG.MEDIAN_SAMPLE_SIZE ? median(recent) : null;
     const payload = {
       ms: Number(duration.toFixed(2)),
       avgMs: Number((stats.total / stats.count).toFixed(2)),
       maxMs: Number(stats.max.toFixed(2)),
-      medianMs: median === null ? null : Number(median.toFixed(2)),
+      medianMs: medianVal === null ? null : Number(medianVal.toFixed(2)),
       samples: stats.count,
       ...token.meta,
       ...meta
@@ -1012,11 +1012,11 @@
 
     Logger.debug(`[PROFILE] ${token.label}`, payload);
 
-    if (median !== null && median >= PROFILE_CONFIG.HOT_SYNC_MS) {
+    if (medianVal !== null && medianVal >= PROFILE_CONFIG.HOT_SYNC_MS) {
       const warnKey = `${token.label}:sync`;
       if (!state.profileFlags[warnKey]) {
         state.profileFlags[warnKey] = true;
-        Logger.warn(`Profiling: ${token.label} median ${median.toFixed(2)}ms melewati ambang ${PROFILE_CONFIG.HOT_SYNC_MS}ms.`, payload);
+        Logger.warn(`Profiling: ${token.label} median ${medianVal.toFixed(2)}ms melewati ambang ${PROFILE_CONFIG.HOT_SYNC_MS}ms.`, payload);
       }
     }
 
@@ -1033,7 +1033,7 @@
    * 7. ANOMALY DETECTION
    * ============================================================ */
 
-  function isShiftChecked(td) {
+  function hasShiftMark(td) {
     if (!td) return false;
     const text = td.textContent.trim().toLowerCase();
     if (text !== '' && (text.includes('check') || text.includes('ok') || text.includes('✓') || text.includes('☑') || text.includes('v'))) return true;
@@ -1043,7 +1043,7 @@
     return false;
   }
 
-  function tebakShiftSebenarnya(waktuMsk, rules) {
+  function guessActualShift(waktuMsk, rules) {
     if (waktuMsk === null) return '1';
     const jamMentah = waktuMsk >= 24.0 ? waktuMsk - 24.0 : waktuMsk;
     if (jamMentah >= rules.shift1.jamTebakMulai && jamMentah <= rules.shift1.jamTebakAkhir) return '1';
@@ -1052,7 +1052,7 @@
   }
 
   /** Count rows marked as libur by CSS classes/colors. */
-  function countLibur(docContext) {
+  function countHolidays(docContext) {
     const root = docContext || document;
     const trs = root.querySelectorAll('table tbody tr');
     let total = 0;
@@ -1060,7 +1060,7 @@
     trs.forEach(tr => {
       const tds = tr.querySelectorAll('td');
       if (tds.length < 12 || tr.textContent.toLowerCase().includes('total')) return;
-      const { isLiburColor } = parseRowCssFlags(tr);
+      const { isLiburColor } = getRowFlags(tr);
       if (isLiburColor) total++;
     });
     return total;
@@ -1068,11 +1068,11 @@
 
 
   /** Unified row status detector (Libur, HalfDay, Normal). */
-  function getRowStatus(tr) {
+  function getAttendanceRowStatus(tr) {
     const tds = tr.querySelectorAll('td');
     if (tds.length === 0) return { isLibur: false, isHalfDay: false, ketText: '' };
 
-    const { isLiburColor, isHalfDayColor } = parseRowCssFlags(tr);
+    const { isLiburColor, isHalfDayColor } = getRowFlags(tr);
 
     let ketText = '';
     if (tds.length > COL.KET) ketText = tds[COL.KET].textContent.trim().toUpperCase();
@@ -1084,7 +1084,7 @@
   }
 
   /** Push an anomaly record. Pure — no DOM side effects. */
-  function markAnomalyCell(anomalies, tglText, colIndex, title, customLink, cekSpklCells, fullDate, shiftVal) {
+  function flagCell(anomalies, tglText, colIndex, title, customLink, cekSpklCells, fullDate, shiftVal) {
     anomalies.push({ tgl: tglText, fullDate, colIndex, msg: title, link: customLink || '', shift: shiftVal });
     if (title.includes('Cek SPKL') && cekSpklCells) {
       if (!cekSpklCells.some(c => c.tgl === tglText && c.colIndex === colIndex)) {
@@ -1094,7 +1094,7 @@
   }
 
 
-  function addAnomaly(tgl, col, msg, link = '') {
+  function pushAnomaly(tgl, col, msg, link = '') {
     state.anomalies.push({ tgl, col, msg, link });
   }
 
@@ -1130,7 +1130,7 @@
         td.setAttribute('title', newTitle);
 
         if (!td.querySelector('.qm-fix-dot')) {
-          const linkStr = a.link ? `data-fix-link="${escHtml(a.link)}" data-fix-date="${escHtml(String(a.tgl))}" data-full-date="${escHtml(String(a.fullDate || ''))}"` : '';
+          const linkStr = a.link ? `data-fix-link="${escapeHtml(a.link)}" data-fix-date="${escapeHtml(String(a.tgl))}" data-full-date="${escapeHtml(String(a.fullDate || ''))}"` : '';
 
           let titleStr = 'Buka Halaman Kehadiran';
           if (a.msg === 'Buka Halaman Kehadiran') titleStr = 'Buka Halaman Kehadiran';
@@ -1163,22 +1163,22 @@
 
   function validateShiftRow(tds, tglText, mskText, klrText, rules, ctx, cekSpklCells, anomalies, isLibur, isHalfDay, fullDate) {
     const ketText = tds[COL.KET].textContent.trim().toUpperCase();
-    let shift1 = isShiftChecked(tds[COL.SHIFT1]);
-    let shift2 = isShiftChecked(tds[COL.SHIFT2]);
-    let shift3 = isShiftChecked(tds[COL.SHIFT3]);
+    let shift1 = hasShiftMark(tds[COL.SHIFT1]);
+    let shift2 = hasShiftMark(tds[COL.SHIFT2]);
+    let shift3 = hasShiftMark(tds[COL.SHIFT3]);
 
     // No shift checked but has clock data or is Mangkir → guess shift
     if (!shift1 && !shift2 && !shift3 && (mskText || klrText || ketText === 'A')) {
-      const guessed = tebakShiftSebenarnya(parseTime(mskText), rules);
-      const link = getDistribusiLink(ctx, tglText, guessed);
+      const guessed = guessActualShift(parseTimeToDecimal(mskText), rules);
+      const link = buildDistribusiLink(ctx, tglText, guessed);
       const msg = 'Shift kosong';
-      markAnomalyCell(anomalies, tglText, COL.SHIFT1, msg, link, cekSpklCells, fullDate);
-      markAnomalyCell(anomalies, tglText, COL.SHIFT2, msg, link, cekSpklCells, fullDate);
-      markAnomalyCell(anomalies, tglText, COL.SHIFT3, msg, link, cekSpklCells, fullDate);
+      flagCell(anomalies, tglText, COL.SHIFT1, msg, link, cekSpklCells, fullDate);
+      flagCell(anomalies, tglText, COL.SHIFT2, msg, link, cekSpklCells, fullDate);
+      flagCell(anomalies, tglText, COL.SHIFT3, msg, link, cekSpklCells, fullDate);
     }
 
     // Derive active shift from clock-in if still unknown
-    const mskTime = parseTime(mskText);
+    const mskTime = parseTimeToDecimal(mskText);
     if (!shift1 && !shift2 && !shift3) {
       if (mskTime !== null) {
         if (mskTime >= rules.shift1.jamTebakMulai && mskTime <= rules.shift1.jamTebakAkhir) shift1 = true;
@@ -1193,7 +1193,7 @@
 
 
   /** Determine half-day Pulang Awal threshold based on actual clock-in time. */
-  function getHalfDayPulangAwalThreshold(shift1, shift2, shift3, mskTime) {
+  function halfDayLeaveThreshold(shift1, shift2, shift3, mskTime) {
     if (shift1) return HALFDAY_RULES.shift1.batasPulangAwal;
     if (shift3) return HALFDAY_RULES.shift3.batasPulangAwal;
     if (shift2) {
@@ -1224,7 +1224,7 @@
 
     // Pulang Awal threshold: half-day uses shorter threshold
     const paThreshold = isHalfDay
-      ? getHalfDayPulangAwalThreshold(shift1, shift2, shift3, mskTime)
+      ? halfDayLeaveThreshold(shift1, shift2, shift3, mskTime)
       : null;
 
     // Dynamic Shift 1 Models
@@ -1253,35 +1253,35 @@
       if (adjMsk !== null && adjMsk < s1MasukLembur) mskLembur = true;
       if (adjKlr !== null && adjKlr > s1KeluarLembur) klrLembur = true;
       if (adjMsk !== null && adjMsk > s1Terlambat) {
-        if (adjMsk > THRESHOLDS.SHIFT1_MSK_UPPER_BATAS) markAnomalyCell(anomalies, tglText, COL.SHIFT1, 'Cek Distribusi', getDistribusiLink(ctx, tglText, tebakShiftSebenarnya(adjMsk, rules)), cekSpklCells, fullDate);
-        else if (adjMsk !== adjKlr) markAnomalyCell(anomalies, tglText, COL.MSK, 'Terlambat Shift I', '', cekSpklCells, fullDate);
+        if (adjMsk > THRESHOLDS.SHIFT1_MSK_UPPER_BATAS) flagCell(anomalies, tglText, COL.SHIFT1, 'Cek Distribusi', buildDistribusiLink(ctx, tglText, guessActualShift(adjMsk, rules)), cekSpklCells, fullDate);
+        else if (adjMsk !== adjKlr) flagCell(anomalies, tglText, COL.MSK, 'Terlambat Shift I', '', cekSpklCells, fullDate);
       }
       const paShift1 = isHalfDay && paThreshold !== null ? paThreshold : s1PulangAwal;
-      if (adjKlr !== null && adjKlr < paShift1 && adjMsk !== adjKlr) markAnomalyCell(anomalies, tglText, COL.KLR, 'Pulang awal Shift I', getKehadiranLink(ctx), cekSpklCells, fullDate, '1');
+      if (adjKlr !== null && adjKlr < paShift1 && adjMsk !== adjKlr) flagCell(anomalies, tglText, COL.KLR, 'Pulang awal Shift I', buildKehadiranLink(ctx), cekSpklCells, fullDate, '1');
     } else if (shift2) {
       if (adjMsk !== null && adjMsk < rules.shift2.batasMasukLembur) mskLembur = true;
       if (adjKlr !== null && adjKlr > rules.shift2.batasKeluarLembur) klrLembur = true;
       if (adjMsk !== null) {
-        if (adjMsk < THRESHOLDS.SHIFT2_MSK_LOWER_BATAS || adjMsk > THRESHOLDS.SHIFT2_MSK_UPPER_BATAS) markAnomalyCell(anomalies, tglText, COL.SHIFT2, 'Cek Distribusi', getDistribusiLink(ctx, tglText, tebakShiftSebenarnya(adjMsk, rules)), cekSpklCells, fullDate, '2');
-        else if (adjMsk > rules.shift2.batasTerlambatMasuk && adjMsk !== adjKlr) markAnomalyCell(anomalies, tglText, COL.MSK, 'Terlambat Shift II', '', cekSpklCells, fullDate, '2');
+        if (adjMsk < THRESHOLDS.SHIFT2_MSK_LOWER_BATAS || adjMsk > THRESHOLDS.SHIFT2_MSK_UPPER_BATAS) flagCell(anomalies, tglText, COL.SHIFT2, 'Cek Distribusi', buildDistribusiLink(ctx, tglText, guessActualShift(adjMsk, rules)), cekSpklCells, fullDate, '2');
+        else if (adjMsk > rules.shift2.batasTerlambatMasuk && adjMsk !== adjKlr) flagCell(anomalies, tglText, COL.MSK, 'Terlambat Shift II', '', cekSpklCells, fullDate, '2');
       }
       const paShift2 = isHalfDay && paThreshold !== null ? paThreshold : rules.shift2.batasPulangAwal;
-      if (adjKlr !== null && adjKlr < paShift2 && adjMsk !== adjKlr) markAnomalyCell(anomalies, tglText, COL.KLR, 'Pulang awal Shift II', getKehadiranLink(ctx), cekSpklCells, fullDate, '2');
+      if (adjKlr !== null && adjKlr < paShift2 && adjMsk !== adjKlr) flagCell(anomalies, tglText, COL.KLR, 'Pulang awal Shift II', buildKehadiranLink(ctx), cekSpklCells, fullDate, '2');
     } else if (shift3) {
       if (adjMsk !== null && adjMsk > rules.shift3.batasMasukLemburAwal && adjMsk < rules.shift3.batasMasukLemburAkhir) mskLembur = true;
       if (adjKlr !== null && adjKlr > rules.shift3.batasKeluarLembur) klrLembur = true;
       if (adjMsk !== null) {
-        if (adjMsk < rules.shift3.batasAwalMasuk || adjMsk > THRESHOLDS.SHIFT3_MSK_UPPER_BATAS) markAnomalyCell(anomalies, tglText, COL.SHIFT3, 'Cek Distribusi', getDistribusiLink(ctx, tglText, tebakShiftSebenarnya(adjMsk, rules)), cekSpklCells, fullDate, '3');
-        else if (adjMsk > rules.shift3.batasTerlambatMasuk && adjMsk !== adjKlr) markAnomalyCell(anomalies, tglText, COL.MSK, 'Terlambat Shift III', '', cekSpklCells, fullDate, '3');
+        if (adjMsk < rules.shift3.batasAwalMasuk || adjMsk > THRESHOLDS.SHIFT3_MSK_UPPER_BATAS) flagCell(anomalies, tglText, COL.SHIFT3, 'Cek Distribusi', buildDistribusiLink(ctx, tglText, guessActualShift(adjMsk, rules)), cekSpklCells, fullDate, '3');
+        else if (adjMsk > rules.shift3.batasTerlambatMasuk && adjMsk !== adjKlr) flagCell(anomalies, tglText, COL.MSK, 'Terlambat Shift III', '', cekSpklCells, fullDate, '3');
       }
       const paShift3 = isHalfDay && paThreshold !== null ? paThreshold : rules.shift3.batasPulangAwal;
-      if (adjKlr !== null && adjKlr < paShift3 && adjMsk !== adjKlr) markAnomalyCell(anomalies, tglText, COL.KLR, 'Pulang awal Shift III', getKehadiranLink(ctx), cekSpklCells, fullDate, '3');
+      if (adjKlr !== null && adjKlr < paShift3 && adjMsk !== adjKlr) flagCell(anomalies, tglText, COL.KLR, 'Pulang awal Shift III', buildKehadiranLink(ctx), cekSpklCells, fullDate, '3');
     }
     return { mskLembur, klrLembur };
   }
 
-  function scanAttendanceTable(doc, ctx) {
-    const prof = startProfile('scanAttendanceTable', { nrp: ctx?.nrp, bulan: ctx?.bulan, tahun: ctx?.tahun });
+  function scanAttendance(doc, ctx) {
+    const prof = startProfile('scanAttendance', { nrp: ctx?.nrp, bulan: ctx?.bulan, tahun: ctx?.tahun });
     const anomalies = [];
     const absentDates = [];
     const cekSpklCells = [];
@@ -1295,7 +1295,7 @@
       keterangan: {}
     };
 
-    const totalLibur = countLibur(doc);
+    const totalLibur = countHolidays(doc);
     const is5HariKerja = totalLibur >= THRESHOLDS.MIN_LIBUR_5_HARI_KERJA;
     const rules = structuredClone(SHIFT_RULES);
     if (is5HariKerja) {
@@ -1311,7 +1311,7 @@
       const tds = tr.querySelectorAll('td');
       if (tds.length < 12 || tr.textContent.toLowerCase().includes('total')) return;
       const tgl = tds[COL.TGL].textContent.trim();
-      const hasChecked = isShiftChecked(tds[COL.SHIFT1]) || isShiftChecked(tds[COL.SHIFT2]) || isShiftChecked(tds[COL.SHIFT3]);
+      const hasChecked = hasShiftMark(tds[COL.SHIFT1]) || hasShiftMark(tds[COL.SHIFT2]) || hasShiftMark(tds[COL.SHIFT3]);
       if (tgl && hasChecked) dateShiftCounts[tgl] = (dateShiftCounts[tgl] || 0) + 1;
     });
 
@@ -1324,16 +1324,16 @@
 
       const mskText = tds[COL.MSK].textContent.trim();
       const klrText = tds[COL.KLR].textContent.trim();
-      const { isLibur, isHalfDay, ketText } = getRowStatus(tr);
+      const { isLibur, isHalfDay, ketText } = getAttendanceRowStatus(tr);
 
       const shiftInfo = validateShiftRow(tds, tglText, mskText, klrText, rules, ctx, cekSpklCells, anomalies, isLibur, isHalfDay, fullDate);
       const { shift1, shift2, shift3, activeShift, mskTime } = shiftInfo;
-      const klrTime = parseTime(klrText);
+      const klrTime = parseTimeToDecimal(klrText);
 
       // Detect multiple rows for same date with checked shifts (Barcode overlap/error)
       const isSaturday = new Date(ctx.tahun, ctx.bulan - 1, parseInt(tglText)).getDay() === 6;
       if (activeShift && dateShiftCounts[tglText] > 1 && !isHalfDay && !isSaturday) {
-        const barcodeLink = getKehadiranLink(ctx);
+        const barcodeLink = buildKehadiranLink(ctx);
         let msg = 'Duplikasi Shift pada tanggal yang sama';
 
         let adjMsk = mskTime;
@@ -1349,21 +1349,21 @@
           msg = 'Double entry / Error Barcode (MSK >= KLR)';
         }
 
-        markAnomalyCell(anomalies, tglText, COL.TGL, msg, barcodeLink, cekSpklCells, fullDate);
-        if (shift1) markAnomalyCell(anomalies, tglText, COL.SHIFT1, msg, barcodeLink, cekSpklCells, fullDate);
-        if (shift2) markAnomalyCell(anomalies, tglText, COL.SHIFT2, msg, barcodeLink, cekSpklCells, fullDate);
-        if (shift3) markAnomalyCell(anomalies, tglText, COL.SHIFT3, msg, barcodeLink, cekSpklCells, fullDate);
+        flagCell(anomalies, tglText, COL.TGL, msg, barcodeLink, cekSpklCells, fullDate);
+        if (shift1) flagCell(anomalies, tglText, COL.SHIFT1, msg, barcodeLink, cekSpklCells, fullDate);
+        if (shift2) flagCell(anomalies, tglText, COL.SHIFT2, msg, barcodeLink, cekSpklCells, fullDate);
+        if (shift3) flagCell(anomalies, tglText, COL.SHIFT3, msg, barcodeLink, cekSpklCells, fullDate);
       }
 
       if (activeShift && mskTime !== null && !isLibur && !isHalfDay) {
-        const guessed = tebakShiftSebenarnya(mskTime, rules);
+        const guessed = guessActualShift(mskTime, rules);
         if (guessed !== activeShift) {
           const msg = 'Jam MSK tidak cocok dengan Shift ' + activeShift + ' (Terdeteksi Shift ' + guessed + ')';
-          const link = getDistribusiLink(ctx, tglText, guessed);
-          markAnomalyCell(anomalies, tglText, COL.MSK, msg, link, cekSpklCells, fullDate);
-          if (shift1) markAnomalyCell(anomalies, tglText, COL.SHIFT1, msg, '', cekSpklCells, fullDate);
-          if (shift2) markAnomalyCell(anomalies, tglText, COL.SHIFT2, msg, '', cekSpklCells, fullDate);
-          if (shift3) markAnomalyCell(anomalies, tglText, COL.SHIFT3, msg, '', cekSpklCells, fullDate);
+          const link = buildDistribusiLink(ctx, tglText, guessed);
+          flagCell(anomalies, tglText, COL.MSK, msg, link, cekSpklCells, fullDate);
+          if (shift1) flagCell(anomalies, tglText, COL.SHIFT1, msg, '', cekSpklCells, fullDate);
+          if (shift2) flagCell(anomalies, tglText, COL.SHIFT2, msg, '', cekSpklCells, fullDate);
+          if (shift3) flagCell(anomalies, tglText, COL.SHIFT3, msg, '', cekSpklCells, fullDate);
         }
       }
 
@@ -1375,15 +1375,15 @@
         absentDates.push({ date: tglText, tr: tr });
       }
 
-      const barcodeLink = getKehadiranLink(ctx);
+      const barcodeLink = buildKehadiranLink(ctx);
 
       if (!isLibur) {
-        if (!mskText && !ketText) markAnomalyCell(anomalies, tglText, COL.MSK, 'Buka Halaman Kehadiran', barcodeLink, cekSpklCells, fullDate);
-        if (!klrText && !ketText) markAnomalyCell(anomalies, tglText, COL.KLR, 'Buka Halaman Kehadiran', barcodeLink, cekSpklCells, fullDate);
+        if (!mskText && !ketText) flagCell(anomalies, tglText, COL.MSK, 'Buka Halaman Kehadiran', barcodeLink, cekSpklCells, fullDate);
+        if (!klrText && !ketText) flagCell(anomalies, tglText, COL.KLR, 'Buka Halaman Kehadiran', barcodeLink, cekSpklCells, fullDate);
       } else {
         if (mskText || klrText) {
-          if (!mskText) markAnomalyCell(anomalies, tglText, COL.MSK, 'Buka Halaman Kehadiran', barcodeLink, cekSpklCells, fullDate);
-          if (!klrText) markAnomalyCell(anomalies, tglText, COL.KLR, 'Buka Halaman Kehadiran', barcodeLink, cekSpklCells, fullDate);
+          if (!mskText) flagCell(anomalies, tglText, COL.MSK, 'Buka Halaman Kehadiran', barcodeLink, cekSpklCells, fullDate);
+          if (!klrText) flagCell(anomalies, tglText, COL.KLR, 'Buka Halaman Kehadiran', barcodeLink, cekSpklCells, fullDate);
         }
       }
 
@@ -1410,20 +1410,20 @@
       rekaps.otp += valOtp;
       rekaps.ota += (valOtb + valOtl);
 
-      if (valOtb > THRESHOLDS.OT_BATAS_WAJAR) markAnomalyCell(anomalies, tglText, COL.OTB, 'Angka OTB tidak wajar', '', cekSpklCells, fullDate);
-      if (valOtl > THRESHOLDS.OT_BATAS_WAJAR) markAnomalyCell(anomalies, tglText, COL.OTL, 'Angka OTL tidak wajar', '', cekSpklCells, fullDate);
-      if (valOtp > THRESHOLDS.OT_BATAS_WAJAR) markAnomalyCell(anomalies, tglText, COL.OTP, 'Angka OTP tidak wajar', '', cekSpklCells, fullDate);
+      if (valOtb > THRESHOLDS.OT_BATAS_WAJAR) flagCell(anomalies, tglText, COL.OTB, 'Angka OTB tidak wajar', '', cekSpklCells, fullDate);
+      if (valOtl > THRESHOLDS.OT_BATAS_WAJAR) flagCell(anomalies, tglText, COL.OTL, 'Angka OTL tidak wajar', '', cekSpklCells, fullDate);
+      if (valOtp > THRESHOLDS.OT_BATAS_WAJAR) flagCell(anomalies, tglText, COL.OTP, 'Angka OTP tidak wajar', '', cekSpklCells, fullDate);
 
       const hasAnyOT = parseFloat(otbText) > 0 || parseFloat(otlText) > 0 || parseFloat(otpText) > 0;
       if ((ot.mskLembur || ot.klrLembur) && !hasAnyOT) {
         const d = String(tglText).padStart(2, '0');
         const spklUrl = ROUTES.SPKL_ONLINE(ctx.tahun, String(ctx.bulan).padStart(2, '0'), d, d, ctx.nrp);
         const sVal = activeShift || '';
-        markAnomalyCell(anomalies, tglText, COL.OTB, 'Cek SPKL', spklUrl, cekSpklCells, fullDate, sVal);
-        markAnomalyCell(anomalies, tglText, COL.OTL, 'Cek SPKL', spklUrl, cekSpklCells, fullDate, sVal);
-        markAnomalyCell(anomalies, tglText, COL.OTP, 'Cek SPKL', spklUrl, cekSpklCells, fullDate, sVal);
-        if (ot.mskLembur) markAnomalyCell(anomalies, tglText, COL.MSK, 'Cek SPKL', spklUrl, cekSpklCells, fullDate, sVal);
-        if (ot.klrLembur) markAnomalyCell(anomalies, tglText, COL.KLR, 'Cek SPKL', spklUrl, cekSpklCells, fullDate, sVal);
+        flagCell(anomalies, tglText, COL.OTB, 'Cek SPKL', spklUrl, cekSpklCells, fullDate, sVal);
+        flagCell(anomalies, tglText, COL.OTL, 'Cek SPKL', spklUrl, cekSpklCells, fullDate, sVal);
+        flagCell(anomalies, tglText, COL.OTP, 'Cek SPKL', spklUrl, cekSpklCells, fullDate, sVal);
+        if (ot.mskLembur) flagCell(anomalies, tglText, COL.MSK, 'Cek SPKL', spklUrl, cekSpklCells, fullDate, sVal);
+        if (ot.klrLembur) flagCell(anomalies, tglText, COL.KLR, 'Cek SPKL', spklUrl, cekSpklCells, fullDate, sVal);
       }
     });
 
@@ -1450,7 +1450,7 @@
       if (anomaliTab) anomaliTab.classList.remove('qm-tab-loading');
 
       const ctx = getPageContext();
-      const result = scanAttendanceTable(document, ctx);
+      const result = scanAttendance(document, ctx);
       state.anomalies = result.anomalies;
 
       applyMark(document, result.anomalies);
@@ -1468,11 +1468,11 @@
    * 8. BATCH PROCESSING
    * ============================================================ */
 
-  function parseBatchNrps(text) {
+  function parseNrpList(text) {
     return text.split(/[\n,]+/).map(s => s.trim()).filter(s => /^\d{4}$|^\d{8}$/.test(s));
   }
 
-  function runBatchCheck() {
+  function startBatchAnomalyCheck() {
     const inputMulti = document.getElementById('qm-input-multi-nrp');
     const inputBulan = document.getElementById('qm-input-bulan');
     const inputTahun = document.getElementById('qm-input-tahun');
@@ -1481,7 +1481,7 @@
     const progress = document.getElementById('qm-batch-progress');
     const results = document.getElementById('qm-batch-results');
 
-    const nrps = parseBatchNrps(inputMulti ? inputMulti.value : '');
+    const nrps = parseNrpList(inputMulti ? inputMulti.value : '');
     if (nrps.length === 0) { UI.showResult('warning', 'Data Tidak Valid', 'Masukkan NRP yang valid (4 atau 8 digit).'); return; }
     if (nrps.length > APP_CONFIG.BATCH_MAX_LIMIT) { UI.showResult('warning', 'Terlalu Banyak', `Maksimal ${APP_CONFIG.BATCH_MAX_LIMIT} NRP per batch.`); return; }
 
@@ -1491,19 +1491,19 @@
     state.batchTahun = Math.min(2035, Math.max(2020, localTahun));
     state.batchTotal = nrps.length;
     state.batchAborted = false;
-    const prof = startProfile('runBatchCheck:init');
+    const prof = startProfile('startBatchAnomalyCheck:init');
 
     state.batchQueue = nrps.map(nrp => ({ nrp, status: 'pending', msg: '' }));
     state.batchResults = [];
     state.batchLogs = [];
     resetBatchProfile();
     const logBody = document.getElementById('qm-log-body');
-    if (logBody) setInnerHTML(logBody, '');
+    if (logBody) renderSafe(logBody, '');
     pushLog(`Memulai batch check untuk ${nrps.length} NRP...`);
 
     if (btnCheck) { btnCheck.dataset.running = 'true'; btnCheck.textContent = 'Memproses...'; }
     if (progress) progress.classList.remove('qm-hidden');
-    if (results) setInnerHTML(results, '');
+    if (results) renderSafe(results, '');
     if (btnExport) btnExport.classList.add('qm-hidden');
 
     const poolSize = Math.min(APP_CONFIG.BATCH_POOL_SIZE, state.batchQueue.length);
@@ -1513,7 +1513,7 @@
     finishProfile(prof, { totalNrp: nrps.length, poolSize });
   }
 
-  function onBatchCancel() {
+  function handleBatchCancel() {
     state.batchAborted = true;
     state.batchQueue = [];
     const btnCheck = document.getElementById('qm-btn-batch-check');
@@ -1526,7 +1526,7 @@
       const prof = startProfile('processBatchWorker:item', { nrp: item?.nrp });
       try {
         pushLog(`Memproses NRP ${item.nrp}...`);
-        const emp = await getEmp(item.nrp);
+        const emp = await fetchEmployee(item.nrp);
         item.found = emp.found;
         item.jk = emp.jk || '-';
         item.nama = emp.nama || '-';
@@ -1599,7 +1599,7 @@
       Logger.debug('[PROFILE] batchSummary', {
         processed: state.batchResults.length,
         renderTotalMs: renderTotal,
-        recentWorkerMedianMs: Number(getMedian((state.batchProfile.itemDurations || []).slice(-PROFILE_CONFIG.MEDIAN_SAMPLE_SIZE)).toFixed(2))
+        recentWorkerMedianMs: Number(median((state.batchProfile.itemDurations || []).slice(-PROFILE_CONFIG.MEDIAN_SAMPLE_SIZE)).toFixed(2))
       });
       if (renderTotal >= PROFILE_CONFIG.HOT_BATCH_RENDER_TOTAL_MS) {
         Logger.warn(`Profiling: total render batch ${renderTotal.toFixed(2)}ms melewati ambang ${PROFILE_CONFIG.HOT_BATCH_RENDER_TOTAL_MS}ms.`);
@@ -1637,7 +1637,7 @@
       return;
     }
     if (state.batchResults.length === 0) {
-      setInnerHTML(container, '');
+      renderSafe(container, '');
       finishProfile(prof, { items: 0 });
       return;
     }
@@ -1679,7 +1679,7 @@
     for (const bag in tree) {
       const bagSafeId = 'bag-' + (bagIdx++);
       html += `<tr class="qm-batch-group-header qm-batch-header-bg" data-target=".${bagSafeId}">`;
-      html += `<td colspan="5" class="qm-batch-bagian-cell"><div class="qm-flex qm-items-center qm-justify-between qm-w-full"><span>${escHtml(bag)}</span><span class="qm-chevron qm-accordion-chevron">
+      html += `<td colspan="5" class="qm-batch-bagian-cell"><div class="qm-flex qm-items-center qm-justify-between qm-w-full"><span>${escapeHtml(bag)}</span><span class="qm-chevron qm-accordion-chevron">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>
               </span></div></td></tr>`;
 
@@ -1695,15 +1695,15 @@
       for (const sek in tree[bag]) {
         const sekSafeId = bagSafeId + '-sek-' + (sekIdx++);
         html += `<tr class="qm-batch-group-row ${bagSafeId} qm-batch-seksi-header qm-batch-sub-header-bg qm-hidden" data-target=".${sekSafeId}">`;
-        html += `<td colspan="5" class="qm-batch-seksi-cell" style="padding-left: 32px;"><div class="qm-flex qm-items-center qm-justify-between qm-w-full"><span>${escHtml(sek)} <span class="qm-batch-seksi-count">(${tree[bag][sek].length})</span></span><span class="qm-chevron qm-accordion-chevron">
+        html += `<td colspan="5" class="qm-batch-seksi-cell" style="padding-left: 32px;"><div class="qm-flex qm-items-center qm-justify-between qm-w-full"><span>${escapeHtml(sek)} <span class="qm-batch-seksi-count">(${tree[bag][sek].length})</span></span><span class="qm-chevron qm-accordion-chevron">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>
               </span></div></td></tr>`;
 
         tree[bag][sek].forEach(item => {
           var nrpLink = item.nrp
-            ? '<a href="#" class="qm-batch-nrp-link" data-nrp="' + escHtml(item.nrp) + '" style="padding-left: 64px;">' + escHtml(item.nrp) + '</a>'
+            ? '<a href="#" class="qm-batch-nrp-link" data-nrp="' + escapeHtml(item.nrp) + '" style="padding-left: 64px;">' + escapeHtml(item.nrp) + '</a>'
             : '-';
-          var nama = item.found ? escHtml(item.nama || '-') : '<span class="qm-batch-not-found">Tidak Ditemukan</span>';
+          var nama = item.found ? escapeHtml(item.nama || '-') : '<span class="qm-batch-not-found">Tidak Ditemukan</span>';
           var masalahHtml = '';
 
           if (item.anomalies && item.anomalies.length > 0) {
@@ -1729,7 +1729,7 @@
 
                 if (titleStr.includes('SPKL')) {
                   const isOS = item.nrp && item.nrp.length === 8;
-                  const base = getSpklBaseUrl(item.nrp);
+                  const base = spklBaseUrl(item.nrp);
                   const bulanStr = String(state.batchBulan).padStart(2, '0');
                   const tglStr = String(tgl).padStart(2, '0');
                   const shiftVal = firstAnomWithLink.shift || '';
@@ -1744,11 +1744,11 @@
                 const tglPad = String(tgl).padStart(2, '0');
                 const fDate = firstAnomWithLink.fullDate || `${state.batchTahun}-${String(state.batchBulan).padStart(2, '0')}-${tglPad}`;
 
-                fixBtn = `<button class="qm-fix-dot" title="${escHtml(titleStr)}" data-fix-link="${escHtml(finalLink)}" data-fix-date="${escHtml(tglPad)}" data-full-date="${escHtml(fDate)}"></button>`;
+                fixBtn = `<button class="qm-fix-dot" title="${escapeHtml(titleStr)}" data-fix-link="${escapeHtml(finalLink)}" data-fix-date="${escapeHtml(tglPad)}" data-full-date="${escapeHtml(fDate)}"></button>`;
               }
 
               listItems += '<div class="qm-batch-date-row">';
-              listItems += '<div class="qm-batch-date-header qm-flex qm-items-center qm-justify-between"><span style="position: relative; padding-right: 15px;"><b>Tgl ' + escHtml(tgl) + '</b>' + fixBtn + '</span><span class="qm-chevron qm-accordion-chevron"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg></span></div>';
+              listItems += '<div class="qm-batch-date-header qm-flex qm-items-center qm-justify-between"><span style="position: relative; padding-right: 15px;"><b>Tgl ' + escapeHtml(tgl) + '</b>' + fixBtn + '</span><span class="qm-chevron qm-accordion-chevron"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg></span></div>';
               listItems += '<div class="qm-batch-date-content qm-hidden">';
               // Deduplicate anomalies by message for the same date
               const msgMap = new Map();
@@ -1759,9 +1759,9 @@
 
               msgMap.forEach((cols, msg) => {
                 const uniqueCols = [...new Set(cols)].filter(Boolean);
-                const colNames = uniqueCols.map(c => escHtml(c)).join(', ');
+                const colNames = uniqueCols.map(c => escapeHtml(c)).join(', ');
                 const colPrefix = colNames ? colNames + ': ' : '';
-                listItems += '<div class="qm-batch-anomaly-detail">• ' + colPrefix + escHtml(msg) + '</div>';
+                listItems += '<div class="qm-batch-anomaly-detail">• ' + colPrefix + escapeHtml(msg) + '</div>';
               });
               listItems += '</div></div>';
             }
@@ -1769,7 +1769,7 @@
           } else if (item.found) {
             masalahHtml = '<span class="qm-batch-no-anomaly">Tidak ada anomali</span>';
           } else {
-            masalahHtml = '<span class="qm-batch-not-found">' + escHtml(item.msg || 'Error') + '</span>';
+            masalahHtml = '<span class="qm-batch-not-found">' + escapeHtml(item.msg || 'Error') + '</span>';
           }
 
           const rk = item.rekaps || { otb: 0, otl: 0, ota: 0, otp: 0, keterangan: {} };
@@ -1794,7 +1794,7 @@
 
     html += '</tbody></table>';
 
-    setInnerHTML(container, html);
+    renderSafe(container, html);
     const duration = finishProfile(prof, { items: state.batchResults.length });
     if (state.batchProfile) state.batchProfile.renderTotal += duration;
   }
@@ -1880,15 +1880,15 @@
         }
 
         const fixBtn = itemWithLink
-          ? `<button class="qm-btn-fix-pill" data-fix-link="${escHtml(itemWithLink.link)}" data-fix-date="${escHtml(tgl)}" data-full-date="${escHtml(itemWithLink.fullDate || '')}" title="${escHtml(btnText)}">${btnText}</button>`
+          ? `<button class="qm-btn-fix-pill" data-fix-link="${escapeHtml(itemWithLink.link)}" data-fix-date="${escapeHtml(tgl)}" data-full-date="${escapeHtml(itemWithLink.fullDate || '')}" title="${escapeHtml(btnText)}">${btnText}</button>`
           : '';
 
         const detailsHtml = items.map(a => {
-          const type = escHtml(COL_LABELS[a.colIndex] || a.col || ('Kolom ' + a.colIndex));
+          const type = escapeHtml(COL_LABELS[a.colIndex] || a.col || ('Kolom ' + a.colIndex));
           return `
             <div class="qm-anomaly-card">
               <div class="qm-anomaly-card-type">${type}</div>
-              <div class="qm-anomaly-card-msg">${escHtml(a.msg)}</div>
+              <div class="qm-anomaly-card-msg">${escapeHtml(a.msg)}</div>
             </div>
           `;
         }).join('');
@@ -1908,11 +1908,11 @@
           </div>
         `;
       }
-      setInnerHTML(list, html);
+      renderSafe(list, html);
     } else {
       badge.classList.add('qm-hidden');
       badge.classList.remove('qm-visible-inline-flex');
-      setInnerHTML(list, '<div class="qm-anomaly-empty-state qm-text-center qm-text-muted qm-mt-xl">Tidak ada anomali ditemukan.</div>');
+      renderSafe(list, '<div class="qm-anomaly-empty-state qm-text-center qm-text-muted qm-mt-xl">Tidak ada anomali ditemukan.</div>');
     }
     finishProfile(prof, { count: state.anomalies.length });
   }
@@ -1941,7 +1941,7 @@
     const spklUrl = buildSpklOnlineUrl(ctx, minDate, maxDate);
 
     try {
-      const data = await req(spklUrl);
+      const data = await hrisFetch(spklUrl);
       const doc = parseHTML(data);
 
       // Deteksi data nyata: ada tidaknya baris dengan minimal 3 kolom di tbody
@@ -2066,7 +2066,7 @@
         if (isEntryFix) {
           link = ROUTES.SPKL_ONLINE_SINGLE(item.fullDate, ctx.nrp);
         } else {
-          const base = getSpklBaseUrl(ctx.nrp);
+          const base = spklBaseUrl(ctx.nrp);
           const shiftParam = item.shift ? `&shift=${item.shift}` : '';
           link = `${base}?tahun=${ctx.tahun}&bulan=${bulan}&kode_bagian=&kode_seksi=&kode_group=&nrp=${ctx.nrp}&qm_auto_spkl_fix=1&full_date=${item.fullDate}${shiftParam}`;
         }
@@ -2119,10 +2119,10 @@
       return;
     }
 
-    const barcodeUrl = getKehadiranLink(ctx);
+    const barcodeUrl = buildKehadiranLink(ctx);
 
     try {
-      const data = await req(barcodeUrl);
+      const data = await hrisFetch(barcodeUrl);
       const doc = parseHTML(data);
       let dateColIdx = -1, statusColIdx = -1;
 
@@ -2234,7 +2234,7 @@
    * 10. FORM AUTOMATION
    * ============================================================ */
 
-  /** Unified Fix/Perbaikan click handler — shared by onFixDotClick and onBatchFixClick. */
+  /** Unified Fix/Perbaikan click handler — shared by handleFixDotClick and handleBatchFixClick. */
   function handleFixClick(link, date, title, fullDate) {
     if (link) {
       const currentUrl = window.location.href;
@@ -2318,7 +2318,7 @@
 
   /** Select dropdown value with MutationObserver support. */
   /** Select dropdown value with robust option polling (waits for AJAX options to load). */
-  async function pilihDropdownDinamis(selector, nilaiTarget, callback, timeout = 5000) {
+  async function awaitDropdown(selector, nilaiTarget, callback, timeout = 5000) {
     if (!nilaiTarget) return callback();
     const startTime = Date.now();
     const target = nilaiTarget.toLowerCase();
@@ -2367,12 +2367,12 @@
 
       const jkSelect = document.querySelector('select[name*="jam_kerja"], select[name*="jk"]');
       if (jkSelect && dataKaryawan.jk) {
-        selectOption(jkSelect, opt => {
+        pickOption(jkSelect, opt => {
           const optVal = opt.value.trim();
           const textKode = opt.textContent.trim().split('-')[0].trim();
           return optVal === dataKaryawan.jk || textKode === dataKaryawan.jk;
         });
-        selectPickerRefresh(jkSelect);
+        refreshPicker(jkSelect);
       }
 
       UI.setGlobalProgress(35, 'Mengisi Periode...');
@@ -2382,29 +2382,29 @@
       const tglAwal = Array.isArray(tanggal) ? tanggal[0] : tanggal;
       const tglAkhir = Array.isArray(tanggal) ? (tanggal[1] || tglAwal) : tglAwal;
 
-      dateAwal.forEach(input => setFieldValue(input, tglAwal));
-      dateAkhir.forEach(input => setFieldValue(input, tglAkhir));
+      dateAwal.forEach(input => setField(input, tglAwal));
+      dateAkhir.forEach(input => setField(input, tglAkhir));
 
       UI.setGlobalProgress(50, 'Menyesuaikan Bagian...');
-      pilihDropdownDinamis('select[name*="bagian"]', dataKaryawan.bag, () => {
+      awaitDropdown('select[name*="bagian"]', dataKaryawan.bag, () => {
         UI.setGlobalProgress(65, 'Menyesuaikan Seksi...');
-        pilihDropdownDinamis('select[name*="seksi"]', dataKaryawan.sek, () => {
+        awaitDropdown('select[name*="seksi"]', dataKaryawan.sek, () => {
           UI.setGlobalProgress(75, 'Menyesuaikan Group & NRP...');
           const grpSelect = document.querySelector('select[name="kode_group"]');
           if (grpSelect && dataKaryawan.grp) {
-            setFieldValue(grpSelect, dataKaryawan.grp);
-            selectPickerRefresh(grpSelect);
+            setField(grpSelect, dataKaryawan.grp);
+            refreshPicker(grpSelect);
           }
 
           if (typeof nrp === 'object' && nrp.awal !== undefined) {
             const nrpIn1 = document.querySelector('input[list="nrp_awal"], input[name*="nrp_awal"], input[id*="nrp_initial"], input[name*="nrp_initial"], input[name*="nrp1"], input[name*="nrp_initial_text"]');
             const nrpIn2 = document.querySelector('input[list="nrp_akhir"], input[name*="nrp_akhir"], input[id*="nrp_final"], input[name*="nrp_final"], input[name*="nrp2"], input[name*="nrp_final_text"]');
-            if (nrpIn1) setFieldValue(nrpIn1, nrp.awal, ['input', 'change', 'blur']);
-            if (nrpIn2) setFieldValue(nrpIn2, nrp.akhir || nrp.awal, ['input', 'change', 'blur']);
+            if (nrpIn1) setField(nrpIn1, nrp.awal, ['input', 'change', 'blur']);
+            if (nrpIn2) setField(nrpIn2, nrp.akhir || nrp.awal, ['input', 'change', 'blur']);
           } else {
             let nrpInputs = document.querySelectorAll('input[list="nrp_awal"], input[list="nrp_akhir"], input[name*="nrp_awal"], input[name*="nrp_akhir"], input[name*="nrp1"], input[name*="nrp2"], input[name*="nrp_1"], input[name*="nrp_2"]');
             if (nrpInputs.length === 0) nrpInputs = document.querySelectorAll('input[name*="nrp"]');
-            nrpInputs.forEach(input => setFieldValue(input, nrp, ['input', 'change', 'blur']));
+            nrpInputs.forEach(input => setField(input, nrp, ['input', 'change', 'blur']));
           }
 
           if (shift) {
@@ -2412,11 +2412,11 @@
             const expectedText = `${targetShiftRoman} - SHIFT ${targetShiftRoman}`;
             const shiftSelect = document.querySelector('select[name="kode_shift"], select[name="shift"]');
             if (shiftSelect) {
-              selectOption(shiftSelect, opt => {
+              pickOption(shiftSelect, opt => {
                 const optText = opt.textContent.trim().toUpperCase();
                 return opt.value === shift || optText === expectedText || optText === targetShiftRoman || optText === 'SHIFT ' + targetShiftRoman;
               });
-              selectPickerRefresh(shiftSelect);
+              refreshPicker(shiftSelect);
             }
           }
 
@@ -2499,7 +2499,7 @@
 
     UI.showGlobalLoader('Auto Distribusi', 'Mengambil Data...');
     try {
-      const emp = await getEmp(nrp);
+      const emp = await fetchEmployee(nrp);
       if (!emp.found) {
         UI.setGlobalProgress(100, 'Data karyawan tidak ditemukan.');
         UI.hideGlobalLoader(3000);
@@ -2552,8 +2552,8 @@
     const autoBulan = sessionStorage.getItem(STORAGE.AUTO_BULAN);
     if (autoNrp && autoBulan) {
       setTimeout(() => {
-        setFieldValue(document.querySelector('#bulan'), autoBulan);
-        setFieldValue(document.querySelector('input[name="nrp"]'), autoNrp, ['input']);
+        setField(document.querySelector('#bulan'), autoBulan);
+        setField(document.querySelector('input[name="nrp"]'), autoNrp, ['input']);
 
         sessionStorage.removeItem(STORAGE.AUTO_NRP);
         sessionStorage.removeItem(STORAGE.AUTO_BULAN);
@@ -2577,7 +2577,7 @@
             if (nrpFill) {
               const nrpInput = document.getElementById('nrp_input');
               if (nrpInput) {
-                setFieldValue(nrpInput, nrpFill, ['input', 'change']);
+                setField(nrpInput, nrpFill, ['input', 'change']);
               }
               sessionStorage.removeItem(STORAGE.AUTO_NRP_FILL);
             }
@@ -2586,7 +2586,7 @@
               if (dateInput) {
                 const ctx = getPageContext();
                 const fullDate = `${ctx.tahun}-${String(ctx.bulan).padStart(2, '0')}-${String(dateFill).padStart(2, '0')}`;
-                setFieldValue(dateInput, fullDate, ['change']);
+                setField(dateInput, fullDate, ['change']);
               }
               sessionStorage.removeItem(STORAGE.AUTO_DATE_FILL);
             }
@@ -2616,10 +2616,10 @@
         const btnTambah = document.getElementById('btnTambah');
         const btnSubmit = document.getElementById('submit');
 
-        if (elTgl) setFieldValue(elTgl, data.tgl, ['change']);
-        if (elNrp) setFieldValue(elNrp, data.nrp, ['input', 'change']);
-        if (elJam) setFieldValue(elJam, data.jam, ['change']);
-        if (elStatus) setFieldValue(elStatus, data.status, ['change']);
+        if (elTgl) setField(elTgl, data.tgl, ['change']);
+        if (elNrp) setField(elNrp, data.nrp, ['input', 'change']);
+        if (elJam) setField(elJam, data.jam, ['change']);
+        if (elStatus) setField(elStatus, data.status, ['change']);
 
         await new Promise(r => setTimeout(r, 600));
         if (btnTambah) btnTambah.click();
@@ -2641,7 +2641,7 @@
 
   async function processSpklBackgroundSingle(item) {
     Logger.info(`Fetching ${item.link}`);
-    const html = await req(item.link);
+    const html = await hrisFetch(item.link);
     const doc = parseHTML(html);
 
     const dateObj = parseHrisDate(item.fullDate);
@@ -2710,9 +2710,9 @@
     if (!otTypeSelect) return false;
 
     const mskValue = mskInput ? mskInput.value : '';
-    const mskTime = parseTime(mskValue);
+    const mskTime = parseTimeToDecimal(mskValue);
     const urlParams = new URLSearchParams(item.link.split('?')[1] || '');
-    const shift = urlParams.get('shift') || tebakShiftSebenarnya(mskTime, SHIFT_RULES);
+    const shift = urlParams.get('shift') || guessActualShift(mskTime, SHIFT_RULES);
     const currentOtType = otTypeSelect.value;
 
     let matchedRule = null;
@@ -2828,7 +2828,7 @@
       return;
     }
 
-    let targetUrl = getSpklCreateUrl(nrp);
+    let targetUrl = spklCreateUrl(nrp);
 
     // Save OT 7 details if any
     let jamAwal = "", jamAkhir = "", shiftVal = "";
@@ -2887,19 +2887,19 @@
 
       UI.setGlobalProgress((i / taskList.length) * 100, `Memproses Tgl ${task.hari}...`);
 
-      setFieldValue(nrpInput, nrp, ['input', 'change']);
-      setFieldValue(tanggalInput, fullDate, ['input', 'change']);
+      setField(nrpInput, nrp, ['input', 'change']);
+      setField(tanggalInput, fullDate, ['input', 'change']);
       if (jenisOtSelect) {
-        setFieldValue(jenisOtSelect, task.jenisOt);
+        setField(jenisOtSelect, task.jenisOt);
         if (window.jQuery && window.jQuery(jenisOtSelect).selectpicker) {
           window.jQuery(jenisOtSelect).selectpicker('refresh');
         }
       }
 
       if (task.jenisOt === "7") {
-        setFieldValue(jamAwalEl, jamAwal);
-        setFieldValue(jamAkhirEl, jamAkhir);
-        setFieldValue(shiftEl, shiftVal);
+        setField(jamAwalEl, jamAwal);
+        setField(jamAkhirEl, jamAkhir);
+        setField(shiftEl, shiftVal);
       }
 
       await new Promise(r => setTimeout(r, TIMING.SPKL_INPUT_DELAY));
@@ -2961,7 +2961,7 @@
     const st = JSON.parse(sessionStorage.getItem(MANY_NRP_KEY) || "null");
     if (st) {
       const pRoute = (function (s) {
-        const current = getSpklAddPageKind();
+        const current = spklAddPageKind();
         if (current && s.indexes[current] < s[current].length) return current;
         if (s.indexes.internal < s.internal.length) return "internal";
         if (s.indexes.outsource < s.outsource.length) return "outsource";
@@ -2969,7 +2969,7 @@
       })(st);
 
       if (pRoute) {
-        const current = getSpklAddPageKind();
+        const current = spklAddPageKind();
         if (current === pRoute) {
           setTimeout(() => {
             // Populate fields for visibility
@@ -3059,12 +3059,12 @@
 
     sessionStorage.setItem(STORAGE_KEY, JSON.stringify(state));
 
-    const current = getSpklAddPageKind();
+    const current = spklAddPageKind();
     const target = (int.length > 0 ? "internal" : "outsource");
 
     if (current !== target) {
       UI.showResult('success', 'Mengalihkan...', 'Pindah ke halaman input ' + target + '.');
-      setTimeout(() => { window.location.href = getSpklAddUrlByKind(target); }, 1000);
+      setTimeout(() => { window.location.href = spklAddUrl(target); }, 1000);
     } else {
       _processManyNrpPage(target, state);
     }
@@ -3090,7 +3090,7 @@
       const nrp = list[idx];
       UI.setGlobalProgress((idx / list.length) * 100, `Batch NRP: ${nrp}`);
 
-      const setVal = (el, val) => setFieldValue(el, val);
+      const setVal = (el, val) => setField(el, val);
 
       setVal(tEl, s.date);
       await new Promise(r => setTimeout(r, TIMING.SESSION_SAVE_DELAY));
@@ -3170,7 +3170,7 @@
 
     sessionStorage.setItem(STORAGE.HADIR_BATCH, JSON.stringify(batchState));
 
-    const current = getAbsenCreatePageKind();
+    const current = absenCreatePageKind();
     const target = (int.length > 0 ? "internal" : "outsource");
 
     if (current !== target) {
@@ -3204,10 +3204,10 @@
       const nrp = list[idx];
       UI.setGlobalProgress((idx / list.length) * 100, `Batch Kehadiran: ${nrp}`);
 
-      setFieldValue(tEl, s.date, ['change']);
-      setFieldValue(nEl, nrp, ['input', 'change']);
-      setFieldValue(jEl, s.jam, ['change']);
-      setFieldValue(sEl, s.status, ['change']);
+      setField(tEl, s.date, ['change']);
+      setField(nEl, nrp, ['input', 'change']);
+      setField(jEl, s.jam, ['change']);
+      setField(sEl, s.status, ['change']);
 
       await new Promise(r => setTimeout(r, 600));
       tbBtn.click();
@@ -3239,7 +3239,7 @@
   function checkHadirBatchResume() {
     const st = JSON.parse(sessionStorage.getItem(STORAGE.HADIR_BATCH) || "null");
     if (st) {
-      const current = getAbsenCreatePageKind();
+      const current = absenCreatePageKind();
 
       const pRoute = (function (s) {
         if (current && s.indexes[current] < s[current].length) return current;
@@ -3321,7 +3321,7 @@
     sessionStorage.setItem('qm_auto_hadir_bulan_antrean', JSON.stringify(antrean));
     sessionStorage.setItem(STORAGE.RETURN_URL, window.location.href);
 
-    const targetURL = getAbsenAddUrl(NRP);
+    const targetURL = absenAddUrl(NRP);
 
     UI.setGlobalProgress(100, 'Berhasil! Mengalihkan...');
     setTimeout(() => {
@@ -3361,9 +3361,9 @@
       const aksi = antrean[i];
       UI.setGlobalProgress((i / antrean.length) * 100, `Menyuntikkan: ${aksi.label} | ${aksi.waktu.split('T')[0]}`);
 
-      setFieldValue(inputNrp, NRP, ['input', 'change']);
-      setFieldValue(inputTanggal, aksi.waktu, ['input', 'change']);
-      setFieldValue(inputStatus, aksi.status, ['change']);
+      setField(inputNrp, NRP, ['input', 'change']);
+      setField(inputTanggal, aksi.waktu, ['input', 'change']);
+      setField(inputStatus, aksi.status, ['change']);
 
       if (window.jQuery && window.jQuery(inputStatus).selectpicker) {
         window.jQuery(inputStatus).selectpicker('refresh');
@@ -4803,7 +4803,7 @@
         });
 
         document.getElementById('qm-result-title').textContent = title;
-        setInnerHTML(document.getElementById('qm-result-body'), bodyHtml);
+        renderSafe(document.getElementById('qm-result-body'), bodyHtml);
         this.resultTimeout = setTimeout(() => this.hideResult(), 3500);
       }
     },
@@ -4826,10 +4826,10 @@
       if (btn) {
         if (on) {
           btn.disabled = true;
-          setInnerHTML(btn, '<span class="qm-spinner"></span> Mengarahkan...');
+          renderSafe(btn, '<span class="qm-spinner"></span> Mengarahkan...');
         } else {
           btn.disabled = false;
-          setInnerHTML(btn, `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg> Cek`);
+          renderSafe(btn, `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg> Cek`);
         }
       }
     },
@@ -4859,7 +4859,7 @@
 
       state.batchLogs = []; // Clear logs on new process
       const logBody = document.getElementById('qm-log-body');
-      if (logBody) setInnerHTML(logBody, '');
+      if (logBody) renderSafe(logBody, '');
 
       const cancelBtnHtml = allowCancel
         ? `<div class="qm-loader-footer">
@@ -4872,8 +4872,8 @@
           <div class="qm-loader-header">
             <div class="qm-spinner qm-spinner-dark qm-loader-spinner-size" style="width: 24px; height: 24px; border-width: 3px;"></div>
             <div class="qm-loader-body">
-              <div class="qm-loader-title">${escHtml(title)}</div>
-              <div id="qm-global-loader-text" class="qm-loader-text">${escHtml(initialMsg)}</div>
+              <div class="qm-loader-title">${escapeHtml(title)}</div>
+              <div id="qm-global-loader-text" class="qm-loader-text">${escapeHtml(initialMsg)}</div>
             </div>
           </div>
           <div class="qm-progress-container" title="Klik untuk lihat detail log">
@@ -4909,9 +4909,9 @@
     renderHistory() {
       const histEl = document.getElementById('qm-history');
       if (!histEl) return;
-      if (!state.history.length) { setInnerHTML(histEl, ''); return; }
-      const items = state.history.map(h => `<div class="qm-history-item"><span class="qm-badge ${h.ok ? 'ok' : 'err'}">${h.ok ? '✓' : '✗'}</span><span class="qm-history-nrp">${escHtml(h.nrp)}</span><span class="qm-history-label">${escHtml(h.label)}</span><span class="qm-history-time">${escHtml(h.time)}</span></div>`).join('');
-      setInnerHTML(histEl, items);
+      if (!state.history.length) { renderSafe(histEl, ''); return; }
+      const items = state.history.map(h => `<div class="qm-history-item"><span class="qm-badge ${h.ok ? 'ok' : 'err'}">${h.ok ? '✓' : '✗'}</span><span class="qm-history-nrp">${escapeHtml(h.nrp)}</span><span class="qm-history-label">${escapeHtml(h.label)}</span><span class="qm-history-time">${escapeHtml(h.time)}</span></div>`).join('');
+      renderSafe(histEl, items);
     },
 
     pushHistory(nrp, ok, label) {
@@ -4932,7 +4932,7 @@
     if (logBody) {
       const div = document.createElement('div');
       div.className = 'qm-log-item';
-      setInnerHTML(div, `<span class="qm-log-time">[${time}]</span><span class="qm-log-msg ${type}">${escHtml(msg)}</span>`);
+      renderSafe(div, `<span class="qm-log-time">[${time}]</span><span class="qm-log-msg ${type}">${escapeHtml(msg)}</span>`);
       logBody.appendChild(div);
       logBody.scrollTop = logBody.scrollHeight;
     }
@@ -4996,14 +4996,14 @@
     if (!logBody) return;
 
     if (state.batchLogs.length === 0) {
-      setInnerHTML(logBody, '<div class="qm-text-muted qm-text-center qm-mt-xl">Belum ada log aktivitas.</div>');
+      renderSafe(logBody, '<div class="qm-text-muted qm-text-center qm-mt-xl">Belum ada log aktivitas.</div>');
       return;
     }
 
-    setInnerHTML(logBody, state.batchLogs.map(log => `
+    renderSafe(logBody, state.batchLogs.map(log => `
       <div class="qm-log-item">
         <span class="qm-log-time">[${log.time}]</span>
-        <span class="qm-log-msg ${log.level || log.type || 'info'}">${escHtml(log.msg)}</span>
+        <span class="qm-log-msg ${log.level || log.type || 'info'}">${escapeHtml(log.msg)}</span>
       </div>
     `).join(''));
     logBody.scrollTop = logBody.scrollHeight;
@@ -5014,10 +5014,10 @@
    * ============================================================ */
 
   function initJkChangeEvents() {
-    delegate('click', '#qm-btn-KK-update', onUpdateKKMaster);
+    on('click', '#qm-btn-KK-update', handleUpdateKKMaster);
 
     let globalDebounce;
-    delegate('input', '#qm-input-distribusi-nrp, #qm-dist-KK-nrp, #qm-input-distribusi-subsi-nrp, #qm-input-nrp', function () {
+    on('input', '#qm-input-distribusi-nrp, #qm-dist-KK-nrp, #qm-input-distribusi-subsi-nrp, #qm-input-nrp', function () {
       const nrp = this.value.trim();
       clearTimeout(globalDebounce);
       globalDebounce = setTimeout(() => {
@@ -5056,36 +5056,36 @@
     // 3. Show loading in summary area
     const resBody = document.getElementById('qm-result-body');
     if (resBody && document.getElementById('qm-pane-check-nrp').classList.contains('active')) {
-      setInnerHTML(resBody, '<div class="qm-flex qm-items-center qm-gap-s qm-p-m"><span class="qm-spinner"></span> <span>Memuat data karyawan...</span></div>');
+      renderSafe(resBody, '<div class="qm-flex qm-items-center qm-gap-s qm-p-m"><span class="qm-spinner"></span> <span>Memuat data karyawan...</span></div>');
     }
 
     try {
-      // 4. Single getEmp call (cached internally)
-      const emp = await getEmp(nrp);
+      // 4. Single fetchEmployee call (cached internally)
+      const emp = await fetchEmployee(nrp);
       if (!emp.found) {
-        if (resBody) setInnerHTML(resBody, '<div class="qm-text-danger qm-p-m">NRP tidak ditemukan.</div>');
+        if (resBody) renderSafe(resBody, '<div class="qm-text-danger qm-p-m">NRP tidak ditemukan.</div>');
         return;
       }
 
       // 5. Update Summary Info
       if (resBody) {
-        setInnerHTML(resBody, `
+        renderSafe(resBody, `
           <div class="qm-p-m qm-bg-parchment qm-rounded-m qm-border">
             <div class="qm-flex qm-justify-between qm-mb-s">
               <span class="qm-text-muted qm-text-xs">Nama:</span>
-              <span class="qm-font-bold qm-text-s">${escHtml(emp.nama)}</span>
+              <span class="qm-font-bold qm-text-s">${escapeHtml(emp.nama)}</span>
             </div>
             <div class="qm-flex qm-justify-between qm-mb-s">
               <span class="qm-text-muted qm-text-xs">Bagian:</span>
-              <span class="qm-text-s">${escHtml(emp.bagian || '-')}</span>
+              <span class="qm-text-s">${escapeHtml(emp.bagian || '-')}</span>
             </div>
             <div class="qm-flex qm-justify-between qm-mb-s">
               <span class="qm-text-muted qm-text-xs">Jam Kerja:</span>
-              <span class="qm-text-s qm-font-mono qm-text-blue">${escHtml(emp.jk || '-')}</span>
+              <span class="qm-text-s qm-font-mono qm-text-blue">${escapeHtml(emp.jk || '-')}</span>
             </div>
             <div class="qm-flex qm-justify-between">
               <span class="qm-text-muted qm-text-xs">Kalender:</span>
-              <span class="qm-text-s qm-font-mono qm-text-teal">${escHtml(emp.KK || '-')}</span>
+              <span class="qm-text-s qm-font-mono qm-text-teal">${escapeHtml(emp.KK || '-')}</span>
             </div>
           </div>
         `);
@@ -5101,7 +5101,7 @@
 
     } catch (e) {
       Logger.error('refreshGlobalData error', e);
-      if (resBody) setInnerHTML(resBody, `<div class="qm-text-danger qm-p-m">Error: ${e.message}</div>`);
+      if (resBody) renderSafe(resBody, `<div class="qm-text-danger qm-p-m">Error: ${e.message}</div>`);
     }
   }
 
@@ -5142,8 +5142,8 @@
     ];
     const kkContainer = document.getElementById('qm-dist-KK-options-container');
 
-    jkContainers.forEach(c => { if (c) setInnerHTML(c, '<span class="qm-spinner qm-spinner-xs"></span>'); });
-    if (kkContainer) setInnerHTML(kkContainer, '<span class="qm-spinner qm-spinner-xs"></span>');
+    jkContainers.forEach(c => { if (c) renderSafe(c, '<span class="qm-spinner qm-spinner-xs"></span>'); });
+    if (kkContainer) renderSafe(kkContainer, '<span class="qm-spinner qm-spinner-xs"></span>');
 
     try {
       // 1. Fetch JK & KK options (using cache internally if available)
@@ -5155,12 +5155,12 @@
       jkContainers.forEach(c => {
         if (c && jkOptions.length) {
           const id = c.id === 'qm-dist-jk-options-container' ? 'qm-dist-jk-select-input' : 'qm-dist-subsi-jk-select-input';
-          setInnerHTML(c, `<select id="${id}" class="qm-select qm-text-s">${jkOptions.map(o => `<option value="${escHtml(o.val)}" ${o.selected ? 'selected' : ''}>${escHtml(o.txt)}</option>`).join('')}</select>`);
+          renderSafe(c, `<select id="${id}" class="qm-select qm-text-s">${jkOptions.map(o => `<option value="${escapeHtml(o.val)}" ${o.selected ? 'selected' : ''}>${escapeHtml(o.txt)}</option>`).join('')}</select>`);
         }
       });
 
       if (kkContainer && kkOptions.length) {
-        setInnerHTML(kkContainer, `<select id="qm-dist-KK-select-input" class="qm-select qm-text-s">${kkOptions.map(o => `<option value="${escHtml(o.val)}" ${o.selected ? 'selected' : ''}>${escHtml(o.txt)}</option>`).join('')}</select>`);
+        renderSafe(kkContainer, `<select id="qm-dist-KK-select-input" class="qm-select qm-text-s">${kkOptions.map(o => `<option value="${escapeHtml(o.val)}" ${o.selected ? 'selected' : ''}>${escapeHtml(o.txt)}</option>`).join('')}</select>`);
       }
 
       // 2. Fetch and populate Bagian/Seksi/Grup/Shift
@@ -5232,13 +5232,13 @@
       applyDistDropdowns(cachedHtml);
     }
 
-    let url = getDistribusiBaseUrl(nrp);
+    let url = distribusiUrl(nrp);
     if (bag || sek) {
       url += `?kode_bagian=${encodeURIComponent(bag)}&kode_seksi=${encodeURIComponent(sek)}`;
     }
 
     try {
-      const html = await req(url);
+      const html = await hrisFetch(url);
       sessionStorage.setItem(cacheKey, html);
       applyDistDropdowns(html);
     } catch (e) {
@@ -5256,7 +5256,7 @@
         if (el) {
           const currentVal = el.value;
           const firstOpt = el.options[0];
-          setInnerHTML(el, source.innerHTML);
+          renderSafe(el, source.innerHTML);
           if (firstOpt && !firstOpt.value && el.options.length > 0 && el.options[0].value) {
             el.insertBefore(firstOpt, el.firstChild);
           }
@@ -5288,19 +5288,19 @@
     const cached = sessionStorage.getItem('qm_jk_options_' + nrp);
     if (cached) return JSON.parse(cached);
 
-    const emp = await getEmp(nrp);
+    const emp = await fetchEmployee(nrp);
     if (!emp.found || !emp.id) throw new Error('Data karyawan tidak lengkap.');
 
     let editUrl = emp.editUrl;
     if (!editUrl) {
       // Fallback guess if not found in detail page
       const isOS = nrp.length === 8;
-      editUrl = getEmployeeEditUrl(nrp, emp.id);
+      editUrl = employeeEditUrl(nrp, emp.id);
     }
 
     let html = '', select = null;
     try {
-      html = await req(editUrl);
+      html = await hrisFetch(editUrl);
       cachedEditHtml = html; // Cache HTML for later saveJkMaster use
       const doc = parseHTML(html);
 
@@ -5335,7 +5335,7 @@
     return options;
   }
 
-  async function onSaveJkChange() {
+  async function handleSaveJkChange() {
     const nrp = document.getElementById('qm-input-distribusi-nrp')?.value.trim();
     if (!nrp) { alert('Harap isi NRP.'); return; }
 
@@ -5346,13 +5346,13 @@
     const shift = document.getElementById('qm-dist-jk-target-shift')?.value;
     const oldJk = sessionStorage.getItem('qm_jk_' + nrp);
 
-    const emp = await getEmp(nrp);
+    const emp = await fetchEmployee(nrp);
     if (!emp.found) {
       alert('Data karyawan tidak ditemukan untuk NRP ' + nrp);
       return;
     }
 
-    Logger.info(`Starting onSaveJkChange for ${nrp}. New JK: ${jk}, Use Distribusi: ${useDistribusi}`);
+    Logger.info(`Starting handleSaveJkChange for ${nrp}. New JK: ${jk}, Use Distribusi: ${useDistribusi}`);
     UI.showGlobalLoader('Processing JK', 'Updating Master Data...');
 
     try {
@@ -5416,7 +5416,7 @@
 
         // Store return URL for auto-return after redirect completion
         sessionStorage.setItem(STORAGE.RETURN_URL, window.location.href);
-        const redirectUrl = getDistribusiLink(ctx, date, shift, dateEnd);
+        const redirectUrl = buildDistribusiLink(ctx, date, shift, dateEnd);
 
         // Small delay to ensure sessionStorage/Master Update is committed
         setTimeout(() => {
@@ -5424,7 +5424,7 @@
         }, 800);
       }
     } catch (e) {
-      Logger.error(`Error in onSaveJkChange: ${e.message}`, e);
+      Logger.error(`Error in handleSaveJkChange: ${e.message}`, e);
       UI.showResult('danger', 'Gagal', 'Terjadi kesalahan: ' + e.message);
       UI.hideGlobalLoader();
     }
@@ -5436,10 +5436,10 @@
   async function executeBackgroundDistribusi(params) {
     const { nrp, jk, tglAwal, tglAkhir, shift, bagian, seksi, grup } = params;
     const isOS = nrp && nrp.length === 8;
-    const distUrl = getDistribusiBaseUrl(nrp);
+    const distUrl = distribusiUrl(nrp);
 
     UI.setGlobalProgress(10, 'Mengambil form distribusi...');
-    const html = await req(distUrl);
+    const html = await hrisFetch(distUrl);
     if (html.includes('id="login-form"') || html.includes('login_form')) throw new Error('Sesi berakhir. Silakan login kembali.');
 
     UI.setGlobalProgress(30, 'Menganalisa form & CSRF token...');
@@ -5546,7 +5546,7 @@
       const resText = await response.text();
       Logger.info('Response received from distribution server.');
 
-      if (isSuccessResponse(resText)) {
+      if (isHrisSuccess(resText)) {
         UI.setGlobalProgress(100, 'Selesai!');
         return true;
       } else {
@@ -5567,7 +5567,7 @@
   // Removed in favor of unified updateDistribusiDropdowns
   // async function updateSubsiDropdowns(nrp, bag = '', sek = '') { ... }
 
-  async function onProsesDistribusiSubsi() {
+  async function handleDistribusiSubsi() {
     const nrp = getPageContext().nrp;
     if (!nrp) { alert('Gagal mendeteksi NRP. Pastikan Anda berada di halaman profile atau tabel kehadiran.'); return; }
 
@@ -5583,7 +5583,7 @@
     if (!jk) { alert('Tunggu opsi Jam Kerja termuat terlebih dahulu.'); return; }
     if (!tglAwal || !tglAkhir) { alert('Harap isi Tanggal Awal dan Akhir.'); return; }
 
-    Logger.info(`Starting onProsesDistribusiSubsi. JK: ${jk}, Bagian: ${bagian}, Seksi: ${seksi}, Grup: ${grup}`);
+    Logger.info(`Starting handleDistribusiSubsi. JK: ${jk}, Bagian: ${bagian}, Seksi: ${seksi}, Grup: ${grup}`);
 
     if (useDistribusi) {
       UI.showGlobalLoader('Processing Subsi', 'Menyiapkan data...');
@@ -5611,11 +5611,11 @@
         setTimeout(() => window.location.reload(), 1500);
       } catch (e) {
         UI.showResult('danger', 'Gagal', 'Error: ' + e.message);
-        Logger.error('onProsesDistribusiSubsi error', e);
+        Logger.error('handleDistribusiSubsi error', e);
         UI.hideGlobalLoader();
       }
     } else {
-      const base = getDistribusiBaseUrl(nrp);
+      const base = distribusiUrl(nrp);
       const url = `${base}?qm_auto_distribusi_subsi=1&jk=${encodeURIComponent(jk)}&tglAwal=${encodeURIComponent(tglAwal)}&tglAkhir=${encodeURIComponent(tglAkhir)}&bagian=${encodeURIComponent(bagian)}&seksi=${encodeURIComponent(seksi)}&grup=${encodeURIComponent(grup)}&shift=${encodeURIComponent(shift)}&nrp=${encodeURIComponent(nrp)}`;
 
       // Store return URL for auto-return after redirect completion
@@ -5626,7 +5626,7 @@
 
   async function saveJkMaster(nrp, jk) {
     Logger.info(`saveJkMaster started for NRP ${nrp} with JK ${jk}`);
-    const emp = await getEmp(nrp);
+    const emp = await fetchEmployee(nrp);
     if (!emp.found || !emp.id) {
       Logger.error(`Data karyawan tidak lengkap untuk NRP ${nrp}`);
       throw new Error('Data karyawan tidak lengkap.');
@@ -5634,7 +5634,7 @@
 
     let editUrl = emp.editUrl;
     if (!editUrl) {
-      editUrl = getEmployeeEditUrl(nrp, emp.id);
+      editUrl = employeeEditUrl(nrp, emp.id);
     }
 
     Logger.info(`Fetching edit form from ${editUrl}...`);
@@ -5644,7 +5644,7 @@
       state._lastEditNrp = nrp;
     }
 
-    const html = cachedEditHtml || await req(editUrl);
+    const html = cachedEditHtml || await hrisFetch(editUrl);
     cachedEditHtml = html;
 
     const doc = parseHTML(html);
@@ -5780,12 +5780,12 @@
     const cached = sessionStorage.getItem('qm_KK_options_' + nrp);
     if (cached) return JSON.parse(cached);
 
-    const emp = await getEmp(nrp);
+    const emp = await fetchEmployee(nrp);
     if (!emp.found || !emp.id) throw new Error('Data karyawan tidak lengkap.');
 
-    const editUrl = emp.editUrl || getEmployeeEditUrl(nrp, emp.id);
+    const editUrl = emp.editUrl || employeeEditUrl(nrp, emp.id);
 
-    const html = await req(editUrl);
+    const html = await hrisFetch(editUrl);
     const doc = parseHTML(html);
     const select = doc.querySelector('select[name="kode_kalender_kerja"]');
 
@@ -5801,7 +5801,7 @@
     return options;
   }
 
-  async function onUpdateKKMaster() {
+  async function handleUpdateKKMaster() {
     const nrpInput = document.getElementById('qm-dist-KK-nrp');
     const dateInput = document.getElementById('qm-dist-KK-date');
     const nrp = nrpInput?.value.trim();
@@ -5819,7 +5819,7 @@
 
     UI.showGlobalLoader('Processing KK', 'Checking current data...');
     try {
-      const emp = await getEmp(nrp);
+      const emp = await fetchEmployee(nrp);
       if (!emp.found) throw new Error('Data karyawan tidak ditemukan.');
 
       // Prepare data for distribution (override with UI values if present)
@@ -5847,17 +5847,17 @@
       setTimeout(() => window.location.reload(), 1500);
     } catch (e) {
       UI.showResult('danger', 'Gagal', 'Error: ' + e.message);
-      Logger.error('onUpdateKKMaster error', e);
+      Logger.error('handleUpdateKKMaster error', e);
     } finally {
       UI.hideGlobalLoader(3000);
     }
   }
 
   async function saveKKMaster(nrp, KK) {
-    const emp = await getEmp(nrp);
-    const editUrl = emp.editUrl || getEmployeeEditUrl(nrp, emp.id);
+    const emp = await fetchEmployee(nrp);
+    const editUrl = emp.editUrl || employeeEditUrl(nrp, emp.id);
 
-    const html = await req(editUrl);
+    const html = await hrisFetch(editUrl);
     if (html.includes('id="login-form"') || html.includes('name="login_form"') || html.includes('login-box')) {
       throw new Error('Sesi berakhir. Silakan login kembali.');
     }
@@ -5897,7 +5897,7 @@
 
   async function distributeKkBackground(nrp, month, year, emp) {
     const distUrl = ROUTES.DISTRIBUSI_KK;
-    const html = await req(distUrl);
+    const html = await hrisFetch(distUrl);
     if (html.includes('id="login-form"') || html.includes('name="login_form"') || html.includes('login-box')) {
       throw new Error('Sesi berakhir. Silakan login kembali.');
     }
@@ -5959,7 +5959,7 @@
     const resText = await response.text();
 
     // Check for common success indicators
-    if (isSuccessResponse(resText)) {
+    if (isHrisSuccess(resText)) {
       return true;
     }
 
@@ -6008,25 +6008,25 @@
     UI.showGlobalLoader('Auto Dist KK', 'Memulai Distribusi Kalender...');
 
     try {
-      const emp = await getEmp(nrp);
+      const emp = await fetchEmployee(nrp);
       if (!emp.found) throw new Error('Data karyawan tidak ditemukan.');
 
       // 1. Month
       const selMonth = document.querySelector('select[name="month"]');
-      if (selMonth) setFieldValue(selMonth, month);
+      if (selMonth) setField(selMonth, month);
 
       // 2. Sequential Dropdowns: Bagian -> Seksi
       UI.setGlobalProgress(40, 'Menyesuaikan Bagian...');
-      pilihDropdownDinamis('#kode_bagian', emp.bagian, () => {
+      awaitDropdown('#kode_bagian', emp.bagian, () => {
         UI.setGlobalProgress(70, 'Menyesuaikan Seksi...');
-        pilihDropdownDinamis('#kode_seksi', emp.seksi, () => {
+        awaitDropdown('#kode_seksi', emp.seksi, () => {
           UI.setGlobalProgress(85, 'Mengisi NRP...');
 
           // 3. NRP Initial & Final
           const nrpInit = document.getElementById('nrp_initial_text');
           const nrpFinal = document.getElementById('nrp_final_text');
-          if (nrpInit) setFieldValue(nrpInit, nrp);
-          if (nrpFinal) setFieldValue(nrpFinal, nrp);
+          if (nrpInit) setField(nrpInit, nrp);
+          if (nrpFinal) setField(nrpFinal, nrp);
 
           // 4. Submit
           const btnSubmit = document.getElementById('btnSubmit');
@@ -6067,7 +6067,7 @@
     state.isOpen ? closePanel() : openPanel();
   }
 
-  function checkNrp() {
+  function handleNrpLookup() {
     const inputNrp = document.getElementById('qm-input-nrp');
     const inputBulan = document.getElementById('qm-input-bulan');
     const nrp = inputNrp ? inputNrp.value.trim() : '';
@@ -6078,7 +6078,7 @@
     sessionStorage.setItem(STORAGE.AUTO_NRP, nrp);
     sessionStorage.setItem(STORAGE.AUTO_BULAN, bulan);
     const year = new Date().getFullYear();
-    window.location.href = getAttendanceUrl(bulan, year, nrp);
+    window.location.href = attendanceUrl(bulan, year, nrp);
   }
 
   let manualSidebarOverride = false;
@@ -6090,7 +6090,7 @@
     }
   }
 
-  function onExportAnomali() {
+  function handleExportAnomali() {
     if (state.anomalies.length === 0) { alert('Tidak ada anomali untuk diekspor.'); return; }
     const wsData = [['Tanggal', 'Kolom', 'Pesan Anomali']];
     const sorted = [...state.anomalies].sort((a, b) => parseInt(a.tgl) - parseInt(b.tgl));
@@ -6107,7 +6107,7 @@
     }
   }
 
-  function onToggleAnomalyGroup(e) {
+  function handleToggleAnomalyGroup(e) {
     if (e.target.closest('.qm-fix-dot') || e.target.closest('.qm-batch-fix-btn')) return;
 
     const content = this.nextElementSibling;
@@ -6125,7 +6125,7 @@
     }
   }
 
-  function onCekSpklOnline() {
+  function handleSpklOnlineCheck() {
     const nrp = document.getElementById('qm-spkl-online-nrp')?.value.trim();
     const dateInput = document.getElementById('qm-spkl-online-date')?.value;
     if (!nrp || !dateInput) { alert('Harap isi NRP dan Tanggal.'); return; }
@@ -6139,7 +6139,7 @@
     window.open(url, '_blank');
   }
 
-  function onProsesInputHadir() {
+  function handleInputHadir() {
     const nrp = document.getElementById('qm-input-hadir-nrp')?.value.trim();
     const tgl = document.getElementById('qm-input-hadir-tanggal')?.value;
     const jam = document.getElementById('qm-input-hadir-jam')?.value;
@@ -6155,19 +6155,19 @@
     const data = { nrp, tgl, jam, status };
     sessionStorage.setItem(STORAGE.INPUT_HADIR, JSON.stringify(data));
 
-    const targetUrl = getAbsenCreateUrl(nrp);
+    const targetUrl = absenCreateUrl(nrp);
     window.open(targetUrl, '_blank');
   }
 
-  function onProsesDistribusi() {
-    onSaveJkChange();
+  function handleDistribusi() {
+    handleSaveJkChange();
   }
 
-  function onKeydownAnomalyGroup(e) {
+  function handleKeydownAnomalyGroup(e) {
     if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); this.click(); }
   }
 
-  function onFixDotClick(e) {
+  function handleFixDotClick(e) {
     e.stopPropagation();
     handleFixClick(
       this.getAttribute('data-fix-link'),
@@ -6177,7 +6177,7 @@
     );
   }
 
-  function onTabClick() {
+  function handleTabClick() {
     const pane = this.getAttribute('data-pane');
     document.querySelectorAll('.qm-tab').forEach(el => el.classList.remove('active'));
     this.classList.add('active');
@@ -6191,32 +6191,32 @@
     }
   }
 
-  function onInputBulan() {
+  function handleInputBulan() {
     const val = parseInt(this.value);
     if (isNaN(val)) return;
     if (val < 1) this.value = 1;
     else if (val > 12) this.value = 12;
   }
 
-  function onDocumentClick(e) {
+  function handleDocumentClick(e) {
     if (state.isOpen && !e.target.closest('#qm-panel, #qm-fab, #qm-backdrop')) closePanel();
   }
 
-  function onRecordShortcut() {
+  function handleRecordShortcut() {
     isRecordingShortcut = true;
     this.textContent = 'Tunggu...';
     document.getElementById('qm-input-shortcut').value = 'Tekan tombol...';
   }
 
-  function onBatchNrpClick(e) {
+  function handleBatchNrpClick(e) {
     e.preventDefault();
     var nrp = this.getAttribute('data-nrp');
     if (!nrp) return;
-    var url = getAttendanceUrl(state.batchBulan, state.batchTahun, nrp);
+    var url = attendanceUrl(state.batchBulan, state.batchTahun, nrp);
     window.open(url, '_blank');
   }
 
-  function onBatchFixClick(e) {
+  function handleBatchFixClick(e) {
     e.stopPropagation();
     handleFixClick(
       this.getAttribute('data-fix-link'),
@@ -6226,7 +6226,7 @@
     );
   }
 
-  function onKeydownDocument(e) {
+  function handleKeydownDocument(e) {
     if (isRecordingShortcut) {
       if (e.key === 'Escape') {
         e.preventDefault();
@@ -6271,13 +6271,13 @@
     }
   }
 
-  function onToggleDebugMode() {
+  function handleDebugToggle() {
     state.debug = this.checked;
     GM_setValue('qm_debug', state.debug);
     Logger.info(`Debug mode ${state.debug ? 'diaktifkan' : 'dimatikan'}`);
   }
 
-  function onShowLogs() {
+  function handleShowLogs() {
     const container = document.getElementById('qm-log-container');
     const btn = document.getElementById('qm-btn-show-logs');
     if (container && btn) {
@@ -6293,14 +6293,14 @@
     }
   }
 
-  function onClearLogs() {
+  function handleClearLogs() {
     if (confirm('Bersihkan semua riwayat log aktivitas?')) {
       state.batchLogs = [];
       renderLogs();
     }
   }
 
-  function onExportLogs() {
+  function handleExportLogs() {
     if (state.batchLogs.length === 0) {
       alert('Tidak ada log untuk diekspor.');
       return;
@@ -6323,7 +6323,7 @@
 
   function initKeyboardNavigation() {
     // Enter key logic for various inputs
-    delegate('keydown', '.qm-input, .qm-select, .qm-textarea', function (e) {
+    on('keydown', '.qm-input, .qm-select, .qm-textarea', function (e) {
       if (e.key !== 'Enter') return;
       if (this.tagName === 'TEXTAREA' && !e.ctrlKey) return; // Allow newlines in textarea unless Ctrl+Enter
 
@@ -6353,7 +6353,7 @@
     });
 
     // Space/Enter for accordions
-    delegate('keydown', '.qm-accordion-header', function (e) {
+    on('keydown', '.qm-accordion-header', function (e) {
       if (e.key === 'Enter' || e.key === ' ') {
         e.preventDefault();
         this.click();
@@ -6488,13 +6488,13 @@
       const monthOptions = monthNames.map((name, i) => `<option value="${i + 1}" ${i + 1 === currentMonth ? 'selected' : ''}>${name}</option>`).join('');
 
       const inputBulan = document.getElementById('qm-input-bulan');
-      if (inputBulan) setInnerHTML(inputBulan, monthOptions);
+      if (inputBulan) renderSafe(inputBulan, monthOptions);
 
       const fixBulan = document.getElementById('qm-fix-spkl-bulan');
-      if (fixBulan) setInnerHTML(fixBulan, monthOptions);
+      if (fixBulan) renderSafe(fixBulan, monthOptions);
 
       const bulanBulan = document.getElementById('qm-input-hadir-bulan-bln');
-      if (bulanBulan) setInnerHTML(bulanBulan, monthOptions);
+      if (bulanBulan) renderSafe(bulanBulan, monthOptions);
 
       // Populate Year Select
       let years = '';
@@ -6503,10 +6503,10 @@
       }
 
       const inputTahun = document.getElementById('qm-input-tahun');
-      if (inputTahun) setInnerHTML(inputTahun, years);
+      if (inputTahun) renderSafe(inputTahun, years);
 
       const fixTahun = document.getElementById('qm-fix-spkl-tahun');
-      if (fixTahun) setInnerHTML(fixTahun, years);
+      if (fixTahun) renderSafe(fixTahun, years);
 
       // Default date for Banyak NRP
       const elManyDate = document.getElementById('qm-fix-many-date');
@@ -6534,10 +6534,10 @@
         if (tabBtn) tabBtn.click();
       }
       initDraggable();
-      delegate('change', '#qm-config-debug-mode', onToggleDebugMode);
-      delegate('click', '#qm-btn-show-logs', onShowLogs);
-      delegate('click', '#qm-btn-clear-logs', onClearLogs);
-      delegate('click', '#qm-btn-export-logs', onExportLogs);
+      on('change', '#qm-config-debug-mode', handleDebugToggle);
+      on('click', '#qm-btn-show-logs', handleShowLogs);
+      on('click', '#qm-btn-clear-logs', handleClearLogs);
+      on('click', '#qm-btn-export-logs', handleExportLogs);
     }
     detectAnomalies();
 
@@ -6559,22 +6559,22 @@
       }, 200);
     }
 
-    document.addEventListener('keydown', onKeydownDocument);
-    document.addEventListener('click', onDocumentClick);
+    document.addEventListener('keydown', handleKeydownDocument);
+    document.addEventListener('click', handleDocumentClick);
 
-    delegate('click', '#qm-fab', togglePanel);
-    delegate('click', '#qm-backdrop', closePanel);
-    delegate('click', '#qm-btn-close-header', closePanel);
-    delegate('click', '#qm-btn-check', checkNrp);
-    delegate('click', '#qm-btn-spkl-batch', runSpklBatchProcess);
-    delegate('click', '#qm-btn-spkl-many-nrp', runSpklManyNrpBatch);
-    delegate('click', '#qm-btn-spkl-online-cek', onCekSpklOnline);
-    delegate('click', '#qm-btn-hadir-proses', onProsesInputHadir);
-    delegate('click', '#qm-btn-hadir-bulan-proses', runHadirBulanBatch);
-    delegate('click', '#qm-btn-hadir-many-proses', runHadirManyNrpBatch);
-    delegate('click', '#qm-btn-distribusi-proses', onProsesDistribusi);
-    delegate('click', '#qm-btn-distribusi-subsi-proses', onProsesDistribusiSubsi);
-    delegate('click', '#qm-global-cancel-btn', function () {
+    on('click', '#qm-fab', togglePanel);
+    on('click', '#qm-backdrop', closePanel);
+    on('click', '#qm-btn-close-header', closePanel);
+    on('click', '#qm-btn-check', handleNrpLookup);
+    on('click', '#qm-btn-spkl-batch', runSpklBatchProcess);
+    on('click', '#qm-btn-spkl-many-nrp', runSpklManyNrpBatch);
+    on('click', '#qm-btn-spkl-online-cek', handleSpklOnlineCheck);
+    on('click', '#qm-btn-hadir-proses', handleInputHadir);
+    on('click', '#qm-btn-hadir-bulan-proses', runHadirBulanBatch);
+    on('click', '#qm-btn-hadir-many-proses', runHadirManyNrpBatch);
+    on('click', '#qm-btn-distribusi-proses', handleDistribusi);
+    on('click', '#qm-btn-distribusi-subsi-proses', handleDistribusiSubsi);
+    on('click', '#qm-global-cancel-btn', function () {
       Logger.info('User cancelled automation');
       sessionStorage.removeItem(STORAGE.SPKL_QUEUE);
       sessionStorage.removeItem(STORAGE.SPKL_CURRENT_INDEX);
@@ -6584,7 +6584,7 @@
       UI.showResult('info', 'Dibatalkan', 'Proses otomasi dihentikan oleh pengguna.');
     });
 
-    delegate('click', '.qm-progress-container', () => {
+    on('click', '.qm-progress-container', () => {
       const tabBtn = document.querySelector('.qm-tab[data-pane="config"]');
       if (tabBtn) tabBtn.click();
       const btn = document.getElementById('qm-btn-show-logs');
@@ -6596,11 +6596,11 @@
       }
     });
 
-    delegate('keydown', '#qm-spkl-online-nrp', function (e) {
+    on('keydown', '#qm-spkl-online-nrp', function (e) {
       if (e.key === 'Enter') { e.preventDefault(); document.getElementById('qm-btn-spkl-online-cek')?.click(); }
     });
 
-    delegate('change', '#qm-fix-many-ot', function () {
+    on('change', '#qm-fix-many-ot', function () {
       const box = document.getElementById('qm-fix-many-ot7-box');
       if (box) {
         if (this.value === '7') box.classList.remove('qm-hidden');
@@ -6608,7 +6608,7 @@
       }
     });
 
-    delegate('input', '#qm-fix-spkl-data', function () {
+    on('input', '#qm-fix-spkl-data', function () {
       const box = document.getElementById('qm-fix-spkl-ot7-box');
       if (box) {
         const has7 = this.value.split(/[,\n]+/).some(item => {
@@ -6620,7 +6620,7 @@
       }
     });
 
-    delegate('keydown', '#qm-input-nrp', function (e) {
+    on('keydown', '#qm-input-nrp', function (e) {
       if (e.key === 'Enter') {
         e.preventDefault();
         const nrp = this.value.trim();
@@ -6631,7 +6631,7 @@
     });
 
     // Sync other NRP inputs too
-    delegate('input', '#qm-spkl-online-nrp, #qm-fix-spkl-nrp, #qm-input-hadir-nrp, #qm-input-hadir-bulan-nrp', function () {
+    on('input', '#qm-spkl-online-nrp, #qm-fix-spkl-nrp, #qm-input-hadir-nrp, #qm-input-hadir-bulan-nrp', function () {
       const nrp = this.value.trim();
       if (nrp.length >= 4) {
         refreshGlobalData(nrp);
@@ -6639,42 +6639,42 @@
     });
 
     // Sync Month/Year changes
-    delegate('change', '#qm-input-bulan, #qm-input-tahun, #qm-fix-spkl-bulan, #qm-fix-spkl-tahun, #qm-input-hadir-bulan-bln', function () {
+    on('change', '#qm-input-bulan, #qm-input-tahun, #qm-fix-spkl-bulan, #qm-fix-spkl-tahun, #qm-input-hadir-bulan-bln', function () {
       refreshGlobalData();
     });
 
     // General Keyboard Navigation for forms
     initKeyboardNavigation();
 
-    delegate('click', '.qm-tab', onTabClick);
-    delegate('click', '.qm-fix-dot', onFixDotClick);
-    delegate('click', '.qm-btn-fix-pill', onFixDotClick);
+    on('click', '.qm-tab', handleTabClick);
+    on('click', '.qm-fix-dot', handleFixDotClick);
+    on('click', '.qm-btn-fix-pill', handleFixDotClick);
 
-    delegate('click', '#qm-btn-batch-check', function (e) {
+    on('click', '#qm-btn-batch-check', function (e) {
       if (this.dataset.running) {
-        onBatchCancel();
+        handleBatchCancel();
       } else {
-        runBatchCheck();
+        startBatchAnomalyCheck();
       }
     });
-    delegate('mouseover', '#qm-btn-batch-check', function (e) {
+    on('mouseover', '#qm-btn-batch-check', function (e) {
       if (this.dataset.running) {
         this.classList.add('qm-btn-danger');
         this.textContent = 'Batal';
       }
     });
-    delegate('mouseout', '#qm-btn-batch-check', function (e) {
+    on('mouseout', '#qm-btn-batch-check', function (e) {
       if (this.dataset.running) {
         this.classList.remove('qm-btn-danger');
         this.textContent = 'Memproses...';
       }
     });
-    delegate('click', '#qm-btn-export-batch', exportBatchResults);
-    delegate('click', '.qm-batch-nrp-link', onBatchNrpClick);
-    delegate('click', '.qm-batch-fix-btn', onBatchFixClick);
+    on('click', '#qm-btn-export-batch', exportBatchResults);
+    on('click', '.qm-batch-nrp-link', handleBatchNrpClick);
+    on('click', '.qm-batch-fix-btn', handleBatchFixClick);
 
     // Batch Grouping (Bagian)
-    delegate('click', '.qm-batch-group-header', function () {
+    on('click', '.qm-batch-group-header', function () {
       const targetSelector = this.dataset.target;
       const rows = document.querySelectorAll(targetSelector);
       const isExpanded = this.classList.contains('expanded');
@@ -6696,7 +6696,7 @@
     });
 
     // Batch Grouping (Seksi)
-    delegate('click', '.qm-batch-seksi-header', function () {
+    on('click', '.qm-batch-seksi-header', function () {
       const targetSelector = this.dataset.target;
       const rows = document.querySelectorAll(targetSelector);
       const isExpanded = this.classList.contains('expanded');
@@ -6712,7 +6712,7 @@
       });
     });
 
-    delegate('click', '.qm-batch-date-header', function (e) {
+    on('click', '.qm-batch-date-header', function (e) {
       if (e.target.closest('.qm-batch-fix-btn')) return;
       const content = this.nextElementSibling;
       this.classList.toggle('expanded');
@@ -6723,7 +6723,7 @@
     });
 
     // 14. Accordion Toggle for FIX Panel
-    delegate('click', '.qm-accordion-header', function () {
+    on('click', '.qm-accordion-header', function () {
       this.classList.toggle('expanded');
       const content = this.nextElementSibling;
       if (content) {
@@ -6734,7 +6734,7 @@
     const collapseCheckbox = document.getElementById('qm-config-collapse-menu');
     if (collapseCheckbox) {
       collapseCheckbox.checked = alwaysCollapseMenu;
-      delegate('change', '#qm-config-collapse-menu', function () {
+      on('change', '#qm-config-collapse-menu', function () {
         alwaysCollapseMenu = this.checked;
         GM_setValue('qm_always_collapse', alwaysCollapseMenu);
         if (alwaysCollapseMenu) {
@@ -6746,8 +6746,8 @@
     }
 
     // Theme Switcher
-    delegate('click', '#qm-btn-theme-light', () => UI.applyTheme('light'));
-    delegate('click', '#qm-btn-theme-dark', () => UI.applyTheme('dark'));
+    on('click', '#qm-btn-theme-light', () => UI.applyTheme('light'));
+    on('click', '#qm-btn-theme-dark', () => UI.applyTheme('dark'));
 
     enforceSidebar();
     const _sidebarObserver = new MutationObserver(enforceSidebar);
@@ -6755,10 +6755,10 @@
 
     const shortcutInput = document.getElementById('qm-input-shortcut');
     if (shortcutInput) shortcutInput.value = shortcutKey;
-    delegate('click', '#qm-btn-record-shortcut', onRecordShortcut);
+    on('click', '#qm-btn-record-shortcut', handleRecordShortcut);
 
     // Sidebar Manual Override
-    delegate('click', '.button-menu-mobile, .open-left, #sidebar-menu', function () {
+    on('click', '.button-menu-mobile, .open-left, #sidebar-menu', function () {
       manualSidebarOverride = true;
     });
 
