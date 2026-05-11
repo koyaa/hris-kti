@@ -561,11 +561,6 @@
     return false;
   }
 
-  /**
-   * Validates critical DOM selectors based on the current page type.
-   * @param {{ silent?: boolean }} options - If silent is true, suppresses UI notification
-   * @returns {{ valid: boolean, missing: string[] }}
-
   /* ============================================================
    * 4. ROUTE BUILDERS
    * ============================================================ */
