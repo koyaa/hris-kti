@@ -3984,6 +3984,9 @@
     const csrfMeta = doc.querySelector('meta[name="csrf-token"], meta[name="csrf-test-name"], meta[name="_token"]');
     if (csrfMeta) {
       const token = csrfMeta.getAttribute('content');
+      if (!token) {
+        throw new Error('Token CSRF tidak ditemukan. Struktur halaman mungkin berubah.');
+      }
       headers['X-CSRF-TOKEN'] = token;
       headers['X-XSRF-TOKEN'] = token;
     } else {
@@ -5296,13 +5299,25 @@
 
   /**
    * Validates critical DOM selectors based on the current page type.
+   * @param {{ silent?: boolean }} options - If silent is true, suppresses UI notification
    * @returns {{ valid: boolean, missing: string[] }}
    */
-  function validateDomStructure() {
+  function validateDomStructure(options) {
+    const silent = options && options.silent;
     const missing = [];
 
     if (isAttendancePagePath()) {
-      if (!document.querySelector('table tbody tr')) missing.push('table tbody tr (tabel kehadiran)');
+      if (!document.querySelector('table tbody tr')) {
+        missing.push('table tbody tr (tabel kehadiran)');
+      } else {
+        const headers = Array.from(document.querySelectorAll('table th'));
+        const headerTexts = headers.map(th => th.textContent.trim().toLowerCase());
+        const requiredHeaders = ['tanggal', 'msk', 'klr'];
+        const missingHeaders = requiredHeaders.filter(h => !headerTexts.some(t => t.includes(h)));
+        if (missingHeaders.length > 0) {
+          missing.push('kolom header: ' + missingHeaders.join(', ') + ' (tabel kehadiran)');
+        }
+      }
     }
     if (isBarcodeCreatePagePath()) {
       if (!document.querySelector('form')) missing.push('form (barcode create)');
@@ -5311,13 +5326,24 @@
       if (!document.querySelector('form')) missing.push('form (distribusi kalender)');
     }
     if (isSpklPagePath()) {
-      if (!document.querySelector('table')) missing.push('table (SPKL)');
+      if (!document.querySelector('table')) {
+        missing.push('table (SPKL)');
+      } else {
+        const headers = Array.from(document.querySelectorAll('table th'));
+        const headerTexts = headers.map(th => th.textContent.trim().toLowerCase());
+        const hasDateCol = headerTexts.some(t => t.includes('tanggal') || t === 'tgl');
+        if (!hasDateCol) {
+          missing.push('kolom tanggal (tabel SPKL)');
+        }
+      }
     }
 
     const valid = missing.length === 0;
     if (!valid) {
       Logger.warn('Validasi DOM gagal. Elemen tidak ditemukan: ' + missing.join(', '));
-      UI.showResult('warning', 'Struktur Halaman Berubah', 'Elemen kritis tidak ditemukan: ' + missing.join(', ') + '. Beberapa fitur mungkin tidak berfungsi.');
+      if (!silent) {
+        UI.showResult('warning', 'Struktur Halaman Berubah', 'Elemen kritis tidak ditemukan: ' + missing.join(', ') + '. Beberapa fitur mungkin tidak berfungsi.');
+      }
     }
     return { valid, missing };
   }
@@ -5461,9 +5487,18 @@
       UI.showResult('warning', 'Data Direset', 'Versi data sesi tidak cocok. Data lama telah dibersihkan.');
     }
 
-    // Validate DOM structure after a short delay to allow dynamic content to load
+    // Validate DOM structure with polling to handle dynamic content loading
     if (isAttendancePagePath() || isBarcodeCreatePagePath() || isDistribusiKalenderPagePath() || isSpklPagePath()) {
-      setTimeout(validateDomStructure, 500);
+      let domCheckAttempts = 0;
+      const maxDomCheckAttempts = 10; // 10 x 200ms = 2s max
+      const domCheckInterval = setInterval(function () {
+        domCheckAttempts++;
+        const isFinalAttempt = domCheckAttempts >= maxDomCheckAttempts;
+        const result = validateDomStructure({ silent: !isFinalAttempt });
+        if (result.valid || isFinalAttempt) {
+          clearInterval(domCheckInterval);
+        }
+      }, 200);
     }
 
     document.addEventListener('keydown', onKeydownDocument);
