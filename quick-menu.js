@@ -127,6 +127,7 @@
     SESSION_SAVE_DELAY3: 350,
     MODAL_AUTO_CLICK_DELAY: 500,
     PANEL_TRANSITION_DELAY: 300,
+    BACKGROUND_HEARTBEAT_INTERVAL: 5000,
     FADE_SHORT: 10,
     FADE_MEDIUM: 250,
   });
@@ -147,6 +148,7 @@
     AUTO_NRP_FILL: 'qm_auto_nrp_fill',
     AUTO_DATE_FILL: 'qm_auto_date_fill',
     AUTO_ADD_DATA: 'qm_auto_add_data',
+    AUTO_BARCODE_SEARCH: 'qm_auto_barcode_search',
     HIGHLIGHT_SPKL: 'qm_highlight_spkl_date',
     SPKL_SAVED: 'spkl_saved_data',
     SPKL_BATCH: 'hris_spkl_ot_runner_v1',
@@ -188,6 +190,8 @@
     DISTRIBUSI_KK: 'https://hris.kti.co.id/distribusikalenderkerja',
     ABSEN_BARCODE: (tahun, bulan, nrp) => `https://hris.kti.co.id/absenbarcode?tahun=${tahun}&bulan=${bulan}&kode_bagian=&kode_seksi=&kode_group=&nrp=${nrp}`,
     ABSEN_BARCODE_OS: (tahun, bulan, nrp) => `https://hris.kti.co.id/absenbarcodeos?tahun=${tahun}&bulan=${bulan}&kode_bagian=&kode_seksi=&kode_group=&nrp=${nrp}`,
+    ABSEN_BARCODE_PAGE: 'https://hris.kti.co.id/absenbarcode',
+    ABSEN_BARCODE_OS_PAGE: 'https://hris.kti.co.id/absenbarcodeos',
     ABSEN_BARCODE_CREATE: 'https://hris.kti.co.id/absenbarcode/create',
     ABSEN_BARCODE_OS_CREATE: 'https://hris.kti.co.id/absenbarcodeos/create',
     ABSEN_BARCODE_ADD: 'https://hris.kti.co.id/absenbarcode/add',
@@ -312,6 +316,10 @@
 
   function isBarcodePagePath(path = getCurrentPath()) {
     return path.includes('/absenbarcode');
+  }
+
+  function isBarcodeListPagePath(path = getCurrentPath()) {
+    return isBarcodePagePath(path) && !isBarcodeCreatePagePath(path) && !isBarcodeAddPagePath(path);
   }
 
   function isBarcodeCreatePagePath(path = getCurrentPath()) {
@@ -614,6 +622,10 @@
     return (isOutsourceNrp(ctx.nrp) ? ROUTES.ABSEN_BARCODE_OS : ROUTES.ABSEN_BARCODE)(ctx.tahun, String(ctx.bulan).padStart(2, '0'), ctx.nrp);
   }
 
+  function barcodePageUrl(nrp) {
+    return isOutsourceNrp(nrp) ? ROUTES.ABSEN_BARCODE_OS_PAGE : ROUTES.ABSEN_BARCODE_PAGE;
+  }
+
 
   function buildSpklOnlineUrl(ctx, minDate, maxDate) {
     const bulan = String(ctx.bulan).padStart(2, '0');
@@ -672,13 +684,70 @@
   /** Unified fetch with AbortController timeout. Returns Response. */
   async function fetchWithTimeout(url, options = {}, timeoutMs = 15000) {
     const controller = new AbortController();
+    const externalSignal = options.signal;
+    const onExternalAbort = () => controller.abort(externalSignal.reason);
     const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const response = await fetch(url, { ...options, signal: controller.signal });
+      if (externalSignal) {
+        if (externalSignal.aborted) controller.abort(externalSignal.reason);
+        else externalSignal.addEventListener('abort', onExternalAbort, { once: true });
+      }
+      const { signal: _ignoredSignal, ...restOptions } = options;
+      const response = await fetch(url, { ...restOptions, signal: controller.signal });
       return response;
     } finally {
       clearTimeout(timeoutId);
+      if (externalSignal) externalSignal.removeEventListener('abort', onExternalAbort);
     }
+  }
+
+  function isAbortError(err) {
+    return !!err && (err.name === 'AbortError' || /abort/i.test(String(err.message || '')));
+  }
+
+  function throwIfCancelled() {
+    if (state.cancelRequested) throw new DOMException('User cancelled operation', 'AbortError');
+  }
+
+  function formatElapsedMs(ms) {
+    const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    return minutes > 0
+      ? `${minutes}m ${String(seconds).padStart(2, '0')}s`
+      : `${seconds}s`;
+  }
+
+  function stopBackgroundHeartbeat() {
+    if (state.backgroundHeartbeatTimer) {
+      clearInterval(state.backgroundHeartbeatTimer);
+      state.backgroundHeartbeatTimer = null;
+    }
+  }
+
+  function startBackgroundHeartbeat() {
+    stopBackgroundHeartbeat();
+    const startedAt = Date.now();
+    state.backgroundHeartbeatTimer = setInterval(() => {
+      if (state.cancelRequested) return;
+      const elapsed = Date.now() - startedAt;
+      const progress = Math.min(88, 70 + Math.floor(elapsed / TIMING.BACKGROUND_HEARTBEAT_INTERVAL));
+      UI.setGlobalProgress(progress, `Menunggu respon distribusi... ${formatElapsedMs(elapsed)} berlalu. Server HRIS masih memproses.`, true);
+    }, TIMING.BACKGROUND_HEARTBEAT_INTERVAL);
+  }
+
+  function beginCancelableDistributionFlow() {
+    state.cancelRequested = false;
+    state.activeCancelableFlow = true;
+    state.activeAbortController = null;
+    stopBackgroundHeartbeat();
+  }
+
+  function clearCancelableDistributionFlow() {
+    stopBackgroundHeartbeat();
+    state.activeAbortController = null;
+    state.activeCancelableFlow = false;
+    state.cancelRequested = false;
   }
 
   function extractForm(doc, overrides = {}) {
@@ -889,6 +958,10 @@
     profileStats: {},
     profileFlags: {},
     expandedAnomalyGroups: new Set(),
+    activeAbortController: null,
+    activeCancelableFlow: false,
+    cancelRequested: false,
+    backgroundHeartbeatTimer: null,
     panelPos: JSON.parse(GM_getValue('qm_panel_pos', 'null')), // {top, left}
   };
   let shortcutKey = GM_getValue('qm_shortcut', 'Ctrl+Q');
@@ -2561,6 +2634,92 @@
     }
   }
 
+  function findBarcodeSearchTrigger(form) {
+    const scope = form || document;
+    const candidates = Array.from(scope.querySelectorAll('button, input[type="submit"], input[type="button"]'));
+    return candidates.find(el => {
+      const text = ((el.textContent || el.value || '') + '').trim().toLowerCase();
+      const type = (el.getAttribute('type') || '').toLowerCase();
+      return type === 'submit' || text === 'search' || text.includes('search') || text === 'cari' || text.includes('cari');
+    }) || null;
+  }
+
+  function autoBarcodeSearchPage() {
+    if (!isBarcodeListPagePath()) return;
+
+    const saved = sessionStorage.getItem(STORAGE.AUTO_BARCODE_SEARCH);
+    if (!saved) return;
+
+    let payload = null;
+    try {
+      payload = JSON.parse(saved);
+    } catch (e) {
+      sessionStorage.removeItem(STORAGE.AUTO_BARCODE_SEARCH);
+      Logger.warn('AUTO_BARCODE_SEARCH payload tidak valid.');
+      return;
+    }
+
+    if (!payload?.nrp || !payload?.date) {
+      sessionStorage.removeItem(STORAGE.AUTO_BARCODE_SEARCH);
+      return;
+    }
+
+    const parts = String(payload.date).split('-');
+    if (parts.length < 2) {
+      sessionStorage.removeItem(STORAGE.AUTO_BARCODE_SEARCH);
+      return;
+    }
+
+    const tahun = parts[0];
+    const bulan = String(parseInt(parts[1], 10));
+    let attempts = 0;
+    const maxAttempts = 20;
+
+    const timer = setInterval(() => {
+      attempts++;
+
+      const nrpInput = document.querySelector('input[name="nrp"], input[id*="nrp"], input[type="text"][maxlength="8"]');
+      const monthSelect = document.querySelector('#bulan, select[name="bulan"]');
+      const yearSelect = document.querySelector('select[name="tahun"], #tahun, input[name="tahun"]');
+      const form = nrpInput?.closest('form') || document.querySelector('form[action*="absenbarcode"]') || document.querySelector('form');
+
+      if (nrpInput && monthSelect) {
+        if (monthSelect.tagName === 'SELECT') {
+          pickOption(monthSelect, opt => opt.value === bulan || parseInt(opt.value, 10) === parseInt(bulan, 10));
+          refreshPicker(monthSelect);
+        } else {
+          setField(monthSelect, bulan, ['change', 'input']);
+        }
+        if (yearSelect) {
+          if (yearSelect.tagName === 'SELECT') {
+            pickOption(yearSelect, opt => opt.value === tahun || opt.textContent.trim() === tahun);
+            refreshPicker(yearSelect);
+          } else {
+            setField(yearSelect, tahun, ['change', 'input']);
+          }
+        }
+        setField(nrpInput, payload.nrp, ['input', 'change']);
+
+        const trigger = findBarcodeSearchTrigger(form);
+        sessionStorage.removeItem(STORAGE.AUTO_BARCODE_SEARCH);
+        clearInterval(timer);
+
+        setTimeout(() => {
+          if (trigger) trigger.click();
+          else if (form && typeof form.requestSubmit === 'function') form.requestSubmit();
+          else if (form) form.submit();
+        }, 350);
+        return;
+      }
+
+      if (attempts >= maxAttempts) {
+        clearInterval(timer);
+        sessionStorage.removeItem(STORAGE.AUTO_BARCODE_SEARCH);
+        Logger.warn('Gagal menemukan elemen pencarian barcode otomatis.');
+      }
+    }, 250);
+  }
+
   function autoClickAddData() {
     if (!isBarcodePagePath()) return;
     if (sessionStorage.getItem('qm_auto_add_data') === 'true') {
@@ -4146,16 +4305,6 @@
       border-color: #181715 !important;
     }
 
-    /* --- Grid & Layout Utilities --- */
-    .qm-grid-spkl {
-      display: grid;
-      grid-template-columns: 1.6fr 1fr;
-      gap: var(--qm-s-l);
-    }
-    @media (max-width: 1024px) {
-      .qm-grid-spkl { grid-template-columns: 1fr; }
-    }
-
     .qm-spike-mark {
       color: var(--qm-p-500);
       flex-shrink: 0;
@@ -4170,26 +4319,12 @@
       letter-spacing: -0.02em !important;
     }
 
-    .qm-feature-card {
-      background: var(--qm-ivory);
-      border: 1px solid var(--qm-sand);
-      border-radius: var(--qm-r-l);
-      padding: var(--qm-s-xl);
-    }
-
     .qm-btn-coral {
       background: var(--qm-p-500);
       color: #fff;
       border: none;
       transition: background var(--qm-t-fast);
       &:hover { background: var(--qm-p-600); }
-    }
-
-    .qm-textarea-dark {
-      background: var(--qm-dark-surface);
-      color: var(--qm-p-100);
-      border: 1px solid var(--qm-border-warm);
-      &:focus { border-color: var(--qm-p-500); }
     }
   `);
 
@@ -4307,70 +4442,64 @@
           <h6 class="qm-serif">SPKL</h6>
         </div>
         <div class="qm-w-full">
-          <div class="qm-grid-spkl qm-mb-m">
-            <!-- SECTION 0: SPKL Online -->
-            <div class="qm-feature-card">
-              <h6 class="qm-serif qm-mb-m qm-text-s">${SPIKE_SVG} SPKL Online</h6>
-              <div class="qm-flex qm-gap-m qm-mb-m">
-                <div class="qm-flex-1">
-                  <input id="qm-spkl-online-nrp" type="text" placeholder="NRP" maxlength="8" autocomplete="off" class="qm-input">
-                </div>
-                <div class="qm-flex-1-5">
-                  <input id="qm-spkl-online-date" type="date" class="qm-input">
-                </div>
+          <div class="qm-card qm-mb-m">
+            <h6 class="qm-section-title qm-mb-m qm-text-s">${SPIKE_SVG} SPKL Online</h6>
+            <div class="qm-flex qm-gap-m qm-mb-m">
+              <div class="qm-flex-1">
+                <label class="qm-field-label">NRP</label>
+                <input id="qm-spkl-online-nrp" type="text" placeholder="NRP" maxlength="8" autocomplete="off" class="qm-input">
               </div>
-              <button id="qm-btn-spkl-online-cek" type="button" class="qm-btn qm-btn-coral qm-w-full">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-                Cek SPKL Online
-              </button>
+              <div class="qm-flex-1">
+                <label class="qm-field-label">Tanggal</label>
+                <input id="qm-spkl-online-date" type="date" class="qm-input">
+              </div>
             </div>
+            <button id="qm-btn-spkl-online-cek" type="button" class="qm-btn qm-btn-primary">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+              Cek SPKL Online
+            </button>
+          </div>
 
-            <!-- INFO BOX -->
-            <div class="qm-feature-card qm-text-muted qm-info-box">
-              <h6 class="qm-serif qm-mb-s qm-text-s" style="color:var(--qm-stone)">${SPIKE_SVG} INFO KODE OT</h6>
-              <div style="font-size:11px; line-height:1.6">
-                <b>1:</b> BIASA | <b>2:</b> LONG | <b>3:</b> NONSTOP | <b>4:</b> AWAL<br>
-                <b>5A/B/C:</b> NOREST | <b>6:</b> STANDBY | <b>7:</b> LAIN | <b>OT:</b> OVERTIME
-              </div>
+          <div class="qm-card qm-mb-m qm-info-box">
+            <h6 class="qm-section-title qm-mb-s qm-text-s">${SPIKE_SVG} Referensi Kode OT</h6>
+            <div style="font-size:11px; line-height:1.6">
+              <b>1:</b> BIASA | <b>2:</b> LONG | <b>3:</b> NONSTOP | <b>4:</b> AWAL<br> <b>5A/B/C:</b> NOREST | <b>6:</b> STANDBY | <b>7:</b> LAIN | <b>OT:</b> OVERTIME
             </div>
           </div>
 
-          <!-- SECTION 1: Per NRP -->
-          <div class="qm-feature-card qm-mb-m">
-            <h6 class="qm-serif qm-mb-m qm-text-s">${SPIKE_SVG} Per NRP</h6>
-
+          <div class="qm-card qm-mb-m">
+            <h6 class="qm-section-title qm-mb-m qm-text-s">${SPIKE_SVG} Per NRP</h6>
             <div class="qm-mb-m">
+              <label class="qm-field-label">NRP</label>
               <input id="qm-fix-spkl-nrp" type="text" placeholder="NRP (4 atau 8 digit)" maxlength="8" autocomplete="off" class="qm-input">
             </div>
-
             <div class="qm-flex qm-gap-m qm-mb-m">
               <div class="qm-flex-1">
+                <label class="qm-field-label">Bulan</label>
                 <select id="qm-fix-spkl-bulan" class="qm-select qm-font-semibold"></select>
               </div>
               <div class="qm-flex-1">
+                <label class="qm-field-label">Tahun</label>
                 <select id="qm-fix-spkl-tahun" class="qm-select qm-font-semibold"></select>
               </div>
             </div>
-
             <div class="qm-mb-m">
-              <label class="qm-field-label">Data Tanggal-KodeOT (dipisahkan koma):</label>
+              <label class="qm-field-label">Data Tanggal-KodeOT</label>
               <textarea id="qm-fix-spkl-data" placeholder="Contoh: 2-1, 5-OT, 10-3" rows="2" class="qm-textarea qm-textarea-mono"></textarea>
             </div>
-
-            <!-- Extra Fields for OT 7 in Per NRP -->
             <div id="qm-fix-spkl-ot7-box" class="qm-mb-m qm-ot7-box qm-hidden">
               <div class="qm-flex qm-gap-m qm-mb-m">
                 <div class="qm-flex-1">
-                  <label class="qm-field-label qm-field-label-normal">Jam Awal:</label>
+                  <label class="qm-field-label qm-field-label-normal">Jam Awal</label>
                   <input id="qm-fix-spkl-jam-awal" type="time" class="qm-input qm-field-time">
                 </div>
                 <div class="qm-flex-1">
-                  <label class="qm-field-label qm-field-label-normal">Jam Akhir:</label>
+                  <label class="qm-field-label qm-field-label-normal">Jam Akhir</label>
                   <input id="qm-fix-spkl-jam-akhir" type="time" class="qm-input qm-field-time">
                 </div>
               </div>
               <div>
-                <label class="qm-field-label qm-field-label-normal">Shift:</label>
+                <label class="qm-field-label qm-field-label-normal">Shift</label>
                 <select id="qm-fix-spkl-shift" class="qm-select qm-field-shift">
                   <option value="1">SHIFT I</option>
                   <option value="2">SHIFT II</option>
@@ -4380,28 +4509,25 @@
                 </select>
               </div>
             </div>
-
-            <button id="qm-btn-spkl-batch" type="button" class="qm-btn qm-btn-coral qm-w-full">
+            <button id="qm-btn-spkl-batch" type="button" class="qm-btn qm-btn-primary">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="18" x2="12" y2="12"/><line x1="9" y1="15" x2="15" y2="15"/></svg>
               Proses Per NRP
             </button>
           </div>
 
-          <!-- SECTION 2: Banyak NRP -->
-          <div class="qm-feature-card">
-            <h6 class="qm-serif qm-mb-m qm-text-s">${SPIKE_SVG} Banyak NRP</h6>
-            
-            <!-- NRP List -->
+          <div class="qm-card">
+            <h6 class="qm-section-title qm-mb-m qm-text-s">${SPIKE_SVG} Banyak NRP</h6>
             <div class="qm-mb-m">
-              <textarea id="qm-fix-many-nrps" placeholder="Daftar NRP (pisahkan koma atau baris)" rows="2" class="qm-textarea qm-textarea-mono qm-textarea-dark"></textarea>
+              <label class="qm-field-label">Daftar NRP</label>
+              <textarea id="qm-fix-many-nrps" placeholder="Daftar NRP (pisahkan koma atau baris)" rows="2" class="qm-textarea qm-textarea-mono"></textarea>
             </div>
-
-            <!-- Date & OT Row -->
             <div class="qm-flex qm-gap-m qm-mb-m">
               <div class="qm-flex-1">
+                <label class="qm-field-label">Tanggal</label>
                 <input id="qm-fix-many-date" type="date" class="qm-input">
               </div>
               <div class="qm-flex-1">
+                <label class="qm-field-label">Jenis OT</label>
                 <select id="qm-fix-many-ot" class="qm-select qm-font-semibold">
                   <option value="1">OT BIASA</option>
                   <option value="2">LONG SHIFT</option>
@@ -4416,21 +4542,19 @@
                 </select>
               </div>
             </div>
-
-            <!-- Extra Fields for OT 7 (Lain-lain) -->
             <div id="qm-fix-many-ot7-box" class="qm-mb-m qm-ot7-box qm-hidden">
               <div class="qm-flex qm-gap-m qm-mb-m">
                 <div class="qm-flex-1">
-                  <label class="qm-field-label qm-field-label-normal">Jam Awal:</label>
+                  <label class="qm-field-label qm-field-label-normal">Jam Awal</label>
                   <input id="qm-fix-many-jam-awal" type="time" class="qm-input qm-field-time">
                 </div>
                 <div class="qm-flex-1">
-                  <label class="qm-field-label qm-field-label-normal">Jam Akhir:</label>
+                  <label class="qm-field-label qm-field-label-normal">Jam Akhir</label>
                   <input id="qm-fix-many-jam-akhir" type="time" class="qm-input qm-field-time">
                 </div>
               </div>
               <div>
-                <label class="qm-field-label qm-field-label-normal">Shift:</label>
+                <label class="qm-field-label qm-field-label-normal">Shift</label>
                 <select id="qm-fix-many-shift" class="qm-select qm-field-shift">
                   <option value="1">SHIFT I</option>
                   <option value="2">SHIFT II</option>
@@ -4440,8 +4564,7 @@
                 </select>
               </div>
             </div>
-
-            <button id="qm-btn-spkl-many-nrp" type="button" class="qm-btn qm-btn-coral qm-w-full">
+            <button id="qm-btn-spkl-many-nrp" type="button" class="qm-btn qm-btn-primary">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
               Proses Banyak NRP
             </button>
@@ -4455,6 +4578,21 @@
           <h6>Kehadiran</h6>
         </div>
         <div class="qm-w-full">
+          <div class="qm-card qm-mb-m">
+            <h6 class="qm-section-title qm-mb-m qm-text-s">Check NRP</h6>
+            <div class="qm-flex qm-gap-m qm-mb-m">
+              <div class="qm-flex-1">
+                <label class="qm-field-label">NRP</label>
+                <input id="qm-input-hadir-check-nrp" type="text" placeholder="NRP" maxlength="8" autocomplete="off" class="qm-input">
+              </div>
+              <div class="qm-flex-1">
+                <label class="qm-field-label">Date</label>
+                <input id="qm-input-hadir-check-date" type="date" class="qm-input">
+              </div>
+            </div>
+            <button id="qm-btn-hadir-check" type="button" class="qm-btn qm-btn-primary">Check</button>
+          </div>
+
           <div class="qm-card qm-mb-m">
             <h6 class="qm-section-title qm-mb-m qm-text-s">👥 Per NRP</h6>
             <div class="qm-flex qm-gap-m qm-mb-m">
@@ -4886,11 +5024,11 @@
       pushLog(`Memulai proses: ${title} - ${initialMsg}`);
     },
 
-    setGlobalProgress(pct, msg) {
+    setGlobalProgress(pct, msg, silent = false) {
       if (msg) {
         const textEl = document.getElementById('qm-global-loader-text');
         if (textEl) textEl.textContent = msg;
-        pushLog(msg);
+        if (!silent) pushLog(msg);
       }
       const barEl = document.getElementById('qm-global-loader-bar');
       if (barEl) barEl.style.width = pct + '%';
@@ -5029,23 +5167,18 @@
   /**
    * Unified Data Fetching & UI Synchronization
    */
-  async function refreshGlobalData(nrp = '', bulan = '', tahun = '') {
+  async function refreshGlobalData(nrp = '', bulan = '', tahun = '', sourceId = '') {
+    const context = resolveSyncContext(sourceId);
+
     // 1. Detection
     if (!nrp) {
-      nrp = document.getElementById('qm-input-nrp')?.value.trim() ||
-        document.getElementById('qm-input-distribusi-nrp')?.value.trim() ||
-        document.getElementById('qm-fix-spkl-nrp')?.value.trim() ||
-        getPageContext().nrp || '';
+      nrp = firstFilledValue(context.nrpIds, true) || getPageContext().nrp || '';
     }
     if (!bulan) {
-      bulan = document.getElementById('qm-input-bulan')?.value ||
-        document.getElementById('qm-fix-spkl-bulan')?.value ||
-        new Date().getMonth() + 1;
+      bulan = firstFilledValue(context.bulanIds, false) || (new Date().getMonth() + 1);
     }
     if (!tahun) {
-      tahun = document.getElementById('qm-input-tahun')?.value ||
-        document.getElementById('qm-fix-spkl-tahun')?.value ||
-        new Date().getFullYear();
+      tahun = firstFilledValue(context.tahunIds, false) || new Date().getFullYear();
     }
 
     if (!nrp || nrp.length < 4) return;
@@ -5105,9 +5238,66 @@
     }
   }
 
+  function activePaneId() {
+    return document.querySelector('.qm-pane.active')?.id || '';
+  }
+
+  function uniqueIds(ids) {
+    return [...new Set(ids.filter(Boolean))];
+  }
+
+  function resolveSyncContext(sourceId = '') {
+    const activePane = activePaneId();
+    let key = 'global';
+
+    if (sourceId === 'spkl' || sourceId.startsWith('qm-fix-spkl') || activePane === 'qm-pane-spkl') key = 'spkl';
+    else if (sourceId === 'kehadiran' || sourceId.startsWith('qm-input-hadir')) key = 'kehadiran';
+    else if (sourceId === 'check-nrp' || sourceId === 'qm-input-bulan' || sourceId === 'qm-input-tahun' || sourceId === 'qm-input-nrp' || activePane === 'qm-pane-check-nrp') key = 'check-nrp';
+
+    const contextMap = {
+      'check-nrp': {
+        nrpIds: ['qm-input-nrp', 'qm-fix-spkl-nrp', 'qm-spkl-online-nrp', 'qm-input-hadir-check-nrp', 'qm-input-hadir-nrp', 'qm-input-hadir-bulan-nrp', 'qm-input-distribusi-nrp', 'qm-dist-KK-nrp'],
+        bulanIds: ['qm-input-bulan', 'qm-fix-spkl-bulan', 'qm-input-hadir-bulan-bln'],
+        tahunIds: ['qm-input-tahun', 'qm-fix-spkl-tahun', 'qm-input-hadir-bulan-thn']
+      },
+      spkl: {
+        nrpIds: ['qm-fix-spkl-nrp', 'qm-spkl-online-nrp', 'qm-input-nrp', 'qm-input-hadir-check-nrp', 'qm-input-hadir-nrp', 'qm-input-hadir-bulan-nrp', 'qm-input-distribusi-nrp', 'qm-dist-KK-nrp'],
+        bulanIds: ['qm-fix-spkl-bulan', 'qm-input-bulan', 'qm-input-hadir-bulan-bln'],
+        tahunIds: ['qm-fix-spkl-tahun', 'qm-input-tahun', 'qm-input-hadir-bulan-thn']
+      },
+      kehadiran: {
+        nrpIds: ['qm-input-hadir-check-nrp', 'qm-input-hadir-bulan-nrp', 'qm-input-hadir-nrp', 'qm-input-nrp', 'qm-fix-spkl-nrp', 'qm-spkl-online-nrp', 'qm-input-distribusi-nrp', 'qm-dist-KK-nrp'],
+        bulanIds: ['qm-input-hadir-bulan-bln', 'qm-input-bulan', 'qm-fix-spkl-bulan'],
+        tahunIds: ['qm-input-hadir-bulan-thn', 'qm-input-tahun', 'qm-fix-spkl-tahun']
+      },
+      global: {
+        nrpIds: ['qm-input-nrp', 'qm-fix-spkl-nrp', 'qm-spkl-online-nrp', 'qm-input-hadir-check-nrp', 'qm-input-hadir-nrp', 'qm-input-hadir-bulan-nrp', 'qm-input-distribusi-nrp', 'qm-dist-KK-nrp'],
+        bulanIds: ['qm-input-bulan', 'qm-fix-spkl-bulan', 'qm-input-hadir-bulan-bln'],
+        tahunIds: ['qm-input-tahun', 'qm-fix-spkl-tahun', 'qm-input-hadir-bulan-thn']
+      }
+    };
+
+    const selected = contextMap[key] || contextMap.global;
+    return {
+      nrpIds: uniqueIds(selected.nrpIds),
+      bulanIds: uniqueIds(selected.bulanIds),
+      tahunIds: uniqueIds(selected.tahunIds)
+    };
+  }
+
+  function firstFilledValue(ids, trim = false) {
+    for (const id of ids) {
+      const el = document.getElementById(id);
+      if (!el) continue;
+      const rawValue = trim ? el.value.trim() : el.value;
+      if (rawValue !== '' && rawValue !== null && rawValue !== undefined) return rawValue;
+    }
+    return '';
+  }
+
   function syncGlobalInputs(nrp, bulan, tahun) {
     // NRP inputs
-    const nrpIds = ['qm-input-nrp', 'qm-spkl-online-nrp', 'qm-fix-spkl-nrp', 'qm-input-hadir-nrp', 'qm-input-hadir-bulan-nrp', 'qm-input-distribusi-nrp', 'qm-dist-KK-nrp'];
+    const nrpIds = ['qm-input-nrp', 'qm-spkl-online-nrp', 'qm-fix-spkl-nrp', 'qm-input-hadir-check-nrp', 'qm-input-hadir-nrp', 'qm-input-hadir-bulan-nrp', 'qm-input-distribusi-nrp', 'qm-dist-KK-nrp'];
     nrpIds.forEach(id => {
       const el = document.getElementById(id);
       if (el && el.value !== nrp) el.value = nrp;
@@ -5353,7 +5543,8 @@
     }
 
     Logger.info(`Starting handleSaveJkChange for ${nrp}. New JK: ${jk}, Use Distribusi: ${useDistribusi}`);
-    UI.showGlobalLoader('Processing JK', 'Updating Master Data...');
+    if (useDistribusi) beginCancelableDistributionFlow();
+    UI.showGlobalLoader('Processing JK', 'Updating Master Data...', !!useDistribusi);
 
     try {
       UI.setGlobalProgress(10, 'Memeriksa data lama...');
@@ -5367,6 +5558,7 @@
       if (oldJk !== jk) {
         UI.setGlobalProgress(30, 'Memperbarui Master Data (editgeneral)...');
         await saveJkMaster(nrp, jk);
+        throwIfCancelled();
 
         // Update UI in-place for immediate feedback
         const jkLabel = document.getElementById('qm-jk-value');
@@ -5383,6 +5575,7 @@
       ctx.nrp = nrp;
 
       if (useDistribusi) {
+        throwIfCancelled();
         const progressMsg = oldJk === jk ? 'Master sesuai. Memproses Distribusi...' : 'Master terupdate. Memproses Distribusi...';
         UI.setGlobalProgress(80, progressMsg);
         try {
@@ -5406,8 +5599,13 @@
           setTimeout(() => window.location.reload(), 1500);
         } catch (distErr) {
           Logger.error('Background distribution error', distErr);
-          UI.showResult('warning', 'Master OK, Distribusi Gagal', distErr.message);
-          UI.hideGlobalLoader(5000);
+          if (state.cancelRequested || isAbortError(distErr)) {
+            UI.showResult('info', 'Dibatalkan', 'Proses distribusi dihentikan oleh pengguna.');
+            UI.hideGlobalLoader(0);
+          } else {
+            UI.showResult('warning', 'Master OK, Distribusi Gagal', distErr.message);
+            UI.hideGlobalLoader(5000);
+          }
         }
       } else {
         // Redirect mode
@@ -5425,8 +5623,15 @@
       }
     } catch (e) {
       Logger.error(`Error in handleSaveJkChange: ${e.message}`, e);
-      UI.showResult('danger', 'Gagal', 'Terjadi kesalahan: ' + e.message);
-      UI.hideGlobalLoader();
+      if (state.cancelRequested || isAbortError(e)) {
+        UI.showResult('info', 'Dibatalkan', 'Proses distribusi dihentikan oleh pengguna.');
+        UI.hideGlobalLoader(0);
+      } else {
+        UI.showResult('danger', 'Gagal', 'Terjadi kesalahan: ' + e.message);
+        UI.hideGlobalLoader();
+      }
+    } finally {
+      if (useDistribusi) clearCancelableDistributionFlow();
     }
   }
 
@@ -5435,13 +5640,14 @@
    */
   async function executeBackgroundDistribusi(params) {
     const { nrp, jk, tglAwal, tglAkhir, shift, bagian, seksi, grup } = params;
-    const isOS = nrp && nrp.length === 8;
     const distUrl = distribusiUrl(nrp);
 
+    throwIfCancelled();
     UI.setGlobalProgress(10, 'Mengambil form distribusi...');
     const html = await hrisFetch(distUrl);
     if (html.includes('id="login-form"') || html.includes('login_form')) throw new Error('Sesi berakhir. Silakan login kembali.');
 
+    throwIfCancelled();
     UI.setGlobalProgress(30, 'Menganalisa form & CSRF token...');
     const doc = parseHTML(html);
     let form = doc.querySelector('form[action*="distribusijamkerja"]');
@@ -5527,21 +5733,26 @@
     UI.setGlobalProgress(70, 'Mengirim data (POST)... Harap tunggu, proses ini lama.');
     const action = form.getAttribute('action') || distUrl;
     const targetUrl = action.startsWith('http') ? action : `https://hris.kti.co.id${action}`;
+    const abortController = new AbortController();
+    state.activeAbortController = abortController;
 
     Logger.info(`Sending background distribution POST to ${targetUrl}...`);
     Logger.info('POST Keys:', Array.from(postData.keys()).join(', '));
 
     try {
+      startBackgroundHeartbeat();
       const response = await fetchWithTimeout(targetUrl, {
         method: 'POST',
         headers: headers,
         body: postData,
         referrer: distUrl,
-        referrerPolicy: 'origin-when-cross-origin'
+        referrerPolicy: 'origin-when-cross-origin',
+        signal: abortController.signal
       }, 300000);
 
       if (!response.ok) throw new Error('Distribusi gagal (HTTP ' + response.status + ')');
 
+      stopBackgroundHeartbeat();
       UI.setGlobalProgress(90, 'Membaca respon server...');
       const resText = await response.text();
       Logger.info('Response received from distribution server.');
@@ -5554,10 +5765,16 @@
         return false;
       }
     } catch (fetchErr) {
+      stopBackgroundHeartbeat();
       if (fetchErr.name === 'AbortError') {
+        if (state.cancelRequested) {
+          throw new Error('Distribusi dibatalkan oleh pengguna.');
+        }
         throw new Error('Distribusi timeout (300 detik). Harap cek secara manual.');
       }
       throw fetchErr;
+    } finally {
+      state.activeAbortController = null;
     }
   }
 
@@ -5586,12 +5803,14 @@
     Logger.info(`Starting handleDistribusiSubsi. JK: ${jk}, Bagian: ${bagian}, Seksi: ${seksi}, Grup: ${grup}`);
 
     if (useDistribusi) {
-      UI.showGlobalLoader('Processing Subsi', 'Menyiapkan data...');
+      beginCancelableDistributionFlow();
+      UI.showGlobalLoader('Processing Subsi', 'Menyiapkan data...', true);
       try {
         const isOS = nrp.length === 8;
         const nrpAwal = isOS ? '00000000' : '0000';
         const nrpAkhir = isOS ? '99999999' : '9999';
 
+        throwIfCancelled();
         const success = await executeBackgroundDistribusi({
           nrp: { awal: nrpAwal, akhir: nrpAkhir },
           jk,
@@ -5610,9 +5829,16 @@
         }
         setTimeout(() => window.location.reload(), 1500);
       } catch (e) {
-        UI.showResult('danger', 'Gagal', 'Error: ' + e.message);
         Logger.error('handleDistribusiSubsi error', e);
-        UI.hideGlobalLoader();
+        if (state.cancelRequested || isAbortError(e)) {
+          UI.showResult('info', 'Dibatalkan', 'Proses distribusi dihentikan oleh pengguna.');
+          UI.hideGlobalLoader(0);
+        } else {
+          UI.showResult('danger', 'Gagal', 'Error: ' + e.message);
+          UI.hideGlobalLoader();
+        }
+      } finally {
+        clearCancelableDistributionFlow();
       }
     } else {
       const base = distribusiUrl(nrp);
@@ -6139,6 +6365,23 @@
     window.open(url, '_blank');
   }
 
+  function handleAttendanceCheckNrp() {
+    const nrp = document.getElementById('qm-input-hadir-check-nrp')?.value.trim();
+    const date = document.getElementById('qm-input-hadir-check-date')?.value;
+
+    if (!nrp || !date) {
+      alert('Harap isi NRP dan Tanggal.');
+      return;
+    }
+    if (!/^\d+$/.test(nrp) || (nrp.length !== 4 && nrp.length !== 8)) {
+      alert('NRP harus 4 atau 8 digit angka.');
+      return;
+    }
+
+    sessionStorage.setItem(STORAGE.AUTO_BARCODE_SEARCH, JSON.stringify({ nrp, date }));
+    window.location.href = barcodePageUrl(nrp);
+  }
+
   function handleInputHadir() {
     const nrp = document.getElementById('qm-input-hadir-nrp')?.value.trim();
     const tgl = document.getElementById('qm-input-hadir-tanggal')?.value;
@@ -6187,7 +6430,7 @@
     localStorage.setItem('qm_last_tab', pane);
 
     if (pane === 'distribusi' || pane === 'check-nrp' || pane === 'spkl' || pane === 'kehadiran') {
-      refreshGlobalData();
+      refreshGlobalData('', '', '', pane);
     }
   }
 
@@ -6417,6 +6660,7 @@
 
     spklHighlight();
     autoFillTargetPage();
+    autoBarcodeSearchPage();
     autoClickAddData();
     autoInputHadir();
     autoDistribusi();
@@ -6473,6 +6717,9 @@
       const elBulanNrp = document.getElementById('qm-input-hadir-bulan-nrp');
       if (elBulanNrp && ctx.nrp) elBulanNrp.value = ctx.nrp;
 
+      const elHadirCheckNrp = document.getElementById('qm-input-hadir-check-nrp');
+      if (elHadirCheckNrp && ctx.nrp) elHadirCheckNrp.value = ctx.nrp;
+
       const elDistNrp = document.getElementById('qm-input-distribusi-nrp');
       if (elDistNrp && ctx.nrp) elDistNrp.value = ctx.nrp;
 
@@ -6512,6 +6759,11 @@
       const elManyDate = document.getElementById('qm-fix-many-date');
       if (elManyDate) {
         elManyDate.value = `${currentYear}-${String(currentMonth).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+      }
+
+      const elHadirCheckDate = document.getElementById('qm-input-hadir-check-date');
+      if (elHadirCheckDate) {
+        elHadirCheckDate.value = `${currentYear}-${String(currentMonth).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
       }
 
       const elDistKKDate = document.getElementById('qm-dist-KK-date');
@@ -6569,6 +6821,7 @@
     on('click', '#qm-btn-spkl-batch', runSpklBatchProcess);
     on('click', '#qm-btn-spkl-many-nrp', runSpklManyNrpBatch);
     on('click', '#qm-btn-spkl-online-cek', handleSpklOnlineCheck);
+    on('click', '#qm-btn-hadir-check', handleAttendanceCheckNrp);
     on('click', '#qm-btn-hadir-proses', handleInputHadir);
     on('click', '#qm-btn-hadir-bulan-proses', runHadirBulanBatch);
     on('click', '#qm-btn-hadir-many-proses', runHadirManyNrpBatch);
@@ -6576,10 +6829,16 @@
     on('click', '#qm-btn-distribusi-subsi-proses', handleDistribusiSubsi);
     on('click', '#qm-global-cancel-btn', function () {
       Logger.info('User cancelled automation');
+      state.cancelRequested = true;
       sessionStorage.removeItem(STORAGE.SPKL_QUEUE);
       sessionStorage.removeItem(STORAGE.SPKL_CURRENT_INDEX);
       sessionStorage.removeItem(STORAGE.SPKL_FIX_PENDING);
       sessionStorage.removeItem(STORAGE.AUTO_FINISHED);
+      if (state.activeCancelableFlow) {
+        UI.setGlobalProgress(5, 'Membatalkan proses...', true);
+        if (state.activeAbortController) state.activeAbortController.abort();
+        return;
+      }
       UI.hideGlobalLoader(0);
       UI.showResult('info', 'Dibatalkan', 'Proses otomasi dihentikan oleh pengguna.');
     });
@@ -6631,7 +6890,7 @@
     });
 
     // Sync other NRP inputs too
-    on('input', '#qm-spkl-online-nrp, #qm-fix-spkl-nrp, #qm-input-hadir-nrp, #qm-input-hadir-bulan-nrp', function () {
+    on('input', '#qm-spkl-online-nrp, #qm-fix-spkl-nrp, #qm-input-hadir-check-nrp, #qm-input-hadir-nrp, #qm-input-hadir-bulan-nrp', function () {
       const nrp = this.value.trim();
       if (nrp.length >= 4) {
         refreshGlobalData(nrp);
@@ -6640,7 +6899,9 @@
 
     // Sync Month/Year changes
     on('change', '#qm-input-bulan, #qm-input-tahun, #qm-fix-spkl-bulan, #qm-fix-spkl-tahun, #qm-input-hadir-bulan-bln', function () {
-      refreshGlobalData();
+      const isMonthField = this.id === 'qm-input-bulan' || this.id === 'qm-fix-spkl-bulan' || this.id === 'qm-input-hadir-bulan-bln';
+      const isYearField = this.id === 'qm-input-tahun' || this.id === 'qm-fix-spkl-tahun';
+      refreshGlobalData('', isMonthField ? this.value : '', isYearField ? this.value : '', this.id);
     });
 
     // General Keyboard Navigation for forms
