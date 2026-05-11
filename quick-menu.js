@@ -16,8 +16,9 @@
 (function () {
   'use strict';
 
+
   /* ============================================================
-   * 0. CONFIGURATION
+   * 0. CONSTANTS
    * ============================================================ */
 
   const APP_CONFIG = Object.freeze({
@@ -208,16 +209,101 @@
     SAMPLE_HISTORY_LIMIT: 15,
   });
 
+  /** Common success indicators in HRIS response text. */
+  const SUCCESS_KEYWORDS = ['Berhasil', 'Selesai', 'sukses', 'successfully', 'Distribution Process Completed', 'alert-success'];
+
+  /* ============================================================
+   * 1. CORE UTILITIES
+   * ============================================================ */
+
+  /** Parse "HH:MM" or "HH.MM" into decimal hours. */
+  function parseTime(t) {
+    if (!t) return null;
+    const parts = t.replace(':', '.').split('.');
+    if (parts.length >= 2) {
+      const h = parseInt(parts[0], 10);
+      const m = parseInt(parts[1], 10);
+      if (isNaN(h) || isNaN(m)) return null;
+      return h + m / 60;
+    }
+    return null;
+  }
+
+
+  /** Simple HTML escape helper. */
+  function escHtml(str) {
+    if (!str) return '';
+    return String(str).replace(/[&<>"']/g, m => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    }[m]));
+  }
+
+
+  /** 
+   * Enhanced logger that respects state.debug.
+   * @param {string} msg 
+   * @param {any} data 
+   */
+  // log(msg, data) — removed, replaced by Logger
+
+  /**
+   * Robust date parser for HRIS formats: 
+   * - DD/MM/YYYY
+   * - DD-MM-YYYY
+   * - DD-MMM-YYYY (e.g. 21-Apr-2026)
+   * @param {string} str 
+   * @returns {Date|null}
+   */
+  function parseHrisDate(str) {
+    if (!str) return null;
+    const clean = str.trim();
+
+    // DD/MM/YYYY or DD-MM-YYYY
+    const dmyMatch = clean.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$/);
+    if (dmyMatch) {
+      return new Date(dmyMatch[3], dmyMatch[2] - 1, dmyMatch[1]);
+    }
+
+    // DD-MMM-YYYY
+    const dMmmYMatch = clean.match(/^(\d{1,2})-(\w{3})-(\d{4})$/);
+    if (dMmmYMatch) {
+      const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+      const monthNamesId = ["Jan", "Feb", "Mar", "Apr", "Mei", "Jun", "Jul", "Agu", "Sep", "Okt", "Nov", "Des"];
+      const mStr = dMmmYMatch[2].charAt(0).toUpperCase() + dMmmYMatch[2].slice(1).toLowerCase();
+
+      let mIdx = monthNames.indexOf(mStr);
+      if (mIdx === -1) mIdx = monthNamesId.indexOf(mStr);
+
+      if (mIdx !== -1) {
+        return new Date(dMmmYMatch[3], mIdx, dMmmYMatch[1]);
+      }
+    }
+
+    // YYYY-MM-DD
+    const ymdMatch = clean.match(/^(\d{4})[/-](\d{1,2})[/-](\d{1,2})$/);
+    if (ymdMatch) {
+      return new Date(ymdMatch[1], ymdMatch[2] - 1, ymdMatch[3]);
+    }
+
+    // Fallback: browser default
+    const d = new Date(clean);
+    // Adjust ISO parsing to local time to prevent mismatch
+    if (clean.match(/^\d{4}-\d{2}-\d{2}$/)) {
+      return new Date(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+    }
+    return isNaN(d.getTime()) ? null : d;
+  }
+
+  function isOutsourceNrp(nrp) {
+    return String(nrp || '').length === 8;
+  }
+
   function getCurrentQueryParams() {
     return new URLSearchParams(window.location.search);
   }
 
   function getCurrentPath() {
     return window.location.pathname || '';
-  }
-
-  function isOutsourceNrp(nrp) {
-    return String(nrp || '').length === 8;
   }
 
   function isAttendancePagePath(path = getCurrentPath()) {
@@ -250,11 +336,239 @@
     return null;
   }
 
+
   function getAbsenCreatePageKind(path = getCurrentPath()) {
     if (path === '/absenbarcode/create') return 'internal';
     if (path === '/absenbarcodeos/create') return 'outsource';
     return null;
   }
+
+
+  function isSuccessResponse(text) {
+    return SUCCESS_KEYWORDS.some(kw => text.includes(kw));
+  }
+
+  /** Parse CSS class/style/bgcolor attributes to detect Libur/HalfDay status.
+   *  Used by both countLibur() and getRowStatus() to avoid duplicated regex. */
+  function parseRowCssFlags(tr) {
+    const trStr = ((tr.getAttribute('class') || '') + (tr.getAttribute('style') || '') + (tr.getAttribute('bgcolor') || '')).toLowerCase();
+    const tds = tr.querySelectorAll('td');
+    const td0Str = tds.length > 0 ? ((tds[0].getAttribute('class') || '') + (tds[0].getAttribute('style') || '') + (tds[0].getAttribute('bgcolor') || '')).toLowerCase() : '';
+    const combined = trStr + td0Str;
+    return {
+      isLiburColor: /danger|red|#ff0000/.test(combined),
+      isHalfDayColor: /warning|yellow|blue|#ffff00|#0000ff/.test(combined)
+    };
+  }
+
+
+  function getMedian(values) {
+    if (!values.length) return 0;
+    const sorted = [...values].sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+  }
+
+  function getPerfNow() {
+    return (typeof performance !== 'undefined' && typeof performance.now === 'function')
+      ? performance.now()
+      : Date.now();
+  }
+
+  /* ============================================================
+   * 2. DOM HELPERS
+   * ============================================================ */
+
+  /** Unified DOM-based sanitization and parsing. */
+  function parseHTML(html, fullDoc = false) {
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    const dangerous = doc.querySelectorAll('script,style,link,iframe,object,embed,svg,math');
+    dangerous.forEach(el => el.remove());
+    doc.querySelectorAll('*').forEach(el => {
+      Array.from(el.attributes).forEach(attr => {
+        if (attr.name.startsWith('on') || attr.value.toLowerCase().includes('javascript:')) {
+          el.removeAttribute(attr.name);
+        }
+      });
+    });
+    return doc;
+  }
+
+
+  /** Safely set innerHTML using DOM-based sanitization via parseHTML. */
+  function setInnerHTML(el, html) {
+    if (!el) return;
+    if (!html && html !== '') { el.innerHTML = html; return; }
+    const doc = parseHTML(`<div>${html}</div>`);
+    const container = doc.querySelector('div');
+    el.innerHTML = '';
+    while (container.firstChild) {
+      el.appendChild(container.firstChild);
+    }
+  }
+
+  /** Set a form field value and dispatch the given events.
+   *  Replaces the repeated pattern: el.value = val; el.dispatchEvent(new Event(...)) */
+  function setFieldValue(el, value, events = ['change']) {
+    if (!el) return;
+    el.value = value;
+    events.forEach(e => el.dispatchEvent(new Event(e, { bubbles: true })));
+    // Auto-refresh SelectPicker if applicable
+    if (el.tagName === 'SELECT' && el.classList.contains('selectpicker')) {
+      selectPickerRefresh(el);
+    }
+  }
+
+  /** Find an option in a select element matching a predicate, select it, and dispatch change.
+   *  Returns true if a match was found. */
+  function selectOption(select, matchFn) {
+    if (!select) return false;
+    const options = select.querySelectorAll('option');
+    for (const opt of options) {
+      if (matchFn(opt)) {
+        select.value = opt.value;
+        select.dispatchEvent(new Event('change', { bubbles: true }));
+        return true;
+      }
+    }
+    return false;
+  }
+
+
+  /** Refresh a bootstrap-selectpicker if jQuery is available. */
+  function selectPickerRefresh(select) {
+    if (typeof window.$ !== 'undefined' && window.$(select).selectpicker) {
+      window.$(select).selectpicker('refresh');
+    }
+  }
+
+
+  /** Custom Event Delegation helper. */
+  function delegate(eventName, selector, handler) {
+    document.addEventListener(eventName, function (e) {
+      let target = e.target;
+      while (target && target !== document) {
+        if (target.matches(selector)) {
+          handler.call(target, e);
+          return;
+        }
+        target = target.parentNode;
+      }
+    });
+  }
+
+
+  /** Wait for element using MutationObserver (replaces setInterval polling). */
+  function waitForElement(selector, timeout = 5000) {
+    return new Promise((resolve, reject) => {
+      const el = document.querySelector(selector);
+      if (el) return resolve(el);
+
+      const observer = new MutationObserver(() => {
+        const target = document.querySelector(selector);
+        if (target) {
+          observer.disconnect();
+          resolve(target);
+        }
+      });
+
+      observer.observe(document.body, { childList: true, subtree: true });
+      setTimeout(() => {
+        observer.disconnect();
+        reject(new Error(`Timeout waiting for ${selector}`));
+      }, timeout);
+    });
+  }
+
+  /** Extract common page params used by anomaly + SPKL + barcode checks. */
+  function getPageContext() {
+    const params = getCurrentQueryParams();
+    let nrp = params.get('nrp');
+    if (!nrp) {
+      const input = document.querySelector('input[name="nrp"]');
+      if (input) nrp = input.value;
+    }
+    if (!nrp) {
+      const match = document.body.textContent.match(/NRP\s*:\s*(\d{4,8})/i);
+      if (match) nrp = match[1];
+    }
+
+    const selTahun = document.querySelector('select[name="tahun"]');
+    const selBulan = document.querySelector('#bulan');
+    const selBagian = document.querySelector('select[name="kode_bagian"]');
+    const selSeksi = document.querySelector('select[name="kode_seksi"]');
+
+    return {
+      tahun: params.get('tahun') || (selTahun ? selTahun.value : null) || new Date().getFullYear(),
+      bulan: params.get('bulan') || (selBulan ? selBulan.value : null) || (new Date().getMonth() + 1),
+      nrp,
+      bagian: (selBagian ? selBagian.value : null) || params.get('kode_bagian') || '',
+      seksi: (selSeksi ? selSeksi.value : null) || params.get('kode_seksi') || '',
+    };
+  }
+
+
+  /* ============================================================
+   * 3. SESSION STORAGE
+   * ============================================================ */
+
+
+  /** Read cached employee data from sessionStorage. Returns null if not fully cached. */
+  function readEmployeeCache(nrp) {
+    const jk = sessionStorage.getItem('qm_jk_' + nrp);
+    const nama = sessionStorage.getItem('qm_nama_' + nrp);
+    const id = sessionStorage.getItem('qm_id_' + nrp);
+    const kk = sessionStorage.getItem('qm_KK_' + nrp);
+    const bag = sessionStorage.getItem('qm_bag_' + nrp);
+    if (!jk || !nama || !id || !kk || !bag) return null;
+    return {
+      jk, KK: kk, nama, id,
+      editUrl: sessionStorage.getItem('qm_edit_url_' + nrp) || '',
+      bagian: bag || '',
+      seksi: sessionStorage.getItem('qm_sek_' + nrp) || '',
+      group: sessionStorage.getItem('qm_grp_' + nrp) || ''
+    };
+  }
+
+  function writeEmployeeCache(nrp, emp) {
+    if (emp.id) sessionStorage.setItem('qm_id_' + nrp, emp.id);
+    if (emp.editUrl) sessionStorage.setItem('qm_edit_url_' + nrp, emp.editUrl);
+    if (emp.jk) sessionStorage.setItem('qm_jk_' + nrp, emp.jk);
+    if (emp.KK) sessionStorage.setItem('qm_KK_' + nrp, emp.KK);
+    if (emp.nama) sessionStorage.setItem('qm_nama_' + nrp, emp.nama);
+    if (emp.bagian) sessionStorage.setItem('qm_bag_' + nrp, emp.bagian);
+    if (emp.seksi) sessionStorage.setItem('qm_sek_' + nrp, emp.seksi);
+    if (emp.group) sessionStorage.setItem('qm_grp_' + nrp, emp.group);
+  }
+
+  /**
+   * Validates sessionStorage schema version. Clears all qm_* keys if
+   * the version is missing or does not match the current STORAGE_SCHEMA_VERSION.
+   * @returns {boolean} true if schema was already valid, false if it was cleared.
+   */
+  function validateStorageSchema() {
+    const stored = sessionStorage.getItem(STORAGE.SCHEMA_VERSION);
+    if (stored === String(STORAGE_SCHEMA_VERSION)) return true;
+
+    const keysToRemove = [];
+    for (let i = 0; i < sessionStorage.length; i++) {
+      const key = sessionStorage.key(i);
+      if (key && key.startsWith('qm_')) keysToRemove.push(key);
+    }
+    keysToRemove.forEach(k => sessionStorage.removeItem(k));
+    sessionStorage.setItem(STORAGE.SCHEMA_VERSION, String(STORAGE_SCHEMA_VERSION));
+    Logger.info(`Schema versi lama (${stored || 'kosong'}) dihapus. Versi baru: ${STORAGE_SCHEMA_VERSION}`);
+    return false;
+  }
+
+  /**
+   * Validates critical DOM selectors based on the current page type.
+   * @param {{ silent?: boolean }} options - If silent is true, suppresses UI notification
+   * @returns {{ valid: boolean, missing: string[] }}
+
+  /* ============================================================
+   * 4. ROUTE BUILDERS
+   * ============================================================ */
 
   function getEmployeeRouteSet(nrp) {
     return isOutsourceNrp(nrp)
@@ -272,6 +586,7 @@
       };
   }
 
+
   /** Shorthand: select internal or OS route based on NRP type. */
   function getRoute(nrp, internalRoute, osRoute) {
     return isOutsourceNrp(nrp) ? osRoute : internalRoute;
@@ -283,6 +598,33 @@
 
   function getDistribusiBaseUrl(nrp) {
     return getRoute(nrp, ROUTES.DISTRIBUSI, ROUTES.DISTRIBUSI_OS)(nrp);
+  }
+
+  /** Build auto-distribusi link for a given date + shift. */
+  function getDistribusiLink(ctx, tglAwal, shiftVal, tglAkhir = null) {
+    if (!ctx.nrp) return '';
+    const base = getDistribusiBaseUrl(ctx.nrp);
+
+    // If tglAwal is already a full date (YYYY-MM-DD), use it directly
+    const dAwal = (tglAwal && tglAwal.includes('-')) ? tglAwal : `${ctx.tahun}-${String(ctx.bulan).padStart(2, '0')}-${String(tglAwal).padStart(2, '0')}`;
+    const dAkhir = tglAkhir ? (tglAkhir.includes('-') ? tglAkhir : `${ctx.tahun}-${String(ctx.bulan).padStart(2, '0')}-${String(tglAkhir).padStart(2, '0')}`) : dAwal;
+
+    return `${base}?qm_auto_distribusi=1&nrp=${encodeURIComponent(ctx.nrp)}&tanggal_awal=${encodeURIComponent(dAwal)}&tanggal_akhir=${encodeURIComponent(dAkhir)}&bagian=${encodeURIComponent(ctx.bagian)}&seksi=${encodeURIComponent(ctx.seksi)}&shift=${encodeURIComponent(shiftVal)}`;
+  }
+
+
+  /** Build Kehadiran (Barcode) link for a given context. */
+  function getKehadiranLink(ctx) {
+    if (!ctx.nrp) return '';
+    return (isOutsourceNrp(ctx.nrp) ? ROUTES.ABSEN_BARCODE_OS : ROUTES.ABSEN_BARCODE)(ctx.tahun, String(ctx.bulan).padStart(2, '0'), ctx.nrp);
+  }
+
+
+  function buildSpklOnlineUrl(ctx, minDate, maxDate) {
+    const bulan = String(ctx.bulan).padStart(2, '0');
+    const min = String(minDate).padStart(2, '0');
+    const max = String(maxDate).padStart(2, '0');
+    return ROUTES.SPKL_ONLINE(ctx.tahun, bulan, min, max, ctx.nrp);
   }
 
   function getEmployeeEditUrl(nrp, id) {
@@ -313,259 +655,35 @@
     return getRoute(nrp, ROUTES.ABSEN_BARCODE_ADD, ROUTES.ABSEN_BARCODE_OS_ADD);
   }
 
-  function buildSpklOnlineUrl(ctx, minDate, maxDate) {
-    const bulan = String(ctx.bulan).padStart(2, '0');
-    const min = String(minDate).padStart(2, '0');
-    const max = String(maxDate).padStart(2, '0');
-    return ROUTES.SPKL_ONLINE(ctx.tahun, bulan, min, max, ctx.nrp);
-  }
-
   /* ============================================================
-   * 1. SHARED HELPERS
+   * 5. API LAYER
    * ============================================================ */
 
-  /** Unified DOM-based sanitization and parsing. */
-  function parseHTML(html, fullDoc = false) {
-    const doc = new DOMParser().parseFromString(html, 'text/html');
-    const dangerous = doc.querySelectorAll('script,style,link,iframe,object,embed,svg,math');
-    dangerous.forEach(el => el.remove());
-    doc.querySelectorAll('*').forEach(el => {
-      Array.from(el.attributes).forEach(attr => {
-        if (attr.name.startsWith('on') || attr.value.toLowerCase().includes('javascript:')) {
-          el.removeAttribute(attr.name);
-        }
-      });
-    });
-    return doc;
-  }
 
-  /** Simple HTML escape helper. */
-  function escHtml(str) {
-    if (!str) return '';
-    return String(str).replace(/[&<>"']/g, m => ({
-      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
-    }[m]));
-  }
-
-  /** Safely set innerHTML using DOM-based sanitization via parseHTML. */
-  function setInnerHTML(el, html) {
-    if (!el) return;
-    if (!html && html !== '') { el.innerHTML = html; return; }
-    const doc = parseHTML(`<div>${html}</div>`);
-    const container = doc.querySelector('div');
-    el.innerHTML = '';
-    while (container.firstChild) {
-      el.appendChild(container.firstChild);
+  /** Fetch wrapper with timeout. Returns response text. */
+  async function req(url, timeout = 15000) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeout);
+    try {
+      const res = await fetch(url, { signal: ctrl.signal });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      return await res.text();
+    } finally {
+      clearTimeout(timer);
     }
   }
 
-  /** Extract common page params used by anomaly + SPKL + barcode checks. */
-  function getPageContext() {
-    const params = getCurrentQueryParams();
-    let nrp = params.get('nrp');
-    if (!nrp) {
-      const input = document.querySelector('input[name="nrp"]');
-      if (input) nrp = input.value;
+
+  /** Unified fetch with AbortController timeout. Returns Response. */
+  async function fetchWithTimeout(url, options = {}, timeoutMs = 15000) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch(url, { ...options, signal: controller.signal });
+      return response;
+    } finally {
+      clearTimeout(timeoutId);
     }
-    if (!nrp) {
-      const match = document.body.textContent.match(/NRP\s*:\s*(\d{4,8})/i);
-      if (match) nrp = match[1];
-    }
-
-    const selTahun = document.querySelector('select[name="tahun"]');
-    const selBulan = document.querySelector('#bulan');
-    const selBagian = document.querySelector('select[name="kode_bagian"]');
-    const selSeksi = document.querySelector('select[name="kode_seksi"]');
-
-    return {
-      tahun: params.get('tahun') || (selTahun ? selTahun.value : null) || new Date().getFullYear(),
-      bulan: params.get('bulan') || (selBulan ? selBulan.value : null) || (new Date().getMonth() + 1),
-      nrp,
-      bagian: (selBagian ? selBagian.value : null) || params.get('kode_bagian') || '',
-      seksi: (selSeksi ? selSeksi.value : null) || params.get('kode_seksi') || '',
-    };
-  }
-
-  /** Build auto-distribusi link for a given date + shift. */
-  function getDistribusiLink(ctx, tglAwal, shiftVal, tglAkhir = null) {
-    if (!ctx.nrp) return '';
-    const base = getDistribusiBaseUrl(ctx.nrp);
-
-    // If tglAwal is already a full date (YYYY-MM-DD), use it directly
-    const dAwal = (tglAwal && tglAwal.includes('-')) ? tglAwal : `${ctx.tahun}-${String(ctx.bulan).padStart(2, '0')}-${String(tglAwal).padStart(2, '0')}`;
-    const dAkhir = tglAkhir ? (tglAkhir.includes('-') ? tglAkhir : `${ctx.tahun}-${String(ctx.bulan).padStart(2, '0')}-${String(tglAkhir).padStart(2, '0')}`) : dAwal;
-
-    return `${base}?qm_auto_distribusi=1&nrp=${encodeURIComponent(ctx.nrp)}&tanggal_awal=${encodeURIComponent(dAwal)}&tanggal_akhir=${encodeURIComponent(dAkhir)}&bagian=${encodeURIComponent(ctx.bagian)}&seksi=${encodeURIComponent(ctx.seksi)}&shift=${encodeURIComponent(shiftVal)}`;
-  }
-
-  /** Build Kehadiran (Barcode) link for a given context. */
-  function getKehadiranLink(ctx) {
-    if (!ctx.nrp) return '';
-    return (isOutsourceNrp(ctx.nrp) ? ROUTES.ABSEN_BARCODE_OS : ROUTES.ABSEN_BARCODE)(ctx.tahun, String(ctx.bulan).padStart(2, '0'), ctx.nrp);
-  }
-
-  /** Parse "HH:MM" or "HH.MM" into decimal hours. */
-  function parseTime(t) {
-    if (!t) return null;
-    const parts = t.replace(':', '.').split('.');
-    if (parts.length >= 2) {
-      const h = parseInt(parts[0], 10);
-      const m = parseInt(parts[1], 10);
-      if (isNaN(h) || isNaN(m)) return null;
-      return h + m / 60;
-    }
-    return null;
-  }
-
-  // ── Utility Functions (Phase 0 deduplication) ───────────────────────────
-
-  /** Set a form field value and dispatch the given events.
-   *  Replaces the repeated pattern: el.value = val; el.dispatchEvent(new Event(...)) */
-  function setFieldValue(el, value, events = ['change']) {
-    if (!el) return;
-    el.value = value;
-    events.forEach(e => el.dispatchEvent(new Event(e, { bubbles: true })));
-    // Auto-refresh SelectPicker if applicable
-    if (el.tagName === 'SELECT' && el.classList.contains('selectpicker')) {
-      selectPickerRefresh(el);
-    }
-  }
-
-  /** Find an option in a select element matching a predicate, select it, and dispatch change.
-   *  Returns true if a match was found. */
-  function selectOption(select, matchFn) {
-    if (!select) return false;
-    const options = select.querySelectorAll('option');
-    for (const opt of options) {
-      if (matchFn(opt)) {
-        select.value = opt.value;
-        select.dispatchEvent(new Event('change', { bubbles: true }));
-        return true;
-      }
-    }
-    return false;
-  }
-
-  /** Refresh a bootstrap-selectpicker if jQuery is available. */
-  function selectPickerRefresh(select) {
-    if (typeof window.$ !== 'undefined' && window.$(select).selectpicker) {
-      window.$(select).selectpicker('refresh');
-    }
-  }
-
-  /** Custom Event Delegation helper. */
-  function delegate(eventName, selector, handler) {
-    document.addEventListener(eventName, function (e) {
-      let target = e.target;
-      while (target && target !== document) {
-        if (target.matches(selector)) {
-          handler.call(target, e);
-          return;
-        }
-        target = target.parentNode;
-      }
-    });
-  }
-
-  /** Parse CSS class/style/bgcolor attributes to detect Libur/HalfDay status.
-   *  Used by both countLibur() and getRowStatus() to avoid duplicated regex. */
-  function parseRowCssFlags(tr) {
-    const trStr = ((tr.getAttribute('class') || '') + (tr.getAttribute('style') || '') + (tr.getAttribute('bgcolor') || '')).toLowerCase();
-    const tds = tr.querySelectorAll('td');
-    const td0Str = tds.length > 0 ? ((tds[0].getAttribute('class') || '') + (tds[0].getAttribute('style') || '') + (tds[0].getAttribute('bgcolor') || '')).toLowerCase() : '';
-    const combined = trStr + td0Str;
-    return {
-      isLiburColor: /danger|red|#ff0000/.test(combined),
-      isHalfDayColor: /warning|yellow|blue|#ffff00|#0000ff/.test(combined)
-    };
-  }
-
-  /** Unified Fix/Perbaikan click handler — shared by onFixDotClick and onBatchFixClick. */
-  function handleFixClick(link, date, title, fullDate) {
-    if (link) {
-      const currentUrl = window.location.href;
-      Logger.info('handleFixClick triggered', { link, date, title, currentUrl });
-      // Only set return URL if we're not already in an auto-fix flow
-      if (!currentUrl.includes('qm_auto_spkl_fix=1') && !currentUrl.includes('qm_auto_distribusi=1')) {
-        Logger.info('Setting RETURN_URL to', currentUrl);
-        sessionStorage.setItem(STORAGE.RETURN_URL, currentUrl);
-      }
-    }
-    if (title === 'Buka Halaman Kehadiran' || title === 'Cek Kehadiran' || title === 'Lihat Duplikasi Shift') {
-      const ctx = getPageContext();
-      if (ctx.nrp && date) {
-        sessionStorage.setItem(STORAGE.AUTO_NRP_FILL, ctx.nrp);
-        sessionStorage.setItem(STORAGE.AUTO_DATE_FILL, date);
-      }
-      if (isBarcodePagePath() && title !== 'Lihat Duplikasi Shift') {
-        const btn = document.querySelector('[data-target="#addData"]');
-        if (btn) { btn.click(); return; }
-      }
-      if (link) {
-        if (title !== 'Lihat Duplikasi Shift') sessionStorage.setItem(STORAGE.AUTO_ADD_DATA, 'true');
-        window.open(link, '_blank');
-      }
-      return;
-    }
-
-    if (link) {
-      if (link.includes('absenbarcode') && title && !title.includes('Pulang awal') && !title.includes('Duplikasi')) {
-        sessionStorage.setItem(STORAGE.AUTO_ADD_DATA, 'true');
-      }
-      if (date) sessionStorage.setItem(STORAGE.HIGHLIGHT_SPKL, date);
-
-      // Multi-step SPKL Fix logic
-      if (link.includes('qm_auto_spkl_fix=1')) {
-        // Collect all unique dates with SPKL fix links
-        const spklFixAnomalies = state.anomalies.filter(a => a.link && a.link.includes('qm_auto_spkl_fix=1'));
-
-        const queue = [];
-        const seenDates = new Set();
-
-        spklFixAnomalies.forEach(a => {
-          // Extract full_date from link to ensure uniqueness across month/year if possible, 
-          // but usually tgl (day) is enough within a month
-          const fullDateMatch = a.link.match(/full_date=([^&]+)/);
-          const dateKey = fullDateMatch ? fullDateMatch[1] : a.tgl;
-
-          if (!seenDates.has(dateKey)) {
-            seenDates.add(dateKey);
-            queue.push({
-              link: a.link,
-              date: a.tgl,
-              fullDate: fullDateMatch ? fullDateMatch[1] : (a.fullDate || a.tgl),
-              title: a.msg
-            });
-          }
-        });
-
-        if (queue.length > 0) {
-          Logger.info('Starting background queue', queue);
-          runSpklBackgroundQueue(queue).catch(e => Logger.error('SPKL queue error', e));
-        }
-        return;
-      } else {
-        window.open(link, '_blank');
-      }
-    } else {
-      alert('Fitur perbaikan otomatis segera hadir!');
-    }
-  }
-
-  /** Unified finally-block helper for pending checks state. */
-  function decrementPendingChecks() {
-    state.pendingChecks--;
-    if (state.pendingChecks <= 0) {
-      const tab = document.querySelector('[data-pane="anomali"]');
-      if (tab) tab.classList.remove('qm-tab-loading');
-    }
-  }
-
-  /** Common success indicators in HRIS response text. */
-  const SUCCESS_KEYWORDS = ['Berhasil', 'Selesai', 'sukses', 'successfully', 'Distribution Process Completed', 'alert-success'];
-
-  function isSuccessResponse(text) {
-    return SUCCESS_KEYWORDS.some(kw => text.includes(kw));
   }
 
   function buildFormPayload(doc, overrides = {}) {
@@ -612,10 +730,6 @@
     }).finally(() => UI.hideGlobalLoader());
   }
 
-  /* ============================================================
-   * 2. SHARED EMPLOYEE FETCH HELPERS
-   * ============================================================ */
-
   function buildEmployeeUrls(nrp) {
     const routeSet = getEmployeeRouteSet(nrp);
     return {
@@ -653,6 +767,7 @@
     return detailUrl;
   }
 
+
   /** Unified field value extractor (input or select). */
   function getFieldValue(doc, fieldName) {
     const el = doc.querySelector(`[name="${fieldName}"]`);
@@ -685,83 +800,6 @@
       }
     }
     return '';
-  }
-
-  /** Wait for element using MutationObserver (replaces setInterval polling). */
-  function waitForElement(selector, timeout = 5000) {
-    return new Promise((resolve, reject) => {
-      const el = document.querySelector(selector);
-      if (el) return resolve(el);
-
-      const observer = new MutationObserver(() => {
-        const target = document.querySelector(selector);
-        if (target) {
-          observer.disconnect();
-          resolve(target);
-        }
-      });
-
-      observer.observe(document.body, { childList: true, subtree: true });
-      setTimeout(() => {
-        observer.disconnect();
-        reject(new Error(`Timeout waiting for ${selector}`));
-      }, timeout);
-    });
-  }
-
-  // fetchEmployeePage — removed, replaced by getEmp()
-
-  /** Fetch wrapper with timeout. Returns response text. */
-  async function req(url, timeout = 15000) {
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), timeout);
-    try {
-      const res = await fetch(url, { signal: ctrl.signal });
-      if (!res.ok) throw new Error('HTTP ' + res.status);
-      return await res.text();
-    } finally {
-      clearTimeout(timer);
-    }
-  }
-
-  /** Unified fetch with AbortController timeout. Returns Response. */
-  async function fetchWithTimeout(url, options = {}, timeoutMs = 15000) {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-    try {
-      const response = await fetch(url, { ...options, signal: controller.signal });
-      return response;
-    } finally {
-      clearTimeout(timeoutId);
-    }
-  }
-
-  /** Read cached employee data from sessionStorage. Returns null if not fully cached. */
-  function readEmployeeCache(nrp) {
-    const jk = sessionStorage.getItem('qm_jk_' + nrp);
-    const nama = sessionStorage.getItem('qm_nama_' + nrp);
-    const id = sessionStorage.getItem('qm_id_' + nrp);
-    const kk = sessionStorage.getItem('qm_KK_' + nrp);
-    const bag = sessionStorage.getItem('qm_bag_' + nrp);
-    if (!jk || !nama || !id || !kk || !bag) return null;
-    return {
-      jk, KK: kk, nama, id,
-      editUrl: sessionStorage.getItem('qm_edit_url_' + nrp) || '',
-      bagian: bag || '',
-      seksi: sessionStorage.getItem('qm_sek_' + nrp) || '',
-      group: sessionStorage.getItem('qm_grp_' + nrp) || ''
-    };
-  }
-
-  function writeEmployeeCache(nrp, emp) {
-    if (emp.id) sessionStorage.setItem('qm_id_' + nrp, emp.id);
-    if (emp.editUrl) sessionStorage.setItem('qm_edit_url_' + nrp, emp.editUrl);
-    if (emp.jk) sessionStorage.setItem('qm_jk_' + nrp, emp.jk);
-    if (emp.KK) sessionStorage.setItem('qm_KK_' + nrp, emp.KK);
-    if (emp.nama) sessionStorage.setItem('qm_nama_' + nrp, emp.nama);
-    if (emp.bagian) sessionStorage.setItem('qm_bag_' + nrp, emp.bagian);
-    if (emp.seksi) sessionStorage.setItem('qm_sek_' + nrp, emp.seksi);
-    if (emp.group) sessionStorage.setItem('qm_grp_' + nrp, emp.group);
   }
 
   /** Unified employee data fetcher with sessionStorage cache. */
@@ -816,6 +854,7 @@
     return emp;
   }
 
+
   /** Fetch attendance table and return anomalies array. */
   async function fetchAttendance(nrp, bulan, tahun, bagian, seksi) {
     const prof = startProfile('fetchAttendance', { nrp, bulan, tahun });
@@ -829,8 +868,38 @@
   }
 
   /* ============================================================
-   * 3. DEBUGGER
+   * 6. STATE & LOGGER
    * ============================================================ */
+
+  const state = {
+    isOpen: false,
+    loading: false,
+    history: [],
+    maxHistory: 8,
+    anomalies: [],
+    pendingChecks: 0,
+    shortcut: GM_getValue('qm_shortcut', 'Ctrl+Shift+Q'),
+    alwaysCollapse: GM_getValue('qm_always_collapse', false),
+    theme: GM_getValue('qm_theme', 'light'),
+    debug: GM_getValue('qm_debug', false),
+    batchQueue: [],
+    batchResults: [],
+    batchLogs: [],
+    batchBulan: 0,
+    batchTahun: 0,
+    batchActiveWorkers: 0,
+    batchTotal: 0,
+    batchAborted: false,
+    batchProfile: { renderTotal: 0, itemDurations: [] },
+    profileStats: {},
+    profileFlags: {},
+    expandedAnomalyGroups: new Set(),
+    panelPos: JSON.parse(GM_getValue('qm_panel_pos', 'null')), // {top, left}
+  };
+  let shortcutKey = GM_getValue('qm_shortcut', 'Ctrl+Q');
+  let alwaysCollapseMenu = GM_getValue('qm_always_collapse', false);
+  let isRecordingShortcut = false;
+  let cachedEditHtml = null; // Cache for editgeneral HTML to speed up save
 
   /**
    * Centralized Logging System
@@ -907,23 +976,11 @@
     }
   };
 
-  function getPerfNow() {
-    return (typeof performance !== 'undefined' && typeof performance.now === 'function')
-      ? performance.now()
-      : Date.now();
-  }
-
-  function getMedian(values) {
-    if (!values.length) return 0;
-    const sorted = [...values].sort((a, b) => a - b);
-    const mid = Math.floor(sorted.length / 2);
-    return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
-  }
-
   function startProfile(label, meta = {}) {
     if (!state.debug) return null;
     return { label, meta, startedAt: getPerfNow() };
   }
+
 
   function finishProfile(token, meta = {}) {
     if (!token) return 0;
@@ -971,14 +1028,2376 @@
     return duration;
   }
 
+
   function resetBatchProfile() {
     state.batchProfile = { renderTotal: 0, itemDurations: [] };
   }
 
 
   /* ============================================================
-   * 4. STYLES
+   * 7. ANOMALY DETECTION
    * ============================================================ */
+
+  function isShiftChecked(td) {
+    if (!td) return false;
+    const text = td.textContent.trim().toLowerCase();
+    if (text !== '' && (text.includes('check') || text.includes('ok') || text.includes('✓') || text.includes('☑') || text.includes('v'))) return true;
+    if (td.querySelector('input:checked')) return true;
+    const html = td.innerHTML.toLowerCase();
+    if (html.includes('check') || html.includes('fa-check') || html.includes('fa-square-check')) return true;
+    return false;
+  }
+
+  function tebakShiftSebenarnya(waktuMsk, rules) {
+    if (waktuMsk === null) return '1';
+    const jamMentah = waktuMsk >= 24.0 ? waktuMsk - 24.0 : waktuMsk;
+    if (jamMentah >= rules.shift1.jamTebakMulai && jamMentah <= rules.shift1.jamTebakAkhir) return '1';
+    if (jamMentah > rules.shift2.jamTebakMulai && jamMentah <= rules.shift2.jamTebakAkhir) return '2';
+    return '3';
+  }
+
+  /** Count rows marked as libur by CSS classes/colors. */
+  function countLibur(docContext) {
+    const root = docContext || document;
+    const trs = root.querySelectorAll('table tbody tr');
+    let total = 0;
+
+    trs.forEach(tr => {
+      const tds = tr.querySelectorAll('td');
+      if (tds.length < 12 || tr.textContent.toLowerCase().includes('total')) return;
+      const { isLiburColor } = parseRowCssFlags(tr);
+      if (isLiburColor) total++;
+    });
+    return total;
+  }
+
+
+  /** Unified row status detector (Libur, HalfDay, Normal). */
+  function getRowStatus(tr) {
+    const tds = tr.querySelectorAll('td');
+    if (tds.length === 0) return { isLibur: false, isHalfDay: false, ketText: '' };
+
+    const { isLiburColor, isHalfDayColor } = parseRowCssFlags(tr);
+
+    let ketText = '';
+    if (tds.length > COL.KET) ketText = tds[COL.KET].textContent.trim().toUpperCase();
+
+    const isLibur = isLiburColor || ['L', 'LB', 'LH'].includes(ketText);
+    const isHalfDay = !isLibur && (isHalfDayColor || ['S', 'CH', 'HD'].includes(ketText));
+
+    return { isLibur, isHalfDay, ketText };
+  }
+
+  /** Push an anomaly record. Pure — no DOM side effects. */
+  function markAnomalyCell(anomalies, tglText, colIndex, title, customLink, cekSpklCells, fullDate, shiftVal) {
+    anomalies.push({ tgl: tglText, fullDate, colIndex, msg: title, link: customLink || '', shift: shiftVal });
+    if (title.includes('Cek SPKL') && cekSpklCells) {
+      if (!cekSpklCells.some(c => c.tgl === tglText && c.colIndex === colIndex)) {
+        cekSpklCells.push({ tgl: tglText, fullDate, colIndex, shift: shiftVal });
+      }
+    }
+  }
+
+
+  function addAnomaly(tgl, col, msg, link = '') {
+    state.anomalies.push({ tgl, col, msg, link });
+  }
+
+  /** Apply visual anomaly marks to the live DOM table. Called only on the attendance page. */
+  function applyMark(docContext, anomalies) {
+    const prof = startProfile('applyMark', { count: anomalies.length });
+    const lookup = {};
+    anomalies.forEach(a => {
+      const key = a.tgl;
+      if (!lookup[key]) lookup[key] = [];
+      lookup[key].push(a);
+    });
+
+    const root = docContext || document;
+    const trs = root.querySelectorAll('table tbody tr');
+
+    trs.forEach(tr => {
+      const tds = tr.querySelectorAll('td');
+      if (tds.length < 12 || tr.textContent.toLowerCase().includes('total')) return;
+      const tgl = tds[COL.TGL].textContent.trim();
+      const rowAnomalies = lookup[tgl];
+      if (!rowAnomalies) return;
+
+      rowAnomalies.forEach(a => {
+        const colIdx = a.colIndex;
+        if (colIdx === undefined) return;
+        const td = tds[colIdx];
+        if (!td) return;
+
+        const existingTitle = td.getAttribute('title') || '';
+        const newTitle = existingTitle && !existingTitle.includes(a.msg) ? existingTitle + ' | ' + a.msg : a.msg;
+        td.classList.add('qm-anomaly-cell');
+        td.setAttribute('title', newTitle);
+
+        if (!td.querySelector('.qm-fix-dot')) {
+          const linkStr = a.link ? `data-fix-link="${escHtml(a.link)}" data-fix-date="${escHtml(String(a.tgl))}" data-full-date="${escHtml(String(a.fullDate || ''))}"` : '';
+
+          let titleStr = 'Buka Halaman Kehadiran';
+          if (a.msg === 'Buka Halaman Kehadiran') titleStr = 'Buka Halaman Kehadiran';
+          else if (a.msg && (a.msg.includes('Duplikasi') || a.msg.includes('Double entry'))) titleStr = 'Lihat Duplikasi Shift';
+          else if (a.msg && a.msg.includes('Pulang awal')) titleStr = 'Cek Kehadiran (Pulang Awal)';
+          else if (a.msg === 'Cek Distribusi' || a.msg === 'Shift kosong' || a.msg === 'Shift muncul') titleStr = 'Perbaiki Distribusi Jam Kerja';
+          else if (a.msg === 'Cek SPKL') titleStr = 'Cek SPKL Online';
+          else if (!a.link) titleStr = 'Perbaiki Anomali (Segera Hadir)';
+
+          td.insertAdjacentHTML('beforeend', `<button class="qm-fix-dot" title="${titleStr}" ${linkStr}></button>`);
+        } else if (a.link) {
+          const btn = td.querySelector('.qm-fix-dot');
+          btn.setAttribute('data-fix-link', a.link);
+          btn.setAttribute('data-fix-date', String(a.tgl));
+          if (a.fullDate) btn.setAttribute('data-full-date', String(a.fullDate));
+
+          let titleStr = 'Buka Halaman Kehadiran';
+          if (a.msg === 'Buka Halaman Kehadiran') titleStr = 'Buka Halaman Kehadiran';
+          else if (a.msg && (a.msg.includes('Duplikasi') || a.msg.includes('Double entry'))) titleStr = 'Lihat Duplikasi Shift';
+          else if (a.msg && a.msg.includes('Pulang awal')) titleStr = 'Cek Kehadiran';
+          else if (a.msg === 'Cek Distribusi' || a.msg === 'Shift kosong' || a.msg === 'Shift muncul') titleStr = 'Perbaiki Distribusi Jam Kerja';
+          else if (a.msg === 'Cek SPKL') titleStr = 'Cek SPKL Online';
+
+          btn.setAttribute('title', titleStr);
+        }
+      });
+    });
+    finishProfile(prof, { count: anomalies.length });
+  }
+
+  function validateShiftRow(tds, tglText, mskText, klrText, rules, ctx, cekSpklCells, anomalies, isLibur, isHalfDay, fullDate) {
+    const ketText = tds[COL.KET].textContent.trim().toUpperCase();
+    let shift1 = isShiftChecked(tds[COL.SHIFT1]);
+    let shift2 = isShiftChecked(tds[COL.SHIFT2]);
+    let shift3 = isShiftChecked(tds[COL.SHIFT3]);
+
+    // No shift checked but has clock data or is Mangkir → guess shift
+    if (!shift1 && !shift2 && !shift3 && (mskText || klrText || ketText === 'A')) {
+      const guessed = tebakShiftSebenarnya(parseTime(mskText), rules);
+      const link = getDistribusiLink(ctx, tglText, guessed);
+      const msg = 'Shift kosong';
+      markAnomalyCell(anomalies, tglText, COL.SHIFT1, msg, link, cekSpklCells, fullDate);
+      markAnomalyCell(anomalies, tglText, COL.SHIFT2, msg, link, cekSpklCells, fullDate);
+      markAnomalyCell(anomalies, tglText, COL.SHIFT3, msg, link, cekSpklCells, fullDate);
+    }
+
+    // Derive active shift from clock-in if still unknown
+    const mskTime = parseTime(mskText);
+    if (!shift1 && !shift2 && !shift3) {
+      if (mskTime !== null) {
+        if (mskTime >= rules.shift1.jamTebakMulai && mskTime <= rules.shift1.jamTebakAkhir) shift1 = true;
+        else if (mskTime > rules.shift2.jamTebakMulai && mskTime <= rules.shift2.jamTebakAkhir) shift2 = true;
+        else shift3 = true;
+      }
+    }
+
+    const activeShift = shift1 ? '1' : (shift2 ? '2' : (shift3 ? '3' : null));
+    return { shift1, shift2, shift3, activeShift, mskTime };
+  }
+
+
+  /** Determine half-day Pulang Awal threshold based on actual clock-in time. */
+  function getHalfDayPulangAwalThreshold(shift1, shift2, shift3, mskTime) {
+    if (shift1) return HALFDAY_RULES.shift1.batasPulangAwal;
+    if (shift3) return HALFDAY_RULES.shift3.batasPulangAwal;
+    if (shift2) {
+      if (mskTime !== null && mskTime >= HALFDAY_RULES.shift2.altJamMulai) {
+        return HALFDAY_RULES.shift2.altBatasPulangAwal;
+      }
+      return HALFDAY_RULES.shift2.batasPulangAwal;
+    }
+    return null;
+  }
+
+  function validateOvertime(tds, tglText, mskTime, klrTime, shift1, shift2, shift3, isLibur, isHalfDay, rules, ctx, cekSpklCells, anomalies, is5HariKerja, fullDate) {
+    let mskLembur = false, klrLembur = false;
+    let adjMsk = mskTime, adjKlr = klrTime;
+
+    if (shift2) { if (adjKlr !== null && adjKlr <= THRESHOLDS.ADJ_KLR_SHIFT2_BATAS) adjKlr += 24.0; }
+    else if (shift3) {
+      if (adjMsk !== null && adjMsk <= THRESHOLDS.ADJ_MSK_SHIFT3_BATAS) adjMsk += 24.0;
+      if (adjKlr !== null && adjKlr <= THRESHOLDS.ADJ_KLR_SHIFT3_BATAS) adjKlr += 24.0;
+    }
+
+    if (adjMsk === null && adjKlr === null) return { mskLembur, klrLembur };
+
+    if (isLibur) {
+      if (adjMsk !== null) mskLembur = true;
+      if (adjKlr !== null) klrLembur = true;
+    }
+
+    // Pulang Awal threshold: half-day uses shorter threshold
+    const paThreshold = isHalfDay
+      ? getHalfDayPulangAwalThreshold(shift1, shift2, shift3, mskTime)
+      : null;
+
+    // Dynamic Shift 1 Models
+    let s1MasukLembur = rules.shift1.batasMasukLembur;
+    let s1KeluarLembur = rules.shift1.batasKeluarLembur;
+    let s1Terlambat = rules.shift1.batasTerlambatMasuk;
+    let s1PulangAwal = rules.shift1.batasPulangAwal;
+
+    if (is5HariKerja) {
+      // Differentiate between 06.00-15.00 and 07.30-16.30 based on clock-in time
+      if ((adjMsk !== null && adjMsk < 6.5) || (adjMsk === null && adjKlr !== null && adjKlr < 16.0)) {
+        s1KeluarLembur = 15.5;
+        s1Terlambat = 6.25;
+        s1PulangAwal = 15.0;
+
+        // Support 06.00 - 14.00 model (e.g., NRP 2869)
+        if (adjMsk !== null && adjMsk <= 6.0) s1PulangAwal = 14.0;
+      } else {
+        s1KeluarLembur = THRESHOLDS.SHIFT1_KLR_LEMBUR_5HR;
+        s1Terlambat = THRESHOLDS.SHIFT1_TERLAMBAT_5HR;
+        s1PulangAwal = THRESHOLDS.SHIFT1_PULANG_AWAL_5HR;
+      }
+    }
+
+    if (shift1) {
+      if (adjMsk !== null && adjMsk < s1MasukLembur) mskLembur = true;
+      if (adjKlr !== null && adjKlr > s1KeluarLembur) klrLembur = true;
+      if (adjMsk !== null && adjMsk > s1Terlambat) {
+        if (adjMsk > THRESHOLDS.SHIFT1_MSK_UPPER_BATAS) markAnomalyCell(anomalies, tglText, COL.SHIFT1, 'Cek Distribusi', getDistribusiLink(ctx, tglText, tebakShiftSebenarnya(adjMsk, rules)), cekSpklCells, fullDate);
+        else if (adjMsk !== adjKlr) markAnomalyCell(anomalies, tglText, COL.MSK, 'Terlambat Shift I', '', cekSpklCells, fullDate);
+      }
+      const paShift1 = isHalfDay && paThreshold !== null ? paThreshold : s1PulangAwal;
+      if (adjKlr !== null && adjKlr < paShift1 && adjMsk !== adjKlr) markAnomalyCell(anomalies, tglText, COL.KLR, 'Pulang awal Shift I', getKehadiranLink(ctx), cekSpklCells, fullDate, '1');
+    } else if (shift2) {
+      if (adjMsk !== null && adjMsk < rules.shift2.batasMasukLembur) mskLembur = true;
+      if (adjKlr !== null && adjKlr > rules.shift2.batasKeluarLembur) klrLembur = true;
+      if (adjMsk !== null) {
+        if (adjMsk < THRESHOLDS.SHIFT2_MSK_LOWER_BATAS || adjMsk > THRESHOLDS.SHIFT2_MSK_UPPER_BATAS) markAnomalyCell(anomalies, tglText, COL.SHIFT2, 'Cek Distribusi', getDistribusiLink(ctx, tglText, tebakShiftSebenarnya(adjMsk, rules)), cekSpklCells, fullDate, '2');
+        else if (adjMsk > rules.shift2.batasTerlambatMasuk && adjMsk !== adjKlr) markAnomalyCell(anomalies, tglText, COL.MSK, 'Terlambat Shift II', '', cekSpklCells, fullDate, '2');
+      }
+      const paShift2 = isHalfDay && paThreshold !== null ? paThreshold : rules.shift2.batasPulangAwal;
+      if (adjKlr !== null && adjKlr < paShift2 && adjMsk !== adjKlr) markAnomalyCell(anomalies, tglText, COL.KLR, 'Pulang awal Shift II', getKehadiranLink(ctx), cekSpklCells, fullDate, '2');
+    } else if (shift3) {
+      if (adjMsk !== null && adjMsk > rules.shift3.batasMasukLemburAwal && adjMsk < rules.shift3.batasMasukLemburAkhir) mskLembur = true;
+      if (adjKlr !== null && adjKlr > rules.shift3.batasKeluarLembur) klrLembur = true;
+      if (adjMsk !== null) {
+        if (adjMsk < rules.shift3.batasAwalMasuk || adjMsk > THRESHOLDS.SHIFT3_MSK_UPPER_BATAS) markAnomalyCell(anomalies, tglText, COL.SHIFT3, 'Cek Distribusi', getDistribusiLink(ctx, tglText, tebakShiftSebenarnya(adjMsk, rules)), cekSpklCells, fullDate, '3');
+        else if (adjMsk > rules.shift3.batasTerlambatMasuk && adjMsk !== adjKlr) markAnomalyCell(anomalies, tglText, COL.MSK, 'Terlambat Shift III', '', cekSpklCells, fullDate, '3');
+      }
+      const paShift3 = isHalfDay && paThreshold !== null ? paThreshold : rules.shift3.batasPulangAwal;
+      if (adjKlr !== null && adjKlr < paShift3 && adjMsk !== adjKlr) markAnomalyCell(anomalies, tglText, COL.KLR, 'Pulang awal Shift III', getKehadiranLink(ctx), cekSpklCells, fullDate, '3');
+    }
+    return { mskLembur, klrLembur };
+  }
+
+  function scanAttendanceTable(doc, ctx) {
+    const prof = startProfile('scanAttendanceTable', { nrp: ctx?.nrp, bulan: ctx?.bulan, tahun: ctx?.tahun });
+    const anomalies = [];
+    const absentDates = [];
+    const cekSpklCells = [];
+
+    const rekaps = {
+      hariKerja: 0,
+      otb: 0,
+      otl: 0,
+      ota: 0,
+      otp: 0,
+      keterangan: {}
+    };
+
+    const totalLibur = countLibur(doc);
+    const is5HariKerja = totalLibur >= THRESHOLDS.MIN_LIBUR_5_HARI_KERJA;
+    const rules = structuredClone(SHIFT_RULES);
+    if (is5HariKerja) {
+      rules.shift2.batasKeluarLembur = THRESHOLDS.SHIFT2_KLR_LEMBUR_5HR;
+    }
+
+    const root = doc || document;
+    const trs = root.querySelectorAll('table tbody tr');
+
+    // Pre-calculate shift counts per date to detect duplicates
+    const dateShiftCounts = {};
+    trs.forEach(tr => {
+      const tds = tr.querySelectorAll('td');
+      if (tds.length < 12 || tr.textContent.toLowerCase().includes('total')) return;
+      const tgl = tds[COL.TGL].textContent.trim();
+      const hasChecked = isShiftChecked(tds[COL.SHIFT1]) || isShiftChecked(tds[COL.SHIFT2]) || isShiftChecked(tds[COL.SHIFT3]);
+      if (tgl && hasChecked) dateShiftCounts[tgl] = (dateShiftCounts[tgl] || 0) + 1;
+    });
+
+    trs.forEach(tr => {
+      const tds = tr.querySelectorAll('td');
+      if (tds.length < 12 || tr.textContent.toLowerCase().includes('total')) return;
+
+      const tglText = tds[COL.TGL].textContent.trim();
+      const fullDate = `${ctx.tahun}-${String(ctx.bulan).padStart(2, '0')}-${String(tglText).padStart(2, '0')}`;
+
+      const mskText = tds[COL.MSK].textContent.trim();
+      const klrText = tds[COL.KLR].textContent.trim();
+      const { isLibur, isHalfDay, ketText } = getRowStatus(tr);
+
+      const shiftInfo = validateShiftRow(tds, tglText, mskText, klrText, rules, ctx, cekSpklCells, anomalies, isLibur, isHalfDay, fullDate);
+      const { shift1, shift2, shift3, activeShift, mskTime } = shiftInfo;
+      const klrTime = parseTime(klrText);
+
+      // Detect multiple rows for same date with checked shifts (Barcode overlap/error)
+      const isSaturday = new Date(ctx.tahun, ctx.bulan - 1, parseInt(tglText)).getDay() === 6;
+      if (activeShift && dateShiftCounts[tglText] > 1 && !isHalfDay && !isSaturday) {
+        const barcodeLink = getKehadiranLink(ctx);
+        let msg = 'Duplikasi Shift pada tanggal yang sama';
+
+        let adjMsk = mskTime;
+        let adjKlr = klrTime;
+        // Apply basic shift-based adjustments for accurate comparison
+        if (shift2 && adjKlr !== null && adjKlr <= THRESHOLDS.ADJ_KLR_SHIFT2_BATAS) adjKlr += 24.0;
+        else if (shift3) {
+          if (adjMsk !== null && adjMsk <= THRESHOLDS.ADJ_MSK_SHIFT3_BATAS) adjMsk += 24.0;
+          if (adjKlr !== null && adjKlr <= THRESHOLDS.ADJ_KLR_SHIFT3_BATAS) adjKlr += 24.0;
+        }
+
+        if (adjMsk !== null && adjKlr !== null && adjMsk >= adjKlr) {
+          msg = 'Double entry / Error Barcode (MSK >= KLR)';
+        }
+
+        markAnomalyCell(anomalies, tglText, COL.TGL, msg, barcodeLink, cekSpklCells, fullDate);
+        if (shift1) markAnomalyCell(anomalies, tglText, COL.SHIFT1, msg, barcodeLink, cekSpklCells, fullDate);
+        if (shift2) markAnomalyCell(anomalies, tglText, COL.SHIFT2, msg, barcodeLink, cekSpklCells, fullDate);
+        if (shift3) markAnomalyCell(anomalies, tglText, COL.SHIFT3, msg, barcodeLink, cekSpklCells, fullDate);
+      }
+
+      if (activeShift && mskTime !== null && !isLibur && !isHalfDay) {
+        const guessed = tebakShiftSebenarnya(mskTime, rules);
+        if (guessed !== activeShift) {
+          const msg = 'Jam MSK tidak cocok dengan Shift ' + activeShift + ' (Terdeteksi Shift ' + guessed + ')';
+          const link = getDistribusiLink(ctx, tglText, guessed);
+          markAnomalyCell(anomalies, tglText, COL.MSK, msg, link, cekSpklCells, fullDate);
+          if (shift1) markAnomalyCell(anomalies, tglText, COL.SHIFT1, msg, '', cekSpklCells, fullDate);
+          if (shift2) markAnomalyCell(anomalies, tglText, COL.SHIFT2, msg, '', cekSpklCells, fullDate);
+          if (shift3) markAnomalyCell(anomalies, tglText, COL.SHIFT3, msg, '', cekSpklCells, fullDate);
+        }
+      }
+
+      let isAbsent = ketText === 'A';
+      for (let i = 11; i < tds.length; i++) {
+        if (tds[i].textContent.trim() === 'A') isAbsent = true;
+      }
+      if (isAbsent) {
+        absentDates.push({ date: tglText, tr: tr });
+      }
+
+      const barcodeLink = getKehadiranLink(ctx);
+
+      if (!isLibur) {
+        if (!mskText && !ketText) markAnomalyCell(anomalies, tglText, COL.MSK, 'Buka Halaman Kehadiran', barcodeLink, cekSpklCells, fullDate);
+        if (!klrText && !ketText) markAnomalyCell(anomalies, tglText, COL.KLR, 'Buka Halaman Kehadiran', barcodeLink, cekSpklCells, fullDate);
+      } else {
+        if (mskText || klrText) {
+          if (!mskText) markAnomalyCell(anomalies, tglText, COL.MSK, 'Buka Halaman Kehadiran', barcodeLink, cekSpklCells, fullDate);
+          if (!klrText) markAnomalyCell(anomalies, tglText, COL.KLR, 'Buka Halaman Kehadiran', barcodeLink, cekSpklCells, fullDate);
+        }
+      }
+
+
+      const ot = validateOvertime(tds, tglText, mskTime, klrTime, shift1, shift2, shift3, isLibur, isHalfDay, rules, ctx, cekSpklCells, anomalies, is5HariKerja, fullDate);
+
+      const otbText = tds[COL.OTB].textContent.trim();
+      const otlText = tds[COL.OTL].textContent.trim();
+      const otpText = tds[COL.OTP].textContent.trim();
+
+      const valOtb = parseFloat(otbText) || 0;
+      const valOtl = parseFloat(otlText) || 0;
+      const valOtp = parseFloat(otpText) || 0;
+
+      const hkText = tds[COL.HARI_KERJA] ? tds[COL.HARI_KERJA].textContent.trim() : '0';
+      rekaps.hariKerja += parseFloat(hkText) || 0;
+
+      if (ketText && ketText !== '-') {
+        rekaps.keterangan[ketText] = (rekaps.keterangan[ketText] || 0) + 1;
+      }
+
+      rekaps.otb += valOtb;
+      rekaps.otl += valOtl;
+      rekaps.otp += valOtp;
+      rekaps.ota += (valOtb + valOtl);
+
+      if (valOtb > THRESHOLDS.OT_BATAS_WAJAR) markAnomalyCell(anomalies, tglText, COL.OTB, 'Angka OTB tidak wajar', '', cekSpklCells, fullDate);
+      if (valOtl > THRESHOLDS.OT_BATAS_WAJAR) markAnomalyCell(anomalies, tglText, COL.OTL, 'Angka OTL tidak wajar', '', cekSpklCells, fullDate);
+      if (valOtp > THRESHOLDS.OT_BATAS_WAJAR) markAnomalyCell(anomalies, tglText, COL.OTP, 'Angka OTP tidak wajar', '', cekSpklCells, fullDate);
+
+      const hasAnyOT = parseFloat(otbText) > 0 || parseFloat(otlText) > 0 || parseFloat(otpText) > 0;
+      if ((ot.mskLembur || ot.klrLembur) && !hasAnyOT) {
+        const d = String(tglText).padStart(2, '0');
+        const spklUrl = ROUTES.SPKL_ONLINE(ctx.tahun, String(ctx.bulan).padStart(2, '0'), d, d, ctx.nrp);
+        const sVal = activeShift || '';
+        markAnomalyCell(anomalies, tglText, COL.OTB, 'Cek SPKL', spklUrl, cekSpklCells, fullDate, sVal);
+        markAnomalyCell(anomalies, tglText, COL.OTL, 'Cek SPKL', spklUrl, cekSpklCells, fullDate, sVal);
+        markAnomalyCell(anomalies, tglText, COL.OTP, 'Cek SPKL', spklUrl, cekSpklCells, fullDate, sVal);
+        if (ot.mskLembur) markAnomalyCell(anomalies, tglText, COL.MSK, 'Cek SPKL', spklUrl, cekSpklCells, fullDate, sVal);
+        if (ot.klrLembur) markAnomalyCell(anomalies, tglText, COL.KLR, 'Cek SPKL', spklUrl, cekSpklCells, fullDate, sVal);
+      }
+    });
+
+    const result = { anomalies, absentDates, cekSpklCells, rekaps };
+    finishProfile(prof, {
+      nrp: ctx?.nrp,
+      anomalyCount: anomalies.length,
+      absentCount: absentDates.length,
+      spklCheckCount: cekSpklCells.length
+    });
+    return result;
+  }
+
+  function detectAnomalies() {
+    if (!isAttendancePagePath()) return;
+
+    const prof = startProfile('detectAnomalies');
+
+    try {
+      state.anomalies = [];
+      state.pendingChecks = 0;
+
+      const anomaliTab = document.querySelector('[data-pane="anomali"]');
+      if (anomaliTab) anomaliTab.classList.remove('qm-tab-loading');
+
+      const ctx = getPageContext();
+      const result = scanAttendanceTable(document, ctx);
+      state.anomalies = result.anomalies;
+
+      applyMark(document, result.anomalies);
+      renderAnomalies();
+
+      if (result.absentDates.length > 0) { state.pendingChecks++; checkBarcodeMangkir(result.absentDates); }
+      if (result.cekSpklCells.length > 0) { state.pendingChecks++; checkSPKLOnline(result.cekSpklCells); }
+      if (state.pendingChecks > 0 && anomaliTab) anomaliTab.classList.add('qm-tab-loading');
+    } finally {
+      finishProfile(prof, { anomalyCount: state.anomalies.length });
+    }
+  }
+
+  /* ============================================================
+   * 8. BATCH PROCESSING
+   * ============================================================ */
+
+  function parseBatchNrps(text) {
+    return text.split(/[\n,]+/).map(s => s.trim()).filter(s => /^\d{4}$|^\d{8}$/.test(s));
+  }
+
+  function runBatchCheck() {
+    const inputMulti = document.getElementById('qm-input-multi-nrp');
+    const inputBulan = document.getElementById('qm-input-bulan');
+    const inputTahun = document.getElementById('qm-input-tahun');
+    const btnCheck = document.getElementById('qm-btn-batch-check');
+    const btnExport = document.getElementById('qm-btn-export-batch');
+    const progress = document.getElementById('qm-batch-progress');
+    const results = document.getElementById('qm-batch-results');
+
+    const nrps = parseBatchNrps(inputMulti ? inputMulti.value : '');
+    if (nrps.length === 0) { UI.showResult('warning', 'Data Tidak Valid', 'Masukkan NRP yang valid (4 atau 8 digit).'); return; }
+    if (nrps.length > APP_CONFIG.BATCH_MAX_LIMIT) { UI.showResult('warning', 'Terlalu Banyak', `Maksimal ${APP_CONFIG.BATCH_MAX_LIMIT} NRP per batch.`); return; }
+
+    const localBulan = parseInt(inputBulan ? inputBulan.value : '') || (new Date().getMonth() + 1);
+    const localTahun = parseInt(inputTahun ? inputTahun.value : '') || new Date().getFullYear();
+    state.batchBulan = Math.min(12, Math.max(1, localBulan));
+    state.batchTahun = Math.min(2035, Math.max(2020, localTahun));
+    state.batchTotal = nrps.length;
+    state.batchAborted = false;
+    const prof = startProfile('runBatchCheck:init');
+
+    state.batchQueue = nrps.map(nrp => ({ nrp, status: 'pending', msg: '' }));
+    state.batchResults = [];
+    state.batchLogs = [];
+    resetBatchProfile();
+    const logBody = document.getElementById('qm-log-body');
+    if (logBody) setInnerHTML(logBody, '');
+    pushLog(`Memulai batch check untuk ${nrps.length} NRP...`);
+
+    if (btnCheck) { btnCheck.dataset.running = 'true'; btnCheck.textContent = 'Memproses...'; }
+    if (progress) progress.classList.remove('qm-hidden');
+    if (results) setInnerHTML(results, '');
+    if (btnExport) btnExport.classList.add('qm-hidden');
+
+    const poolSize = Math.min(APP_CONFIG.BATCH_POOL_SIZE, state.batchQueue.length);
+    const workers = [];
+    for (let i = 0; i < poolSize; i++) workers.push(processBatchWorker());
+    Promise.all(workers).then(finishBatch);
+    finishProfile(prof, { totalNrp: nrps.length, poolSize });
+  }
+
+  function onBatchCancel() {
+    state.batchAborted = true;
+    state.batchQueue = [];
+    const btnCheck = document.getElementById('qm-btn-batch-check');
+    if (btnCheck) btnCheck.textContent = 'Membatalkan...';
+  }
+
+  async function processBatchWorker() {
+    while (state.batchQueue.length > 0 && !state.batchAborted) {
+      const item = state.batchQueue.shift();
+      const prof = startProfile('processBatchWorker:item', { nrp: item?.nrp });
+      try {
+        pushLog(`Memproses NRP ${item.nrp}...`);
+        const emp = await getEmp(item.nrp);
+        item.found = emp.found;
+        item.jk = emp.jk || '-';
+        item.nama = emp.nama || '-';
+        item.bagian = emp.bagian || '-';
+        item.seksi = emp.seksi || '-';
+        item.group = emp.group || '-';
+        if (!emp.found) {
+          item.anomalies = [];
+          item.msg = '';
+        } else {
+          try {
+            const scanRes = await fetchAttendance(item.nrp, state.batchBulan, state.batchTahun, item.bagian, item.seksi);
+            item.anomalies = scanRes.anomalies || [];
+            item.rekaps = scanRes.rekaps || null;
+            item.msg = item.anomalies.length + ' anomali ditemukan';
+          } catch (e) {
+            item.msg = 'Gagal ambil data kehadiran';
+            item.anomalies = [];
+          }
+        }
+      } catch (e) {
+        item.found = false;
+        item.msg = 'Gagal akses HRIS';
+        item.anomalies = [];
+        pushLog(`Gagal memproses NRP ${item.nrp}: ${e.message}`, 'error');
+      }
+      pushBatchResult(item);
+      if (item.found) pushLog(`Selesai memproses ${item.nama} (${item.nrp}).`, 'success');
+      else pushLog(`NRP ${item.nrp} tidak ditemukan.`, 'error');
+      const duration = finishProfile(prof, {
+        nrp: item.nrp,
+        found: !!item.found,
+        anomalyCount: (item.anomalies || []).length
+      });
+      if (state.batchProfile && duration) {
+        state.batchProfile.itemDurations.push(duration);
+        if (state.batchProfile.itemDurations.length > PROFILE_CONFIG.SAMPLE_HISTORY_LIMIT) {
+          state.batchProfile.itemDurations.shift();
+        }
+      }
+    }
+  }
+
+  function finishBatch() {
+    const btnCheck = document.getElementById('qm-btn-batch-check');
+    const btnExport = document.getElementById('qm-btn-export-batch');
+    const progress = document.getElementById('qm-batch-progress');
+    const statusBar = document.getElementById('qm-batch-status');
+    const progressBar = document.getElementById('qm-batch-progress-bar');
+
+    if (btnCheck) {
+      btnCheck.textContent = 'Proses Batch';
+      delete btnCheck.dataset.running;
+    }
+    if (progress) progress.classList.add('qm-hidden');
+    if (btnExport && state.batchResults.length > 0) btnExport.classList.remove('qm-hidden');
+
+    if (statusBar) statusBar.textContent = 'Selesai: ' + state.batchResults.length + '/' + state.batchTotal + ' NRP';
+    if (progressBar) progressBar.style.width = '100%';
+
+    if (state.batchAborted) {
+      UI.showResult('warning', 'Dibatalkan', 'Proses pemeriksaan batch dihentikan oleh pengguna.');
+      pushLog('Proses batch dibatalkan oleh pengguna.', 'error');
+    } else {
+      pushLog(`Batch check selesai. Total ${state.batchResults.length} NRP diproses.`);
+    }
+
+    if (state.debug && state.batchProfile) {
+      const renderTotal = Number((state.batchProfile.renderTotal || 0).toFixed(2));
+      Logger.debug('[PROFILE] batchSummary', {
+        processed: state.batchResults.length,
+        renderTotalMs: renderTotal,
+        recentWorkerMedianMs: Number(getMedian((state.batchProfile.itemDurations || []).slice(-PROFILE_CONFIG.MEDIAN_SAMPLE_SIZE)).toFixed(2))
+      });
+      if (renderTotal >= PROFILE_CONFIG.HOT_BATCH_RENDER_TOTAL_MS) {
+        Logger.warn(`Profiling: total render batch ${renderTotal.toFixed(2)}ms melewati ambang ${PROFILE_CONFIG.HOT_BATCH_RENDER_TOTAL_MS}ms.`);
+      }
+    }
+  }
+
+  function pushBatchResult(item) {
+    state.batchResults.push(item);
+    renderBatchResults();
+    updateBatchProgress();
+  }
+
+  function updateBatchProgress() {
+    const pct = state.batchTotal > 0 ? Math.round((state.batchResults.length / state.batchTotal) * 100) : 0;
+    const barEl = document.getElementById('qm-batch-progress-bar');
+    const statusEl = document.getElementById('qm-batch-status');
+    if (barEl) barEl.style.width = pct + '%';
+    if (statusEl) statusEl.textContent = 'Memproses... ' + state.batchResults.length + '/' + state.batchTotal;
+  }
+
+  let renderBatchTimeout;
+  function renderBatchResults() {
+    clearTimeout(renderBatchTimeout);
+    renderBatchTimeout = setTimeout(() => {
+      _renderBatchResultsImmediate();
+    }, 150);
+  }
+
+  function _renderBatchResultsImmediate() {
+    const prof = startProfile('renderBatchResults', { items: state.batchResults.length });
+    const container = document.getElementById('qm-batch-results');
+    if (!container) {
+      finishProfile(prof, { skipped: true });
+      return;
+    }
+    if (state.batchResults.length === 0) {
+      setInnerHTML(container, '');
+      finishProfile(prof, { items: 0 });
+      return;
+    }
+
+    let sumOtb = 0, sumOtl = 0, sumOta = 0, sumOtp = 0, sumHariKerja = 0;
+    const ketMap = {};
+
+    const sortedResults = [...state.batchResults].sort((a, b) => {
+      const bagA = (a.bagian || '').toLowerCase();
+      const bagB = (b.bagian || '').toLowerCase();
+      if (bagA !== bagB) return bagA.localeCompare(bagB);
+
+      const sekA = (a.seksi || '').toLowerCase();
+      const sekB = (b.seksi || '').toLowerCase();
+      if (sekA !== sekB) return sekA.localeCompare(sekB);
+
+      return (parseInt(a.nrp) || 0) - (parseInt(b.nrp) || 0);
+    });
+
+    const tree = {};
+    sortedResults.forEach(item => {
+      if (item.rekaps) {
+        sumOtb += item.rekaps.otb; sumOtl += item.rekaps.otl;
+        sumOta += item.rekaps.ota; sumOtp += item.rekaps.otp;
+        sumHariKerja += item.rekaps.hariKerja;
+        for (const [k, v] of Object.entries(item.rekaps.keterangan)) { ketMap[k] = (ketMap[k] || 0) + v; }
+      }
+
+      const bag = item.bagian || 'Tanpa Bagian';
+      const sek = item.seksi || 'Tanpa Seksi';
+      if (!tree[bag]) tree[bag] = {};
+      if (!tree[bag][sek]) tree[bag][sek] = [];
+      tree[bag][sek].push(item);
+    });
+
+    var html = '<table class="qm-batch-table"><tbody>';
+
+    let bagIdx = 0;
+    for (const bag in tree) {
+      const bagSafeId = 'bag-' + (bagIdx++);
+      html += `<tr class="qm-batch-group-header qm-batch-header-bg" data-target=".${bagSafeId}">`;
+      html += `<td colspan="5" class="qm-batch-bagian-cell"><div class="qm-flex qm-items-center qm-justify-between qm-w-full"><span>${escHtml(bag)}</span><span class="qm-chevron qm-accordion-chevron">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>
+              </span></div></td></tr>`;
+
+      html += `<tr class="qm-batch-group-row ${bagSafeId} qm-table-header qm-batch-sub-header-bg qm-hidden">`;
+      html += '<td class="qm-batch-cell-header qm-batch-col-nrp">NRP</td>';
+      html += '<td class="qm-batch-cell-header qm-batch-col-nama">Nama</td>';
+      html += '<td class="qm-batch-cell-header qm-batch-col-ot">Lembur</td>';
+      html += '<td class="qm-batch-cell-header qm-batch-col-ket">Keterangan</td>';
+      html += '<td class="qm-batch-cell-header qm-batch-col-msg">Masalah / Anomali</td>';
+      html += '</tr>';
+
+      let sekIdx = 0;
+      for (const sek in tree[bag]) {
+        const sekSafeId = bagSafeId + '-sek-' + (sekIdx++);
+        html += `<tr class="qm-batch-group-row ${bagSafeId} qm-batch-seksi-header qm-batch-sub-header-bg qm-hidden" data-target=".${sekSafeId}">`;
+        html += `<td colspan="5" class="qm-batch-seksi-cell" style="padding-left: 32px;"><div class="qm-flex qm-items-center qm-justify-between qm-w-full"><span>${escHtml(sek)} <span class="qm-batch-seksi-count">(${tree[bag][sek].length})</span></span><span class="qm-chevron qm-accordion-chevron">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>
+              </span></div></td></tr>`;
+
+        tree[bag][sek].forEach(item => {
+          var nrpLink = item.nrp
+            ? '<a href="#" class="qm-batch-nrp-link" data-nrp="' + escHtml(item.nrp) + '" style="padding-left: 64px;">' + escHtml(item.nrp) + '</a>'
+            : '-';
+          var nama = item.found ? escHtml(item.nama || '-') : '<span class="qm-batch-not-found">Tidak Ditemukan</span>';
+          var masalahHtml = '';
+
+          if (item.anomalies && item.anomalies.length > 0) {
+            const byTgl = {};
+            item.anomalies.forEach(a => {
+              const t = String(a.tgl);
+              if (!byTgl[t]) byTgl[t] = [];
+              byTgl[t].push(a);
+            });
+
+            let listItems = '';
+            const sortedDates = Object.keys(byTgl).sort((a, b) => parseInt(a) - parseInt(b));
+            for (const tgl of sortedDates) {
+              const anomaliesTgl = byTgl[tgl];
+              const firstAnomWithLink = anomaliesTgl.find(a => a.link);
+              const firstLink = firstAnomWithLink?.link;
+              const firstFullDate = firstAnomWithLink?.fullDate || '';
+
+              let fixBtn = '';
+              if (firstLink) {
+                let finalLink = firstLink;
+                let titleStr = firstAnomWithLink.msg || 'Fix Anomali';
+
+                if (titleStr.includes('SPKL')) {
+                  const isOS = item.nrp && item.nrp.length === 8;
+                  const base = getSpklBaseUrl(item.nrp);
+                  const bulanStr = String(state.batchBulan).padStart(2, '0');
+                  const tglStr = String(tgl).padStart(2, '0');
+                  const shiftVal = firstAnomWithLink.shift || '';
+                  const shiftParam = shiftVal ? `&shift=${shiftVal}` : '';
+                  const fDate = firstAnomWithLink.fullDate || `${state.batchTahun}-${bulanStr}-${tglStr}`;
+
+                  const ev = v => (v === '-' ? '' : encodeURIComponent(v));
+                  finalLink = `${base}?tahun=${state.batchTahun}&bulan=${bulanStr}&kode_bagian=${ev(item.bagian)}&kode_seksi=${ev(item.seksi)}&kode_group=${ev(item.group)}&nrp=${item.nrp}&qm_auto_spkl_fix=1&full_date=${fDate}${shiftParam}`;
+                  titleStr = 'Cek Halaman SPKL';
+                }
+
+                const tglPad = String(tgl).padStart(2, '0');
+                const fDate = firstAnomWithLink.fullDate || `${state.batchTahun}-${String(state.batchBulan).padStart(2, '0')}-${tglPad}`;
+
+                fixBtn = `<button class="qm-fix-dot" title="${escHtml(titleStr)}" data-fix-link="${escHtml(finalLink)}" data-fix-date="${escHtml(tglPad)}" data-full-date="${escHtml(fDate)}"></button>`;
+              }
+
+              listItems += '<div class="qm-batch-date-row">';
+              listItems += '<div class="qm-batch-date-header qm-flex qm-items-center qm-justify-between"><span style="position: relative; padding-right: 15px;"><b>Tgl ' + escHtml(tgl) + '</b>' + fixBtn + '</span><span class="qm-chevron qm-accordion-chevron"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg></span></div>';
+              listItems += '<div class="qm-batch-date-content qm-hidden">';
+              // Deduplicate anomalies by message for the same date
+              const msgMap = new Map();
+              anomaliesTgl.forEach(a => {
+                if (!msgMap.has(a.msg)) msgMap.set(a.msg, []);
+                msgMap.get(a.msg).push(a.col);
+              });
+
+              msgMap.forEach((cols, msg) => {
+                const uniqueCols = [...new Set(cols)].filter(Boolean);
+                const colNames = uniqueCols.map(c => escHtml(c)).join(', ');
+                const colPrefix = colNames ? colNames + ': ' : '';
+                listItems += '<div class="qm-batch-anomaly-detail">• ' + colPrefix + escHtml(msg) + '</div>';
+              });
+              listItems += '</div></div>';
+            }
+            masalahHtml = '<div class="qm-batch-masalah-scroll">' + listItems + '</div>';
+          } else if (item.found) {
+            masalahHtml = '<span class="qm-batch-no-anomaly">Tidak ada anomali</span>';
+          } else {
+            masalahHtml = '<span class="qm-batch-not-found">' + escHtml(item.msg || 'Error') + '</span>';
+          }
+
+          const rk = item.rekaps || { otb: 0, otl: 0, ota: 0, otp: 0, keterangan: {} };
+          const otValues = `B:${rk.otb.toFixed(1)} L:${rk.otl.toFixed(1)} A:${rk.ota.toFixed(1)} P:${rk.otp.toFixed(1)}`;
+
+          const ketKeys = ['CT', 'CH', 'SD', 'I', 'IS', 'IA', 'A'];
+          const ketStr = ketKeys.map(k => `${k}:${rk.keterangan[k] || 0}`).join(' | ');
+
+          const lemburHtml = `<div class="qm-text-xs qm-font-mono" style="color: var(--qm-olive);">${otValues}</div>`;
+          const ketHtml = `<div class="qm-text-xs qm-font-mono" style="color: var(--qm-stone); opacity: 0.8;">${ketStr}</div>`;
+
+          html += `<tr class="qm-batch-group-row ${bagSafeId} ${sekSafeId} qm-batch-item-row qm-hidden">`;
+          html += '<td class="qm-batch-cell">' + nrpLink + '</td>';
+          html += '<td class="qm-batch-cell qm-batch-nama">' + nama + '</td>';
+          html += '<td class="qm-batch-cell">' + lemburHtml + '</td>';
+          html += '<td class="qm-batch-cell">' + ketHtml + '</td>';
+          html += '<td class="qm-batch-cell">' + masalahHtml + '</td>';
+          html += '</tr>';
+        });
+      }
+    }
+
+    html += '</tbody></table>';
+
+    setInnerHTML(container, html);
+    const duration = finishProfile(prof, { items: state.batchResults.length });
+    if (state.batchProfile) state.batchProfile.renderTotal += duration;
+  }
+
+  function exportBatchResults() {
+    if (state.batchResults.length === 0) { alert('Tidak ada hasil untuk diekspor.'); return; }
+    if (typeof XLSX !== 'undefined') {
+      const ketHeaders = ['CT', 'CH', 'SD', 'I', 'IS', 'IA', 'A'];
+      const headers = ['Bagian', 'Seksi', 'NRP', 'Nama', 'JK', 'OTB', 'OTL', 'OTA', 'OTP', 'Hari Kerja', ...ketHeaders, 'Jml Anomali', 'Detail Anomali'];
+      var wsData = [headers];
+
+      state.batchResults.forEach(function (r) {
+        var detailAnomali = (r.anomalies || []).map(function (a) {
+          return 'Tgl ' + a.tgl + ' ' + a.col + ': ' + a.msg;
+        }).join('; ');
+
+        const rk = r.rekaps || { otb: 0, otl: 0, ota: 0, otp: 0, hariKerja: 0, keterangan: {} };
+        const row = [
+          r.bagian || '-',
+          r.seksi || '-',
+          r.nrp,
+          r.nama || '-',
+          r.jk || '-',
+          rk.otb,
+          rk.otl,
+          rk.ota,
+          rk.otp,
+          rk.hariKerja
+        ];
+
+        ketHeaders.forEach(k => row.push(rk.keterangan[k] || 0));
+        row.push(r.anomalies ? r.anomalies.length : 0);
+        row.push(detailAnomali);
+        wsData.push(row);
+      });
+      const ws = XLSX.utils.aoa_to_sheet(wsData);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'Batch Check');
+      XLSX.writeFile(wb, `Batch_Check_NRP_${new Date().toISOString().slice(0, 10)}.xlsx`);
+    } else {
+      alert('Library XLSX gagal dimuat.');
+    }
+  }
+
+  function renderAnomalies() {
+    const prof = startProfile('renderAnomalies', { count: state.anomalies.length });
+    const badge = document.getElementById('qm-badge-anomali');
+    const list = document.getElementById('qm-anomali-list');
+    if (!badge || !list) {
+      finishProfile(prof, { skipped: true });
+      return;
+    }
+
+    if (state.anomalies.length > 0) {
+      badge.textContent = state.anomalies.length;
+      badge.classList.remove('qm-hidden');
+      badge.classList.add('qm-visible-inline-flex');
+
+      const grouped = {};
+      state.anomalies.forEach(a => {
+        if (!grouped[a.tgl]) grouped[a.tgl] = [];
+        grouped[a.tgl].push(a);
+      });
+
+      const sortedKeys = Object.keys(grouped).sort((a, b) => parseInt(a) - parseInt(b));
+      let html = '';
+
+      for (const tgl of sortedKeys) {
+        const items = grouped[tgl];
+        const spklStatusItem = items.find(a => a.col === 'SPKL Status' && a.link);
+        const itemWithLink = spklStatusItem || items.find(a => a.link);
+        let btnText = 'Perbaikan';
+
+        if (itemWithLink) {
+          if (itemWithLink.msg === 'Buka Halaman Kehadiran') btnText = 'Buka Halaman Kehadiran';
+          else if (itemWithLink.msg && itemWithLink.msg.includes('Pulang awal')) btnText = 'Cek Kehadiran';
+          else if (itemWithLink.msg === 'Cek Distribusi' || itemWithLink.msg === 'Shift kosong' || itemWithLink.msg === 'Shift muncul') btnText = 'Fix Distribusi';
+          else if (itemWithLink.msg === 'SPKL Disetujui (Cek Jenis OT)') btnText = 'Cek Halaman SPKL';
+          else if (itemWithLink.msg === 'SPKL Belum Disetujui') btnText = 'Cek SPKL Online';
+          else if (itemWithLink.msg === 'SPKL Ditolak') btnText = 'Cek SPKL (Ditolak)';
+          else if (itemWithLink.msg === 'SPKL Online tidak ada') btnText = 'Input SPKL Online';
+          else if (itemWithLink.msg === 'SPKL Online tidak sesuai') btnText = 'Cek SPKL Online';
+        }
+
+        const fixBtn = itemWithLink
+          ? `<button class="qm-btn-fix-pill" data-fix-link="${escHtml(itemWithLink.link)}" data-fix-date="${escHtml(tgl)}" data-full-date="${escHtml(itemWithLink.fullDate || '')}" title="${escHtml(btnText)}">${btnText}</button>`
+          : '';
+
+        const detailsHtml = items.map(a => {
+          const type = escHtml(COL_LABELS[a.colIndex] || a.col || ('Kolom ' + a.colIndex));
+          return `
+            <div class="qm-anomaly-card">
+              <div class="qm-anomaly-card-type">${type}</div>
+              <div class="qm-anomaly-card-msg">${escHtml(a.msg)}</div>
+            </div>
+          `;
+        }).join('');
+
+        html += `
+          <div class="qm-anomaly-item">
+            <div class="qm-anomaly-left">
+              <span class="qm-anomaly-date">Tgl ${tgl}</span>
+              <span class="qm-badge qm-text-muted" style="background:var(--qm-sand); border-radius:4px; padding:2px 6px; font-size:10px;">${items.length}</span>
+            </div>
+            <div class="qm-anomaly-content">
+              ${detailsHtml}
+            </div>
+            <div class="qm-anomaly-actions">
+              ${fixBtn}
+            </div>
+          </div>
+        `;
+      }
+      setInnerHTML(list, html);
+    } else {
+      badge.classList.add('qm-hidden');
+      badge.classList.remove('qm-visible-inline-flex');
+      setInnerHTML(list, '<div class="qm-anomaly-empty-state qm-text-center qm-text-muted qm-mt-xl">Tidak ada anomali ditemukan.</div>');
+    }
+    finishProfile(prof, { count: state.anomalies.length });
+  }
+
+  /* ============================================================
+   * 9. SPKL & BARCODE CHECKS
+   * ============================================================ */
+
+  async function checkSPKLOnline(cells) {
+    const prof = startProfile('checkSPKLOnline', { cellCount: cells.length });
+    const ctx = getPageContext();
+    const bulan = String(ctx.bulan).padStart(2, '0');
+    if (!ctx.nrp) {
+      finishProfile(prof, { skipped: true });
+      return;
+    }
+
+    const dates = cells.map(c => parseInt(c.tgl)).filter(n => !isNaN(n));
+    if (!dates.length) {
+      finishProfile(prof, { skipped: true });
+      return;
+    }
+    const minDate = Math.min(...dates).toString().padStart(2, '0');
+    const maxDate = Math.max(...dates).toString().padStart(2, '0');
+
+    const spklUrl = buildSpklOnlineUrl(ctx, minDate, maxDate);
+
+    try {
+      const data = await req(spklUrl);
+      const doc = parseHTML(data);
+
+      // Deteksi data nyata: ada tidaknya baris dengan minimal 3 kolom di tbody
+      // (lebih andal dari pengecekan teks — "Belum ada data" bisa muncul di nav/notif)
+      const allTableRows = doc.querySelectorAll('table tbody tr');
+      let isNoData = true;
+      allTableRows.forEach(tr => {
+        if (tr.querySelectorAll('td').length >= 3) isNoData = false;
+      });
+
+      // Dynamic Header Detection for SPKL Online
+      let tglColIdx = -1;
+      const ths = doc.querySelectorAll('th');
+      ths.forEach((th, i) => {
+        const text = th.textContent.trim().toLowerCase();
+        if (text.includes('tanggal') || text.includes('tgl')) tglColIdx = i;
+      });
+
+      const spklMap = {};
+      Logger.debug('checkSPKLOnline: isNoData=', isNoData, 'tglColIdx=', tglColIdx, 'html preview:', data.slice(0, 500));
+      if (!isNoData) {
+        const rows = doc.querySelectorAll('table tbody tr');
+        rows.forEach(tr => {
+          const tds = tr.querySelectorAll('td');
+          if (tds.length < 3) return;
+
+          let rowTgl = '';
+          if (tglColIdx !== -1 && tds[tglColIdx]) {
+            rowTgl = tds[tglColIdx].textContent.trim();
+          }
+          if (!rowTgl) {
+            // Fallback heuristics for date
+            tds.forEach(td => {
+              const val = td.textContent.trim();
+              if (/^\d{4}[-\/]\d{2}[-\/]\d{2}/.test(val) || /^\d{2}[-\/]\d{2}[-\/]\d{4}/.test(val) || /^\d{2}[-\s]+[a-zA-Z]+[-\s]+\d{4}/.test(val)) {
+                rowTgl = val;
+              }
+            });
+          }
+
+          let rowStatus = '';
+          const badge = tr.querySelector('.badge');
+          if (badge) {
+            rowStatus = badge.textContent.trim().toUpperCase();
+          } else {
+            // Fallback status
+            tds.forEach(td => {
+              const val = td.textContent.trim().toUpperCase();
+              if (val === 'APPROVED' || val === 'DISETUJUI' || val.includes('APPROVE') || val.includes('SETUJU') || val.includes('REJECT') || val.includes('TOLAK') || val.includes('DRAFT') || val.includes('MENUNGGU') || val.includes('ASK FOR APPROVAL')) {
+                rowStatus = val;
+              }
+            });
+          }
+
+          if (rowTgl) {
+            let dayNum = NaN;
+            // Coba format ISO: YYYY-MM-DD atau YYYY/MM/DD (dengan atau tanpa leading zero)
+            const isoM = rowTgl.match(/^(\d{4})[-\/](\d{1,2})[-\/](\d{1,2})/);
+            if (isoM) {
+              dayNum = parseInt(isoM[3], 10);
+            } else {
+              // Coba format DD[-/]MM[-/]YYYY atau DD[-/]MM[-/]YY (hari di posisi pertama, 1-2 digit)
+              const dmyM = rowTgl.match(/^(\d{1,2})[-\/](\d{1,2})[-\/]\d{2,4}/);
+              if (dmyM) {
+                dayNum = parseInt(dmyM[1], 10);
+              } else {
+                // Fallback: cari angka 1-2 digit yang berdiri sendiri (bukan bagian dari angka lebih panjang)
+                const numM = rowTgl.match(/\b(\d{1,2})\b/);
+                if (numM) dayNum = parseInt(numM[1], 10);
+              }
+            }
+            if (!isNaN(dayNum) && dayNum >= 1 && dayNum <= 31) {
+              Logger.debug(`row rowTgl: ${rowTgl} | dayNum: ${dayNum} | rowStatus: ${rowStatus}`);
+              spklMap[dayNum] = rowStatus || 'APPROVED';
+            }
+          } else if (minDate === maxDate) {
+            spklMap[parseInt(minDate)] = rowStatus || 'APPROVED';
+          }
+        });
+      }
+      Logger.debug('spklMap final:', JSON.stringify(spklMap));
+
+      const processedDays = {};
+
+      // Build DOM row index once (O(n)) — used for cell title/dot updates
+      const domRowMap = {};
+      const domRows = document.querySelectorAll('table tbody tr');
+      for (let i = 0; i < domRows.length; i++) {
+        const tds = domRows[i].querySelectorAll('td');
+        if (tds.length >= 12) {
+          const rowTgl = tds[COL.TGL]?.textContent.trim();
+          const dNum = parseInt(rowTgl);
+          if (!isNaN(dNum)) domRowMap[dNum] = tds;
+        }
+      }
+
+      // Note: we can skip domRowMap entirely for dots because we have data-fix-date
+      cells.forEach(item => {
+        const dayNum = parseInt(item.tgl);
+        let newMsg = '';
+        const statusRaw = (spklMap[dayNum] || '').toUpperCase();
+        Logger.debug(`cell tgl=${item.tgl} | dayNum=${dayNum} | statusRaw=${statusRaw}`);
+
+        if (statusRaw) {
+          if (statusRaw.includes('ASK FOR APPROVAL') || statusRaw.includes('MENUNGGU') || statusRaw.includes('DRAFT')) {
+            newMsg = 'SPKL Belum Disetujui';
+          } else if (statusRaw.includes('REJECTED') || statusRaw.includes('DITOLAK') || statusRaw.includes('DISAPPROVED')) {
+            newMsg = 'SPKL Ditolak';
+          } else if (statusRaw.includes('APPROVED') || statusRaw.includes('DISETUJUI')) {
+            newMsg = 'SPKL Disetujui (Cek Jenis OT)';
+          } else {
+            // Status tidak dikenali tapi baris ditemukan → asumsikan approved, cek jenis OT
+            newMsg = 'SPKL Disetujui (Cek Jenis OT)';
+          }
+        } else {
+          newMsg = 'SPKL Online tidak ada';
+        }
+
+        let link = '';
+        const isEntryFix = newMsg === 'SPKL Online tidak sesuai' || newMsg === 'SPKL Online tidak ada' || newMsg === 'SPKL Belum Disetujui';
+
+        if (isEntryFix) {
+          link = ROUTES.SPKL_ONLINE_SINGLE(item.fullDate, ctx.nrp);
+        } else {
+          const base = getSpklBaseUrl(ctx.nrp);
+          const shiftParam = item.shift ? `&shift=${item.shift}` : '';
+          link = `${base}?tahun=${ctx.tahun}&bulan=${bulan}&kode_bagian=&kode_seksi=&kode_group=&nrp=${ctx.nrp}&qm_auto_spkl_fix=1&full_date=${item.fullDate}${shiftParam}`;
+        }
+
+        if (newMsg && !processedDays[dayNum]) {
+          state.anomalies.push({ tgl: item.tgl, fullDate: item.fullDate, col: 'SPKL Status', msg: newMsg, link: link });
+          processedDays[dayNum] = true;
+        }
+
+        // Direct DOM update: find all dots for this date that are related to SPKL
+        const dots = document.querySelectorAll(`.qm-fix-dot[data-fix-date="${item.tgl}"]`);
+        dots.forEach(fixDot => {
+          const currentTitle = fixDot.getAttribute('title') || '';
+          if (currentTitle.includes('SPKL')) {
+            let titleDot = 'Buka SPKL Online';
+            if (newMsg === 'SPKL Belum Disetujui') titleDot = 'Buka SPKL Online (Menunggu Persetujuan)';
+            else if (newMsg === 'SPKL Ditolak') titleDot = 'SPKL Ditolak, Cek Halaman SPKL';
+            else if (newMsg === 'SPKL Disetujui (Cek Jenis OT)') titleDot = 'Cek Halaman SPKL';
+            else if (isEntryFix) titleDot = 'Cek SPKL Online';
+            else titleDot = 'Buka Halaman SPKL';
+
+            fixDot.setAttribute('title', titleDot);
+            fixDot.setAttribute('data-fix-link', link);
+
+            // Also update the parent cell title if possible
+            const td = fixDot.closest('td');
+            if (td) {
+              const cellTitle = td.getAttribute('title') || '';
+              if (!cellTitle.includes(newMsg) && newMsg !== '') {
+                td.setAttribute('title', cellTitle + (cellTitle ? ' | ' : '') + newMsg);
+              }
+            }
+          }
+        });
+      });
+      renderAnomalies();
+    } catch (e) {
+      Logger.warn('Gagal mengambil data SPKL Online.', e);
+    } finally {
+      finishProfile(prof, { cellCount: cells.length, anomalyCount: state.anomalies.length });
+      decrementPendingChecks();
+    }
+  }
+
+  async function checkBarcodeMangkir(absentDates) {
+    const prof = startProfile('checkBarcodeMangkir', { absentCount: absentDates.length });
+    const ctx = getPageContext();
+    if (!ctx.nrp) {
+      finishProfile(prof, { skipped: true });
+      return;
+    }
+
+    const barcodeUrl = getKehadiranLink(ctx);
+
+    try {
+      const data = await req(barcodeUrl);
+      const doc = parseHTML(data);
+      let dateColIdx = -1, statusColIdx = -1;
+
+      const ths = doc.querySelectorAll('th');
+      ths.forEach(function (th, i) {
+        const text = th.textContent.trim().toLowerCase();
+        if (text.includes('tanggal')) dateColIdx = i;
+        if (text.includes('status')) statusColIdx = i;
+      });
+
+      const barcodeData = {};
+
+      const rows = doc.querySelectorAll('table tbody tr');
+      rows.forEach(function (row) {
+        const tds = row.querySelectorAll('td');
+        if (tds.length < 2) return;
+        let tglText = '', statusText = '';
+
+        if (dateColIdx !== -1 && statusColIdx !== -1) {
+          tglText = tds[dateColIdx] ? tds[dateColIdx].textContent.trim() : '';
+          statusText = tds[statusColIdx] ? tds[statusColIdx].textContent.trim() : '';
+        } else {
+          tds.forEach(function (td) {
+            const val = td.textContent.trim();
+            if (/masuk|keluar/i.test(val)) statusText = val;
+            if (/^\d{2}[-\/]\d{2}[-\/]\d{4}/.test(val) || /^\d{2}$/.test(val)) tglText = val;
+          });
+        }
+
+        if (tglText && statusText) {
+          const tglStr = tglText.split(/\s+/)[0];
+          let day = '';
+          const m1 = tglStr.match(/^(\d{2})[-\/]/);
+          const m2 = tglStr.match(/[-\/](\d{2})$/);
+          const m3 = tglStr.match(/^(\d{1,2})$/);
+          if (m1) day = m1[1]; else if (m2) day = m2[1]; else if (m3) day = m3[1].padStart(2, '0');
+          if (day) {
+            if (!barcodeData[day]) barcodeData[day] = [];
+            barcodeData[day].push(statusText.toLowerCase());
+          }
+        }
+      });
+
+      absentDates.forEach(item => {
+        const day = item.date.toString().padStart(2, '0');
+        const statuses = barcodeData[day] || [];
+        const hasMasuk = statuses.some(s => s.includes('masuk'));
+        const hasKeluar = statuses.some(s => s.includes('keluar'));
+        let errMessage = '';
+        if (!hasMasuk && !hasKeluar) errMessage = 'Kedua jam masuk dan keluar kosong';
+        else if (!hasMasuk) errMessage = 'Jam Masuk Kosong';
+        else if (!hasKeluar) errMessage = 'Jam Keluar Kosong';
+
+        if (errMessage) {
+          const tds = item.tr.querySelectorAll('td');
+          if (tds.length <= 3) return;
+          const ketTd = tds[3];
+
+          const existingTitle = ketTd.getAttribute('title') || '';
+          const barcodeTitle = `Validasi Barcode: ${errMessage}`;
+          ketTd.classList.add('qm-anomaly-cell');
+          ketTd.setAttribute('title', existingTitle ? existingTitle + ' | ' + barcodeTitle : barcodeTitle);
+          state.anomalies.push({ tgl: item.date, colIndex: 3, msg: 'Validasi Barcode: ' + errMessage, link: barcodeUrl });
+        }
+      });
+      applyMark(document, state.anomalies);
+      renderAnomalies();
+    } catch (e) {
+      Logger.warn('Gagal mengambil data barcode.');
+    } finally {
+      finishProfile(prof, { absentCount: absentDates.length, anomalyCount: state.anomalies.length });
+      decrementPendingChecks();
+    }
+  }
+
+  function spklHighlight() {
+    if (!isSpklPagePath()) return;
+    const hlDate = sessionStorage.getItem('qm_highlight_spkl_date');
+    if (!hlDate) return;
+    sessionStorage.removeItem('qm_highlight_spkl_date');
+    setTimeout(() => {
+      let hasScrolled = false;
+      const rows = document.querySelectorAll('table tbody tr');
+      rows.forEach(function (row) {
+        let matched = false;
+        const tds = row.querySelectorAll('td');
+        tds.forEach(function (td) {
+          const val = td.textContent.trim();
+          const m = val.match(/^(\d{2})[-\/]\d{2}[-\/]\d{4}/) || val.match(/^(\d{4})[-\/]\d{2}[-\/](\d{2})/);
+          if (m) {
+            const d = m[1].length === 2 ? m[1] : m[2];
+            if (d === hlDate.padStart(2, '0')) matched = true;
+          }
+        });
+        if (matched) {
+          row.classList.add('qm-row-highlight');
+          tds.forEach(td => td.classList.add('qm-row-highlight'));
+          if (!hasScrolled) {
+            const y = row.getBoundingClientRect().top + window.scrollY - 150;
+            window.scrollTo({ top: y, behavior: 'smooth' });
+            hasScrolled = true;
+          }
+        }
+      });
+    }, 500);
+  }
+
+  /* ============================================================
+   * 10. FORM AUTOMATION
+   * ============================================================ */
+
+  /** Unified Fix/Perbaikan click handler — shared by onFixDotClick and onBatchFixClick. */
+  function handleFixClick(link, date, title, fullDate) {
+    if (link) {
+      const currentUrl = window.location.href;
+      Logger.info('handleFixClick triggered', { link, date, title, currentUrl });
+      // Only set return URL if we're not already in an auto-fix flow
+      if (!currentUrl.includes('qm_auto_spkl_fix=1') && !currentUrl.includes('qm_auto_distribusi=1')) {
+        Logger.info('Setting RETURN_URL to', currentUrl);
+        sessionStorage.setItem(STORAGE.RETURN_URL, currentUrl);
+      }
+    }
+    if (title === 'Buka Halaman Kehadiran' || title === 'Cek Kehadiran' || title === 'Lihat Duplikasi Shift') {
+      const ctx = getPageContext();
+      if (ctx.nrp && date) {
+        sessionStorage.setItem(STORAGE.AUTO_NRP_FILL, ctx.nrp);
+        sessionStorage.setItem(STORAGE.AUTO_DATE_FILL, date);
+      }
+      if (isBarcodePagePath() && title !== 'Lihat Duplikasi Shift') {
+        const btn = document.querySelector('[data-target="#addData"]');
+        if (btn) { btn.click(); return; }
+      }
+      if (link) {
+        if (title !== 'Lihat Duplikasi Shift') sessionStorage.setItem(STORAGE.AUTO_ADD_DATA, 'true');
+        window.open(link, '_blank');
+      }
+      return;
+    }
+
+    if (link) {
+      if (link.includes('absenbarcode') && title && !title.includes('Pulang awal') && !title.includes('Duplikasi')) {
+        sessionStorage.setItem(STORAGE.AUTO_ADD_DATA, 'true');
+      }
+      if (date) sessionStorage.setItem(STORAGE.HIGHLIGHT_SPKL, date);
+
+      // Multi-step SPKL Fix logic
+      if (link.includes('qm_auto_spkl_fix=1')) {
+        // Collect all unique dates with SPKL fix links
+        const spklFixAnomalies = state.anomalies.filter(a => a.link && a.link.includes('qm_auto_spkl_fix=1'));
+
+        const queue = [];
+        const seenDates = new Set();
+
+        spklFixAnomalies.forEach(a => {
+          // Extract full_date from link to ensure uniqueness across month/year if possible, 
+          // but usually tgl (day) is enough within a month
+          const fullDateMatch = a.link.match(/full_date=([^&]+)/);
+          const dateKey = fullDateMatch ? fullDateMatch[1] : a.tgl;
+
+          if (!seenDates.has(dateKey)) {
+            seenDates.add(dateKey);
+            queue.push({
+              link: a.link,
+              date: a.tgl,
+              fullDate: fullDateMatch ? fullDateMatch[1] : (a.fullDate || a.tgl),
+              title: a.msg
+            });
+          }
+        });
+
+        if (queue.length > 0) {
+          Logger.info('Starting background queue', queue);
+          runSpklBackgroundQueue(queue).catch(e => Logger.error('SPKL queue error', e));
+        }
+        return;
+      } else {
+        window.open(link, '_blank');
+      }
+    } else {
+      alert('Fitur perbaikan otomatis segera hadir!');
+    }
+  }
+
+
+  /** Unified finally-block helper for pending checks state. */
+  function decrementPendingChecks() {
+    state.pendingChecks--;
+    if (state.pendingChecks <= 0) {
+      const tab = document.querySelector('[data-pane="anomali"]');
+      if (tab) tab.classList.remove('qm-tab-loading');
+    }
+  }
+
+  /** Select dropdown value with MutationObserver support. */
+  /** Select dropdown value with robust option polling (waits for AJAX options to load). */
+  async function pilihDropdownDinamis(selector, nilaiTarget, callback, timeout = 5000) {
+    if (!nilaiTarget) return callback();
+    const startTime = Date.now();
+    const target = nilaiTarget.toLowerCase();
+
+    const poll = async () => {
+      const select = document.querySelector(selector);
+      if (select) {
+        const options = select.querySelectorAll('option');
+        let foundOpt = null;
+
+        for (const opt of options) {
+          if (opt.value.toLowerCase() === target || opt.textContent.trim().toLowerCase() === target) {
+            foundOpt = opt;
+            break;
+          }
+        }
+
+        if (foundOpt) {
+          select.value = foundOpt.value;
+          if (typeof window.$ !== 'undefined' && window.$(select).selectpicker) {
+            window.$(select).selectpicker('render').selectpicker('refresh');
+          }
+          select.dispatchEvent(new Event('change', { bubbles: true }));
+          select.dispatchEvent(new Event('input', { bubbles: true }));
+          setTimeout(callback, 400); // Small buffer for server-side triggers
+          return;
+        }
+      }
+
+      if (Date.now() - startTime < timeout) {
+        setTimeout(poll, 150);
+      } else {
+        Logger.warn('Timeout waiting for option "' + nilaiTarget + '" in ' + selector);
+        callback();
+      }
+    };
+
+    poll();
+  }
+
+  /** Strips unsafe tags and attributes from HTML strings. */
+  /** Fill the distribusi form and submit. */
+  function fillDistribusiForm(dataKaryawan, nrp, tanggal, shift) {
+    setTimeout(() => {
+      UI.setGlobalProgress(20, 'Mengisi Jam Kerja...');
+
+      const jkSelect = document.querySelector('select[name*="jam_kerja"], select[name*="jk"]');
+      if (jkSelect && dataKaryawan.jk) {
+        selectOption(jkSelect, opt => {
+          const optVal = opt.value.trim();
+          const textKode = opt.textContent.trim().split('-')[0].trim();
+          return optVal === dataKaryawan.jk || textKode === dataKaryawan.jk;
+        });
+        selectPickerRefresh(jkSelect);
+      }
+
+      UI.setGlobalProgress(35, 'Mengisi Periode...');
+      const dateAwal = document.querySelectorAll('input[name*="tanggal_awal"], input[name*="periode_awal"], input[name*="tgl_awal"], input[name*="tgl_dari"], input[id*="tanggal_awal"], input[id*="tgl_awal"], input[name="start_date"]');
+      const dateAkhir = document.querySelectorAll('input[name*="tanggal_akhir"], input[name*="periode_akhir"], input[name*="tgl_akhir"], input[name*="tgl_sampai"], input[name*="tgl_ke"], input[id*="tanggal_akhir"], input[id*="tgl_akhir"], input[name="end_date"]');
+
+      const tglAwal = Array.isArray(tanggal) ? tanggal[0] : tanggal;
+      const tglAkhir = Array.isArray(tanggal) ? (tanggal[1] || tglAwal) : tglAwal;
+
+      dateAwal.forEach(input => setFieldValue(input, tglAwal));
+      dateAkhir.forEach(input => setFieldValue(input, tglAkhir));
+
+      UI.setGlobalProgress(50, 'Menyesuaikan Bagian...');
+      pilihDropdownDinamis('select[name*="bagian"]', dataKaryawan.bag, () => {
+        UI.setGlobalProgress(65, 'Menyesuaikan Seksi...');
+        pilihDropdownDinamis('select[name*="seksi"]', dataKaryawan.sek, () => {
+          UI.setGlobalProgress(75, 'Menyesuaikan Group & NRP...');
+          const grpSelect = document.querySelector('select[name="kode_group"]');
+          if (grpSelect && dataKaryawan.grp) {
+            setFieldValue(grpSelect, dataKaryawan.grp);
+            selectPickerRefresh(grpSelect);
+          }
+
+          if (typeof nrp === 'object' && nrp.awal !== undefined) {
+            const nrpIn1 = document.querySelector('input[list="nrp_awal"], input[name*="nrp_awal"], input[id*="nrp_initial"], input[name*="nrp_initial"], input[name*="nrp1"], input[name*="nrp_initial_text"]');
+            const nrpIn2 = document.querySelector('input[list="nrp_akhir"], input[name*="nrp_akhir"], input[id*="nrp_final"], input[name*="nrp_final"], input[name*="nrp2"], input[name*="nrp_final_text"]');
+            if (nrpIn1) setFieldValue(nrpIn1, nrp.awal, ['input', 'change', 'blur']);
+            if (nrpIn2) setFieldValue(nrpIn2, nrp.akhir || nrp.awal, ['input', 'change', 'blur']);
+          } else {
+            let nrpInputs = document.querySelectorAll('input[list="nrp_awal"], input[list="nrp_akhir"], input[name*="nrp_awal"], input[name*="nrp_akhir"], input[name*="nrp1"], input[name*="nrp2"], input[name*="nrp_1"], input[name*="nrp_2"]');
+            if (nrpInputs.length === 0) nrpInputs = document.querySelectorAll('input[name*="nrp"]');
+            nrpInputs.forEach(input => setFieldValue(input, nrp, ['input', 'change', 'blur']));
+          }
+
+          if (shift) {
+            const targetShiftRoman = shift === '1' ? 'I' : (shift === '2' ? 'II' : 'III');
+            const expectedText = `${targetShiftRoman} - SHIFT ${targetShiftRoman}`;
+            const shiftSelect = document.querySelector('select[name="kode_shift"], select[name="shift"]');
+            if (shiftSelect) {
+              selectOption(shiftSelect, opt => {
+                const optText = opt.textContent.trim().toUpperCase();
+                return opt.value === shift || optText === expectedText || optText === targetShiftRoman || optText === 'SHIFT ' + targetShiftRoman;
+              });
+              selectPickerRefresh(shiftSelect);
+            }
+          }
+
+          UI.setGlobalProgress(90, 'Validasi Form...');
+          setTimeout(() => {
+            // Final Validation: Ensure critical fields are NOT empty
+            const requiredFields = [
+              { sel: 'select[name*="jam_kerja"], select[name*="jk"]', label: 'Jam Kerja' },
+              { sel: 'input[name*="tanggal_awal"], input[name*="periode_awal"], input[id*="tanggal_awal"]', label: 'Tanggal Awal' },
+              { sel: 'select[name*="bagian"]', label: 'Bagian' },
+              { sel: 'select[name*="seksi"]', label: 'Seksi' }
+            ];
+
+            const missing = requiredFields.filter(f => {
+              const el = document.querySelector(f.sel);
+              return el && (!el.value || el.value === '' || el.value === '0');
+            });
+
+            const nrpIn = document.querySelector('input[name*="nrp"], #nrp_initial_text');
+            if (nrpIn && !nrpIn.value && typeof nrp !== 'object') missing.push({ label: 'NRP' });
+
+            if (missing.length > 0) {
+              const msg = 'Gagal: Field [' + missing.map(m => m.label).join(', ') + '] masih kosong.';
+              UI.setGlobalProgress(100, msg);
+              UI.showResult('danger', 'Validasi Gagal', msg);
+              // Do not hide loader automatically so user can see what's missing
+              return;
+            }
+
+            UI.setGlobalProgress(95, 'Mengirim permintaan...');
+            sessionStorage.setItem(STORAGE.AUTO_FINISHED, 'true');
+            const buttons = document.querySelectorAll('button, input[type="submit"], .btn-primary');
+            let submitBtn = null;
+            for (const btn of buttons) {
+              if ((btn.textContent && btn.textContent.includes('Start Distribusi')) || btn.value === 'Start Distribusi') {
+                submitBtn = btn; break;
+              }
+            }
+            if (submitBtn) submitBtn.click();
+            else { const form = document.querySelector('form'); if (form) form.submit(); }
+          }, 1200);
+        });
+      }, 6000); // 6s timeout for Bagian
+    }, 500);
+  }
+
+  async function autoDistribusi() {
+    const urlParams = getCurrentQueryParams();
+    if (!urlParams.get('qm_auto_distribusi')) {
+      // Check if we are on the result page of a distribution (no qm_auto param but AUTO_FINISHED is true)
+      if (sessionStorage.getItem(STORAGE.AUTO_FINISHED) === 'true') {
+        const pageText = document.body.textContent;
+        const successAlert = document.querySelector('.alert-success, .alert-info');
+
+        if (successAlert || pageText.includes('Distribution Process Completed')) {
+          UI.showResult('success', 'Distribusi Selesai', 'Distribution Process Completed');
+          const returnUrl = sessionStorage.getItem(STORAGE.RETURN_URL);
+          if (returnUrl) {
+            setTimeout(() => {
+              sessionStorage.removeItem(STORAGE.RETURN_URL);
+              window.location.href = returnUrl;
+            }, 1500);
+          }
+        }
+      }
+      return;
+    }
+
+    const cleanUrl = new URL(window.location);
+    cleanUrl.searchParams.delete('qm_auto_distribusi');
+    window.history.replaceState({}, document.title, cleanUrl.toString());
+
+    const nrp = urlParams.get('nrp');
+    const tanggalAwal = urlParams.get('tanggal') || urlParams.get('tanggal_awal');
+    const tanggalAkhir = urlParams.get('tanggal_akhir') || tanggalAwal;
+    const shift = urlParams.get('shift');
+    const urlJk = urlParams.get('jk');
+    Logger.info('Auto Distribusi started', { nrp, tanggalAwal, tanggalAkhir, shift, urlJk });
+    if (!nrp || !tanggalAwal) return;
+
+    UI.showGlobalLoader('Auto Distribusi', 'Mengambil Data...');
+    try {
+      const emp = await getEmp(nrp);
+      if (!emp.found) {
+        UI.setGlobalProgress(100, 'Data karyawan tidak ditemukan.');
+        UI.hideGlobalLoader(3000);
+        return;
+      }
+      fillDistribusiForm({ jk: urlJk || emp.jk, bag: emp.bagian, sek: emp.seksi, grp: emp.group }, nrp, [tanggalAwal, tanggalAkhir], shift);
+    } catch (e) {
+      UI.setGlobalProgress(100, 'Gagal mengakses data karyawan.');
+      UI.hideGlobalLoader(3000);
+    }
+  }
+
+  async function autoDistribusiSubsi() {
+    const urlParams = getCurrentQueryParams();
+    if (!urlParams.get('qm_auto_distribusi_subsi')) return;
+
+    const cleanUrl = new URL(window.location);
+    cleanUrl.searchParams.delete('qm_auto_distribusi_subsi');
+    window.history.replaceState({}, document.title, cleanUrl.toString());
+
+    const jk = urlParams.get('jk');
+    const tglAwal = urlParams.get('tglAwal');
+    const tglAkhir = urlParams.get('tglAkhir');
+    const shift = urlParams.get('shift');
+    const bagian = urlParams.get('bagian');
+    const seksi = urlParams.get('seksi');
+    const grup = urlParams.get('grup');
+    const nrp = urlParams.get('nrp');
+
+    if (!jk || !tglAwal || !tglAkhir) return;
+
+    UI.showGlobalLoader('Auto Distribusi Subsi', 'Mengisi data...');
+
+    try {
+      const isOS = nrp && nrp.length === 8;
+      const nrpAwal = isOS ? '00000000' : '0000';
+      const nrpAkhir = isOS ? '99999999' : '9999';
+
+      fillDistribusiForm({ jk, bag: bagian, sek: seksi, grp: grup }, { awal: nrpAwal, akhir: nrpAkhir }, [tglAwal, tglAkhir], shift);
+    } catch (e) {
+      Logger.error('autoDistribusiSubsi error', e);
+      UI.setGlobalProgress(100, 'Gagal: ' + e.message);
+      UI.hideGlobalLoader(3000);
+    }
+  }
+
+  function autoFillTargetPage() {
+    if (!isAttendancePagePath()) return;
+    const autoNrp = sessionStorage.getItem(STORAGE.AUTO_NRP);
+    const autoBulan = sessionStorage.getItem(STORAGE.AUTO_BULAN);
+    if (autoNrp && autoBulan) {
+      setTimeout(() => {
+        setFieldValue(document.querySelector('#bulan'), autoBulan);
+        setFieldValue(document.querySelector('input[name="nrp"]'), autoNrp, ['input']);
+
+        sessionStorage.removeItem(STORAGE.AUTO_NRP);
+        sessionStorage.removeItem(STORAGE.AUTO_BULAN);
+      }, TIMING.AUTO_FILL_DELAY);
+    }
+  }
+
+  function autoClickAddData() {
+    if (!isBarcodePagePath()) return;
+    if (sessionStorage.getItem('qm_auto_add_data') === 'true') {
+      sessionStorage.removeItem('qm_auto_add_data');
+      setTimeout(() => {
+        const btn = document.querySelector('[data-target="#addData"]');
+        if (btn) btn.click();
+
+        // Fill NRP and Date if available
+        const nrpFill = sessionStorage.getItem(STORAGE.AUTO_NRP_FILL);
+        const dateFill = sessionStorage.getItem(STORAGE.AUTO_DATE_FILL);
+        if (nrpFill || dateFill) {
+          setTimeout(() => {
+            if (nrpFill) {
+              const nrpInput = document.getElementById('nrp_input');
+              if (nrpInput) {
+                setFieldValue(nrpInput, nrpFill, ['input', 'change']);
+              }
+              sessionStorage.removeItem(STORAGE.AUTO_NRP_FILL);
+            }
+            if (dateFill) {
+              const dateInput = document.getElementById('tanggal');
+              if (dateInput) {
+                const ctx = getPageContext();
+                const fullDate = `${ctx.tahun}-${String(ctx.bulan).padStart(2, '0')}-${String(dateFill).padStart(2, '0')}`;
+                setFieldValue(dateInput, fullDate, ['change']);
+              }
+              sessionStorage.removeItem(STORAGE.AUTO_DATE_FILL);
+            }
+          }, 600);
+        }
+      }, 500);
+    }
+  }
+
+  function autoInputHadir() {
+    if (!isBarcodeCreatePagePath()) return;
+
+    const saved = sessionStorage.getItem(STORAGE.INPUT_HADIR);
+    if (!saved) return;
+
+    const data = JSON.parse(saved);
+    sessionStorage.removeItem(STORAGE.INPUT_HADIR);
+
+    UI.showGlobalLoader('Auto Input Kehadiran', 'Mengisi data...');
+
+    setTimeout(async () => {
+      try {
+        const elTgl = document.getElementById('tanggal');
+        const elNrp = document.getElementById('nrp_input');
+        const elJam = document.getElementById('jam');
+        const elStatus = document.getElementById('status');
+        const btnTambah = document.getElementById('btnTambah');
+        const btnSubmit = document.getElementById('submit');
+
+        if (elTgl) setFieldValue(elTgl, data.tgl, ['change']);
+        if (elNrp) setFieldValue(elNrp, data.nrp, ['input', 'change']);
+        if (elJam) setFieldValue(elJam, data.jam, ['change']);
+        if (elStatus) setFieldValue(elStatus, data.status, ['change']);
+
+        await new Promise(r => setTimeout(r, 600));
+        if (btnTambah) btnTambah.click();
+
+        await new Promise(r => setTimeout(r, 800));
+        if (btnSubmit) {
+          sessionStorage.setItem(STORAGE.AUTO_FINISHED, 'true');
+          btnSubmit.click();
+        }
+
+        UI.hideGlobalLoader();
+      } catch (e) {
+        Logger.error('Auto Input Kehadiran Error', e);
+        UI.hideGlobalLoader();
+      }
+    }, 1000);
+  }
+
+
+  async function processSpklBackgroundSingle(item) {
+    Logger.info(`Fetching ${item.link}`);
+    const html = await req(item.link);
+    const doc = parseHTML(html);
+
+    const dateObj = parseHrisDate(item.fullDate);
+    const dateStrId = dateObj ? dateObj.toLocaleDateString('id-ID') : item.fullDate;
+
+    let tglColIdx = 0;
+    const ths = doc.querySelectorAll('table th');
+    ths.forEach((th, i) => {
+      const text = th.textContent.trim().toLowerCase();
+      if (text.includes('tanggal') || text === 'tgl') tglColIdx = i;
+    });
+
+    let editBtn = null;
+    const rows = doc.querySelectorAll(SELECTORS.SPKL_TABLE_ROWS);
+    for (const row of rows) {
+      const tds = row.querySelectorAll('td');
+      if (tds.length === 0) continue;
+
+      const dateTd = tds[tglColIdx] || tds[0];
+      const rowDateText = dateTd.textContent.trim();
+      const rowDateObj = parseHrisDate(rowDateText);
+
+      let isMatch = false;
+      if (rowDateObj && dateObj) {
+        isMatch = rowDateObj.getTime() === dateObj.getTime();
+      } else {
+        isMatch = Array.from(tds).some(td => {
+          const v = td.textContent.trim();
+          return v === rowDateText && parseHrisDate(v)?.getTime() === dateObj?.getTime();
+        }) || rowDateText.includes(item.fullDate);
+      }
+
+      if (isMatch) {
+        const lastTd = tds[tds.length - 1];
+        const actionCandidates = Array.from(lastTd.querySelectorAll('button, a, .btn'));
+        const allCandidates = Array.from(row.querySelectorAll(SELECTORS.SPKL_EDIT_BTN));
+
+        const findEdit = (els) => els.find(el => {
+          const txt = el.textContent.trim().toLowerCase();
+          const target = (el.getAttribute('data-target') || '').toLowerCase();
+          const href = (el.getAttribute('href') || '').toLowerCase();
+          return txt.includes('edit') || target.includes('edit') || href.includes('edit');
+        });
+
+        editBtn = findEdit(actionCandidates) || findEdit(allCandidates);
+        if (editBtn) break;
+      }
+    }
+
+    if (!editBtn) {
+      Logger.warn(`Baris tanggal ${dateStrId} tidak ditemukan.`);
+      return false;
+    }
+
+    const modalId = editBtn.getAttribute('data-target');
+    if (!modalId) return false;
+
+    const modal = doc.getElementById(modalId.replace('#', ''));
+    if (!modal) return false;
+
+    const form = modal.querySelector('form');
+    if (!form) return false;
+
+    const mskInput = form.querySelector(SELECTORS.SPKL_MODAL_MSK);
+    const otTypeSelect = form.querySelector(SELECTORS.SPKL_MODAL_OT_TYPE);
+    if (!otTypeSelect) return false;
+
+    const mskValue = mskInput ? mskInput.value : '';
+    const mskTime = parseTime(mskValue);
+    const urlParams = new URLSearchParams(item.link.split('?')[1] || '');
+    const shift = urlParams.get('shift') || tebakShiftSebenarnya(mskTime, SHIFT_RULES);
+    const currentOtType = otTypeSelect.value;
+
+    let matchedRule = null;
+    for (const rule of SPKL_RULES) {
+      if (shift === rule.shift && currentOtType === rule.currentOtType) {
+        matchedRule = rule;
+        break;
+      }
+    }
+
+    if (!matchedRule) {
+      Logger.info(`No fix needed for ${dateStrId}: shift ${shift}, type ${currentOtType}`);
+      return true; // Already correct
+    }
+
+    const params = new URLSearchParams();
+    const headers = {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'X-Requested-With': 'XMLHttpRequest'
+    };
+
+    const csrfMeta = doc.querySelector('meta[name="csrf-token"], meta[name="csrf-test-name"], meta[name="_token"]');
+    if (csrfMeta) {
+      const token = csrfMeta.getAttribute('content');
+      if (!token) {
+        throw new Error('Token CSRF tidak ditemukan. Struktur halaman mungkin berubah.');
+      }
+      headers['X-CSRF-TOKEN'] = token;
+      headers['X-XSRF-TOKEN'] = token;
+    } else {
+      const csrfHidden = form.querySelector('input[name="_token"], input[name="csrf_token"], input[name="csrf-token"]');
+      if (csrfHidden && csrfHidden.value) {
+        headers['X-CSRF-TOKEN'] = csrfHidden.value;
+        headers['X-XSRF-TOKEN'] = csrfHidden.value;
+      } else {
+        throw new Error('Token CSRF tidak ditemukan. Struktur halaman mungkin berubah.');
+      }
+    }
+
+    form.querySelectorAll('input, select, textarea').forEach(el => {
+      if (!el.name || el.type === 'submit' || el.type === 'button') return;
+      if ((el.type === 'checkbox' || el.type === 'radio') && !el.checked) return;
+
+      let val = el.value;
+      if (el === otTypeSelect) val = matchedRule.targetOtType;
+
+      params.append(el.name, val);
+    });
+
+    const actionUrl = form.action.startsWith('http') ? form.action : ROUTES.BASE + (form.action.startsWith('/') ? '' : '/') + form.action;
+
+    Logger.info(`Sending POST to ${actionUrl} for ${dateStrId}`);
+    const res = await fetchWithTimeout(actionUrl, {
+      method: 'POST',
+      headers,
+      body: params.toString()
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return true;
+  }
+
+  async function runSpklBackgroundQueue(queue) {
+    UI.showGlobalLoader('Auto Fix SPKL', `Memulai perbaikan ${queue.length} data...`, true);
+    let successCount = 0;
+
+    for (let i = 0; i < queue.length; i++) {
+      if (!document.getElementById('qm-global-loader')) {
+        Logger.info('User cancelled background queue');
+        return;
+      }
+
+      const item = queue[i];
+      UI.setGlobalProgress(Math.round((i / queue.length) * 100), `Antrean ${i + 1}/${queue.length}: ${item.fullDate}...`);
+
+      try {
+        const result = await processSpklBackgroundSingle(item);
+        if (result) successCount++;
+        await new Promise(r => setTimeout(r, 800)); // Be nice to server
+      } catch (e) {
+        Logger.error(`Error processing ${item.fullDate}`, e);
+      }
+    }
+
+    UI.setGlobalProgress(100, 'Selesai!');
+    setTimeout(() => {
+      UI.hideGlobalLoader();
+      UI.showResult('success', 'Perbaikan SPKL', `Berhasil memproses ${successCount} dari ${queue.length} antrean.`);
+      setTimeout(() => window.location.reload(), 1500); // Reload attendance table to update anomalies
+    }, 1000);
+  }
+
+
+  async function runSpklBatchProcess() {
+    const elNrp = document.getElementById("qm-fix-spkl-nrp");
+    const elBulan = document.getElementById("qm-fix-spkl-bulan");
+    const elTahun = document.getElementById("qm-fix-spkl-tahun");
+    const elData = document.getElementById("qm-fix-spkl-data");
+
+    const nrp = elNrp ? elNrp.value.trim() : "";
+    const bulan = elBulan ? elBulan.value : "";
+    const tahun = elTahun ? elTahun.value : "";
+    const batchData = elData ? elData.value.trim() : "";
+
+    if (!nrp || !bulan || !tahun || !batchData) {
+      UI.showResult('warning', 'Data Belum Lengkap', 'Silakan isi NRP, Periode, dan Data Batch.');
+      return;
+    }
+
+    sessionStorage.setItem(STORAGE.RETURN_URL, window.location.href);
+
+    if (!/^\d{4}$|^\d{8}$/.test(nrp)) {
+      UI.showResult('warning', 'NRP Tidak Valid', 'Gunakan 4 digit (Reguler) atau 8 digit (OS).');
+      return;
+    }
+
+    let targetUrl = getSpklCreateUrl(nrp);
+
+    // Save OT 7 details if any
+    let jamAwal = "", jamAkhir = "", shiftVal = "";
+    const elAwal = document.getElementById("qm-fix-spkl-jam-awal");
+    const elAkhir = document.getElementById("qm-fix-spkl-jam-akhir");
+    const elShift = document.getElementById("qm-fix-spkl-shift");
+    jamAwal = elAwal ? elAwal.value : "";
+    jamAkhir = elAkhir ? elAkhir.value : "";
+    shiftVal = elShift ? elShift.value : "";
+
+    if (!window.location.href.includes(targetUrl)) {
+      sessionStorage.setItem("spkl_saved_data", JSON.stringify({ nrp, tahun, bulan, batchData, jamAwal, jamAkhir, shiftVal }));
+      UI.showResult('success', 'Mengalihkan...', 'Halaman akan berpindah. Proses dilanjutkan otomatis.');
+      setTimeout(() => { window.location.href = targetUrl; }, 1000);
+      return;
+    }
+
+    _continueSpklBatch(nrp, tahun, bulan, batchData, jamAwal, jamAkhir, shiftVal);
+  }
+
+  async function _continueSpklBatch(nrp, tahun, bulan, batchData, jamAwal, jamAkhir, shiftVal) {
+    const taskList = [];
+    const items = batchData.split(',');
+    for (let item of items) {
+      item = item.trim();
+      if (!item) continue;
+      const parts = item.split(/[-:=]/);
+      const hari = parts[0].trim();
+      const jenisOt = parts.length > 1 ? parts[1].trim().toUpperCase() : "1";
+      if (!isNaN(hari) && hari !== "") {
+        taskList.push({ hari, jenisOt });
+      }
+    }
+
+    if (taskList.length === 0) {
+      UI.showResult('danger', 'Format Salah', 'Tidak ada data valid yang ditemukan.');
+      return;
+    }
+
+    UI.showGlobalLoader('Proses SPKL Batch', 'Memulai...');
+
+    // Hoist DOM lookups outside loop (constant per batch run)
+    const nrpInput = document.getElementById("nrp_input");
+    const tanggalInput = document.getElementById("tanggal");
+    const jenisOtSelect = document.getElementById("jenis_ot");
+    const btnTambah = document.getElementById("btnTambah");
+    const jamAwalEl = document.querySelector("#jam_awal_ot");
+    const jamAkhirEl = document.querySelector("#jam_akhir_ot");
+    const shiftEl = document.querySelector("#shift");
+
+    for (let i = 0; i < taskList.length; i++) {
+      const task = taskList[i];
+      const formatBulan = String(bulan).padStart(2, '0');
+      const formatHari = String(task.hari).padStart(2, '0');
+      const fullDate = `${tahun}-${formatBulan}-${formatHari}`;
+
+      UI.setGlobalProgress((i / taskList.length) * 100, `Memproses Tgl ${task.hari}...`);
+
+      setFieldValue(nrpInput, nrp, ['input', 'change']);
+      setFieldValue(tanggalInput, fullDate, ['input', 'change']);
+      if (jenisOtSelect) {
+        setFieldValue(jenisOtSelect, task.jenisOt);
+        if (window.jQuery && window.jQuery(jenisOtSelect).selectpicker) {
+          window.jQuery(jenisOtSelect).selectpicker('refresh');
+        }
+      }
+
+      if (task.jenisOt === "7") {
+        setFieldValue(jamAwalEl, jamAwal);
+        setFieldValue(jamAkhirEl, jamAkhir);
+        setFieldValue(shiftEl, shiftVal);
+      }
+
+      await new Promise(r => setTimeout(r, TIMING.SPKL_INPUT_DELAY));
+      if (btnTambah) btnTambah.click();
+      await new Promise(r => setTimeout(r, TIMING.SPKL_CLICK_DELAY));
+    }
+
+    UI.setGlobalProgress(95, 'Menyimpan...');
+    const btnSubmit = document.getElementById("submit");
+    if (btnSubmit) {
+      sessionStorage.setItem(STORAGE.AUTO_FINISHED, 'true');
+      await new Promise(r => setTimeout(r, TIMING.SPKL_SUBMIT_DELAY));
+      btnSubmit.click();
+      UI.setGlobalProgress(100, 'Selesai, Master!');
+      UI.hideGlobalLoader(2000);
+    }
+  }
+
+  function checkSpklBatchResume() {
+    // 1. Resume Per NRP (Batch Tanggal)
+    const sessionData = sessionStorage.getItem("spkl_saved_data");
+    if (sessionData) {
+      const parsed = JSON.parse(sessionData);
+      sessionStorage.removeItem("spkl_saved_data");
+
+      setTimeout(() => {
+        const elNrp = document.getElementById("qm-fix-spkl-nrp");
+        const elBulan = document.getElementById("qm-fix-spkl-bulan");
+        const elTahun = document.getElementById("qm-fix-spkl-tahun");
+        const elData = document.getElementById("qm-fix-spkl-data");
+
+        if (elNrp) elNrp.value = parsed.nrp;
+        if (elBulan) elBulan.value = parsed.bulan;
+        if (elTahun) elTahun.value = parsed.tahun;
+        if (elData) elData.value = parsed.batchData;
+        if (parsed.jamAwal) {
+          const elA = document.getElementById("qm-fix-spkl-jam-awal");
+          const elK = document.getElementById("qm-fix-spkl-jam-akhir");
+          const elS = document.getElementById("qm-fix-spkl-shift");
+          if (elA) elA.value = parsed.jamAwal;
+          if (elK) elK.value = parsed.jamAkhir;
+          if (elS) elS.value = parsed.shiftVal;
+          const box = document.getElementById("qm-fix-spkl-ot7-box");
+          if (box) box.classList.remove('qm-hidden');
+        }
+
+        // openPanel();
+        // const tabFix = document.querySelector('[data-pane="fix"]');
+        // if (tabFix) tabFix.click();
+
+        UI.showResult('success', 'Melanjutkan...', 'Memulai proses batch otomatis.');
+        _continueSpklBatch(parsed.nrp, parsed.tahun, parsed.bulan, parsed.batchData);
+      }, 1200);
+      return;
+    }
+
+    // 2. Resume Banyak NRP (Batch NRP)
+    const MANY_NRP_KEY = "hris_spkl_ot_runner_v1";
+    const st = JSON.parse(sessionStorage.getItem(MANY_NRP_KEY) || "null");
+    if (st) {
+      const pRoute = (function (s) {
+        const current = getSpklAddPageKind();
+        if (current && s.indexes[current] < s[current].length) return current;
+        if (s.indexes.internal < s.internal.length) return "internal";
+        if (s.indexes.outsource < s.outsource.length) return "outsource";
+        return null;
+      })(st);
+
+      if (pRoute) {
+        const current = getSpklAddPageKind();
+        if (current === pRoute) {
+          setTimeout(() => {
+            // Populate fields for visibility
+            const elNrps = document.getElementById("qm-fix-many-nrps");
+            const elDate = document.getElementById("qm-fix-many-date");
+            const elOt = document.getElementById("qm-fix-many-ot");
+            if (elNrps) elNrps.value = [...st.internal, ...st.outsource].join(", ");
+            if (elDate) elDate.value = st.date;
+            if (elOt) {
+              elOt.value = st.jenisOt;
+              elOt.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+            if (st.jenisOt === "7") {
+              const elAwal = document.getElementById("qm-fix-many-jam-awal");
+              const elAkhir = document.getElementById("qm-fix-many-jam-akhir");
+              const elShift = document.getElementById("qm-fix-many-shift");
+              if (elAwal) elAwal.value = st.jamAwal;
+              if (elAkhir) elAkhir.value = st.jamAkhir;
+              if (elShift) elShift.value = st.shiftVal;
+            }
+
+            // openPanel();
+            // const tabFix = document.querySelector('[data-pane="fix"]');
+            // if (tabFix) tabFix.click();
+
+            UI.showGlobalLoader('Batch NRP', 'Melanjutkan...');
+            _processManyNrpPage(pRoute, st);
+          }, 1500);
+        } else {
+          Logger.info('Batch NRP pending redirect to ' + pRoute);
+        }
+      }
+    }
+  }
+
+  async function runSpklManyNrpBatch() {
+    const STORAGE_KEY = "hris_spkl_ot_runner_v1";
+
+    const elNrps = document.getElementById("qm-fix-many-nrps");
+    const elDate = document.getElementById("qm-fix-many-date");
+    const elOt = document.getElementById("qm-fix-many-ot");
+
+    const raw = elNrps ? elNrps.value.trim() : "";
+    const dateVal = elDate ? elDate.value : "";
+    const jO = elOt ? elOt.value : "";
+
+    if (!raw || !dateVal || !jO) {
+      UI.showResult('warning', 'Data Belum Lengkap', 'Silakan isi daftar NRP, Tanggal, dan Jenis OT.');
+      return;
+    }
+
+    sessionStorage.setItem(STORAGE.RETURN_URL, window.location.href);
+
+    let jamAwal = "", jamAkhir = "", shiftVal = "";
+    if (jO === "7") {
+      const elAwal = document.getElementById("qm-fix-many-jam-awal");
+      const elAkhir = document.getElementById("qm-fix-many-jam-akhir");
+      const elShift = document.getElementById("qm-fix-many-shift");
+      jamAwal = elAwal ? elAwal.value : "";
+      jamAkhir = elAkhir ? elAkhir.value : "";
+      shiftVal = elShift ? elShift.value : "";
+      if (!jamAwal || !jamAkhir || !shiftVal) {
+        UI.showResult('warning', 'Detail OT 7 Kosong', 'Silakan isi Jam Awal, Akhir, dan Shift.');
+        return;
+      }
+    }
+
+    const nrps = raw.split(/[,\n\s]+/).map(v => v.trim()).filter(Boolean);
+    const int = [], out = [], inv = [];
+    for (const nrp of nrps) {
+      if (/^\d{4}$/.test(nrp)) int.push(nrp);
+      else if (/^\d{8}$/.test(nrp)) out.push(nrp);
+      else inv.push(nrp);
+    }
+
+    if (inv.length) {
+      UI.showResult('danger', 'NRP Tidak Valid', 'Ditemukan NRP salah: ' + inv.slice(0, 3).join(', ') + (inv.length > 3 ? '...' : ''));
+      return;
+    }
+
+    const state = {
+      date: dateVal,
+      jenisOt: jO, jamAwal, jamAkhir, shiftVal,
+      internal: int, outsource: out,
+      indexes: { internal: 0, outsource: 0 }
+    };
+
+    sessionStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+
+    const current = getSpklAddPageKind();
+    const target = (int.length > 0 ? "internal" : "outsource");
+
+    if (current !== target) {
+      UI.showResult('success', 'Mengalihkan...', 'Pindah ke halaman input ' + target + '.');
+      setTimeout(() => { window.location.href = getSpklAddUrlByKind(target); }, 1000);
+    } else {
+      _processManyNrpPage(target, state);
+    }
+  }
+
+  async function _processManyNrpPage(route, s) {
+    const STORAGE_KEY = "hris_spkl_ot_runner_v1";
+    const tEl = document.querySelector("#tanggal");
+    const nEl = document.querySelector("#nrp_input");
+    const jEl = document.querySelector("#jenis_ot");
+    const tbBtn = document.querySelector("#btnTambah");
+    const sbBtn = document.querySelector("#submit");
+
+    if (!tEl || !nEl || !jEl || !tbBtn || !sbBtn) {
+      alert("Elemen form tidak lengkap. Pastikan berada di halaman input yang benar.");
+      return;
+    }
+
+    const list = s[route];
+    let idx = s.indexes[route];
+
+    for (; idx < list.length; idx++) {
+      const nrp = list[idx];
+      UI.setGlobalProgress((idx / list.length) * 100, `Batch NRP: ${nrp}`);
+
+      const setVal = (el, val) => setFieldValue(el, val);
+
+      setVal(tEl, s.date);
+      await new Promise(r => setTimeout(r, TIMING.SESSION_SAVE_DELAY));
+      setVal(nEl, nrp);
+      await new Promise(r => setTimeout(r, TIMING.SESSION_SAVE_DELAY2));
+      setVal(jEl, s.jenisOt);
+      await new Promise(r => setTimeout(r, TIMING.SESSION_SAVE_DELAY3));
+
+      if (s.jenisOt === "7") {
+        setVal(document.querySelector("#jam_awal_ot"), s.jamAwal);
+        setVal(document.querySelector("#jam_akhir_ot"), s.jamAkhir);
+        setVal(document.querySelector("#shift"), s.shiftVal);
+        await new Promise(r => setTimeout(r, TIMING.SESSION_SAVE_DELAY2));
+      }
+
+      tbBtn.click();
+      s.indexes[route] = idx + 1;
+      sessionStorage.setItem(STORAGE_KEY, JSON.stringify(s));
+      await new Promise(r => setTimeout(r, TIMING.SPKL_BATCH_NRP_CLICK_DELAY));
+    }
+
+    const nextR = (function (st) {
+      if (st.indexes.internal < st.internal.length) return "internal";
+      if (st.indexes.outsource < st.outsource.length) return "outsource";
+      return null;
+    })(s);
+
+    if (!nextR) {
+      sessionStorage.removeItem(STORAGE_KEY);
+      UI.setGlobalProgress(100, 'Selesai!');
+      sessionStorage.setItem(STORAGE.AUTO_FINISHED, 'true');
+    } else {
+      sessionStorage.setItem(STORAGE_KEY, JSON.stringify(s));
+    }
+    sbBtn.click();
+  }
+
+  async function runHadirManyNrpBatch() {
+    const elNrps = document.getElementById("qm-input-hadir-many-nrps");
+    const elDate = document.getElementById("qm-input-hadir-many-tanggal");
+    const elJam = document.getElementById("qm-input-hadir-many-jam");
+    const elStatus = document.getElementById("qm-input-hadir-many-status");
+
+    const raw = elNrps ? elNrps.value.trim() : "";
+    const dateVal = elDate ? elDate.value : "";
+    const jamVal = elJam ? elJam.value : "";
+    const statusVal = elStatus ? elStatus.value : "";
+
+    if (!raw || !dateVal || !jamVal || statusVal === "") {
+      UI.showResult('warning', 'Data Belum Lengkap', 'Silakan isi daftar NRP, Tanggal, Jam, dan Status.');
+      return;
+    }
+
+    sessionStorage.setItem(STORAGE.RETURN_URL, window.location.href);
+
+    const nrps = raw.split(/[,\n\s]+/).map(v => v.trim()).filter(Boolean);
+    const int = [], out = [], inv = [];
+    for (const nrp of nrps) {
+      if (/^\d{4}$/.test(nrp)) int.push(nrp);
+      else if (/^\d{8}$/.test(nrp)) out.push(nrp);
+      else inv.push(nrp);
+    }
+
+    if (inv.length) {
+      UI.showResult('danger', 'NRP Tidak Valid', 'Ditemukan NRP salah: ' + inv.slice(0, 3).join(', ') + (inv.length > 3 ? '...' : ''));
+      return;
+    }
+
+    const batchState = {
+      date: dateVal,
+      jam: jamVal,
+      status: statusVal,
+      internal: int,
+      outsource: out,
+      indexes: { internal: 0, outsource: 0 }
+    };
+
+    sessionStorage.setItem(STORAGE.HADIR_BATCH, JSON.stringify(batchState));
+
+    const current = getAbsenCreatePageKind();
+    const target = (int.length > 0 ? "internal" : "outsource");
+
+    if (current !== target) {
+      UI.showResult('success', 'Mengalihkan...', 'Pindah ke halaman input ' + target + '.');
+      const targetUrl = getAbsenCreateUrlByKind(target);
+      setTimeout(() => { window.location.href = targetUrl; }, 1000);
+    } else {
+      _processHadirManyNrpPage(target, batchState);
+    }
+  }
+
+  async function _processHadirManyNrpPage(route, s) {
+    const tEl = document.querySelector("#tanggal");
+    const nEl = document.querySelector("#nrp_input");
+    const jEl = document.querySelector("#jam");
+    const sEl = document.querySelector("#status");
+    const tbBtn = document.querySelector("#btnTambah");
+    const sbBtn = document.querySelector("#submit");
+
+    if (!tEl || !nEl || !jEl || !sEl || !tbBtn || !sbBtn) {
+      alert("Elemen form tidak lengkap. Pastikan berada di halaman input yang benar.");
+      return;
+    }
+
+    const list = s[route];
+    let idx = s.indexes[route];
+
+    UI.showGlobalLoader('Batch Kehadiran', 'Memulai...');
+
+    for (; idx < list.length; idx++) {
+      const nrp = list[idx];
+      UI.setGlobalProgress((idx / list.length) * 100, `Batch Kehadiran: ${nrp}`);
+
+      setFieldValue(tEl, s.date, ['change']);
+      setFieldValue(nEl, nrp, ['input', 'change']);
+      setFieldValue(jEl, s.jam, ['change']);
+      setFieldValue(sEl, s.status, ['change']);
+
+      await new Promise(r => setTimeout(r, 600));
+      tbBtn.click();
+
+      s.indexes[route] = idx + 1;
+      sessionStorage.setItem(STORAGE.HADIR_BATCH, JSON.stringify(s));
+      await new Promise(r => setTimeout(r, 1200));
+    }
+
+    const nextR = (function (st) {
+      if (st.indexes.internal < st.internal.length) return "internal";
+      if (st.indexes.outsource < st.outsource.length) return "outsource";
+      return null;
+    })(s);
+
+    if (!nextR) {
+      sessionStorage.removeItem(STORAGE.HADIR_BATCH);
+      UI.setGlobalProgress(100, 'Selesai!');
+      sessionStorage.setItem(STORAGE.AUTO_FINISHED, 'true');
+    } else {
+      sessionStorage.setItem(STORAGE.HADIR_BATCH, JSON.stringify(s));
+      const targetUrl = getAbsenCreateUrlByKind(nextR);
+      window.location.href = targetUrl;
+      return;
+    }
+    sbBtn.click();
+  }
+
+  function checkHadirBatchResume() {
+    const st = JSON.parse(sessionStorage.getItem(STORAGE.HADIR_BATCH) || "null");
+    if (st) {
+      const current = getAbsenCreatePageKind();
+
+      const pRoute = (function (s) {
+        if (current && s.indexes[current] < s[current].length) return current;
+        if (s.indexes.internal < s.internal.length) return "internal";
+        if (s.indexes.outsource < s.outsource.length) return "outsource";
+        return null;
+      })(st);
+
+      if (pRoute) {
+        if (current === pRoute) {
+          setTimeout(() => {
+            _processHadirManyNrpPage(pRoute, st);
+          }, 1500);
+        } else {
+          const targetUrl = getAbsenCreateUrlByKind(pRoute);
+          window.location.href = targetUrl;
+        }
+      }
+    }
+  }
+
+  async function runHadirBulanBatch() {
+    const elNrp = document.getElementById("qm-input-hadir-bulan-nrp");
+    const elBulan = document.getElementById("qm-input-hadir-bulan-bln");
+    const elTahun = document.getElementById("qm-input-hadir-bulan-thn");
+    const elHari = document.getElementById("qm-input-hadir-bulan-hari");
+    const elMasuk = document.getElementById("qm-input-hadir-bulan-masuk");
+    const elKeluar = document.getElementById("qm-input-hadir-bulan-keluar");
+
+    const NRP = elNrp ? elNrp.value.trim() : "";
+    const BULAN = elBulan ? parseInt(elBulan.value, 10) : 0;
+    const TAHUN = elTahun ? parseInt(elTahun.value, 10) : 2026;
+    const HARI_KERJA = elHari ? parseInt(elHari.value, 10) : 5;
+    const jamMasuk = elMasuk ? elMasuk.value : "07:00";
+    const jamKeluar = elKeluar ? elKeluar.value : "15:00";
+
+    if (!NRP || !/^\d{4}$|^\d{8}$/.test(NRP)) {
+      UI.showResult('warning', 'NRP Tidak Valid', 'Gunakan 4 digit (Reguler) atau 8 digit (OS).');
+      return;
+    }
+
+    if (!BULAN || BULAN < 1 || BULAN > 12) {
+      UI.showResult('warning', 'Bulan Tidak Valid', 'Silakan pilih bulan.');
+      return;
+    }
+
+    UI.showGlobalLoader('Kalender Disiapkan', 'Menghitung hari kerja...');
+
+    const liburBulanIni = LIBUR_NASIONAL_2026[BULAN] || [];
+    const hariValid = [];
+    const jumlahHariSeBulan = new Date(TAHUN, BULAN, 0).getDate();
+
+    for (let tanggal = 1; tanggal <= jumlahHariSeBulan; tanggal++) {
+      const dateObj = new Date(TAHUN, BULAN - 1, tanggal);
+      const hari = dateObj.getDay(); // 0: Sunday, 6: Saturday
+      const isWeekend = (HARI_KERJA === 5) ? (hari === 0 || hari === 6) : (hari === 0);
+
+      if (!isWeekend && !liburBulanIni.includes(tanggal)) {
+        hariValid.push(tanggal);
+      }
+    }
+
+    if (hariValid.length === 0) {
+      UI.showResult('warning', 'Tidak Ada Hari Kerja', 'Bulan ini tidak memiliki hari kerja valid.');
+      UI.hideGlobalLoader();
+      return;
+    }
+
+    const antrean = [];
+    const bulanStr = String(BULAN).padStart(2, '0');
+    hariValid.forEach(tgl => {
+      const tglStr = String(tgl).padStart(2, '0');
+      antrean.push({ waktu: `${TAHUN}-${bulanStr}-${tglStr}T${jamMasuk}`, status: "1", label: "Masuk" });
+      antrean.push({ waktu: `${TAHUN}-${bulanStr}-${tglStr}T${jamKeluar}`, status: "0", label: "Keluar" });
+    });
+
+    sessionStorage.setItem('qm_auto_hadir_bulan_active', 'true');
+    sessionStorage.setItem('qm_auto_hadir_bulan_nrp', NRP);
+    sessionStorage.setItem('qm_auto_hadir_bulan_antrean', JSON.stringify(antrean));
+    sessionStorage.setItem(STORAGE.RETURN_URL, window.location.href);
+
+    const targetURL = getAbsenAddUrl(NRP);
+
+    UI.setGlobalProgress(100, 'Berhasil! Mengalihkan...');
+    setTimeout(() => {
+      window.location.href = targetURL;
+    }, 1200);
+  }
+
+  async function checkHadirBulanResume() {
+    if (sessionStorage.getItem('qm_auto_hadir_bulan_active') !== 'true') return;
+
+    const NRP = sessionStorage.getItem('qm_auto_hadir_bulan_nrp');
+    const antrean = JSON.parse(sessionStorage.getItem('qm_auto_hadir_bulan_antrean') || "[]");
+
+    if (!NRP || antrean.length === 0) {
+      sessionStorage.removeItem('qm_auto_hadir_bulan_active');
+      return;
+    }
+
+    // Check if we are on the correct page
+    const isAddPage = isBarcodeAddPagePath();
+    if (!isAddPage) return;
+
+    UI.showGlobalLoader('Automasi Berjalan', `Sisa data: ${antrean.length / 2} hari`);
+
+    const inputNrp = document.getElementById('nrp_input');
+    const inputTanggal = document.getElementById('tanggal');
+    const inputStatus = document.getElementById('status');
+    const btnTambah = document.getElementById('btnTambah');
+
+    if (!inputNrp || !inputTanggal || !inputStatus || !btnTambah) {
+      Logger.warn('Elemen form tidak ditemukan untuk resume automasi.');
+      return;
+    }
+
+    // Start processing the queue
+    for (let i = 0; i < antrean.length; i++) {
+      const aksi = antrean[i];
+      UI.setGlobalProgress((i / antrean.length) * 100, `Menyuntikkan: ${aksi.label} | ${aksi.waktu.split('T')[0]}`);
+
+      setFieldValue(inputNrp, NRP, ['input', 'change']);
+      setFieldValue(inputTanggal, aksi.waktu, ['input', 'change']);
+      setFieldValue(inputStatus, aksi.status, ['change']);
+
+      if (window.jQuery && window.jQuery(inputStatus).selectpicker) {
+        window.jQuery(inputStatus).selectpicker('refresh');
+      }
+
+      await new Promise(r => setTimeout(r, 500));
+      btnTambah.click();
+      await new Promise(r => setTimeout(r, 1000));
+    }
+
+    sessionStorage.removeItem('qm_auto_hadir_bulan_active');
+    sessionStorage.removeItem('qm_auto_hadir_bulan_nrp');
+    sessionStorage.removeItem('qm_auto_hadir_bulan_antrean');
+
+    UI.setGlobalProgress(100, 'Selesai! Menyimpan...');
+    const btnSubmit = document.getElementById('submit');
+    if (btnSubmit) {
+      sessionStorage.setItem(STORAGE.AUTO_FINISHED, 'true');
+      setTimeout(() => btnSubmit.click(), 500);
+    } else {
+      UI.hideGlobalLoader(1500);
+      alert(`[Quick Menu] Automasi Selesai!\n- NRP: ${NRP}\n- Total dieksekusi: ${antrean.length} baris.\nSilakan klik Simpan secara manual.`);
+    }
+  }
+
+  /* ============================================================
+   * 11. UI LAYER
+   * ============================================================ */
+
   GM_addStyle(`
     :root {
       /* --- Design Tokens --- */
@@ -1779,42 +4198,6 @@
     }
   `);
 
-  /* ============================================================
-   * 5. STATE
-   * ============================================================ */
-  const state = {
-    isOpen: false,
-    loading: false,
-    history: [],
-    maxHistory: 8,
-    anomalies: [],
-    pendingChecks: 0,
-    shortcut: GM_getValue('qm_shortcut', 'Ctrl+Shift+Q'),
-    alwaysCollapse: GM_getValue('qm_always_collapse', false),
-    theme: GM_getValue('qm_theme', 'light'),
-    debug: GM_getValue('qm_debug', false),
-    batchQueue: [],
-    batchResults: [],
-    batchLogs: [],
-    batchBulan: 0,
-    batchTahun: 0,
-    batchActiveWorkers: 0,
-    batchTotal: 0,
-    batchAborted: false,
-    batchProfile: { renderTotal: 0, itemDurations: [] },
-    profileStats: {},
-    profileFlags: {},
-    expandedAnomalyGroups: new Set(),
-    panelPos: JSON.parse(GM_getValue('qm_panel_pos', 'null')), // {top, left}
-  };
-  let shortcutKey = GM_getValue('qm_shortcut', 'Ctrl+Q');
-  let alwaysCollapseMenu = GM_getValue('qm_always_collapse', false);
-  let isRecordingShortcut = false;
-  let cachedEditHtml = null; // Cache for editgeneral HTML to speed up save
-
-  /* ============================================================
-   * 6. HTML TEMPLATE
-   * ============================================================ */
   /** Claude-style Spike Mark SVG (4-spoke radial). */
   const SPIKE_SVG = `<svg class="qm-spike-mark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round"><line x1="12" y1="4" x2="12" y2="20"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="6.34" y1="6.34" x2="17.66" y2="17.66"/><line x1="6.34" y1="17.66" x2="17.66" y2="6.34"/></svg>`;
 
@@ -2409,82 +4792,6 @@
     
   `;
 
-
-  /* ============================================================
-   * 7. UI HELPERS
-   * ============================================================ */
-  function now() { return new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }); }
-  function pushLog(msg, type = 'info') {
-    const time = Logger._formatTime();
-    state.batchLogs.push({ time, msg, level: type });
-    if (state.batchLogs.length > 500) state.batchLogs.shift();
-
-    const logBody = document.getElementById('qm-log-body');
-    if (logBody) {
-      const div = document.createElement('div');
-      div.className = 'qm-log-item';
-      setInnerHTML(div, `<span class="qm-log-time">[${time}]</span><span class="qm-log-msg ${type}">${escHtml(msg)}</span>`);
-      logBody.appendChild(div);
-      logBody.scrollTop = logBody.scrollHeight;
-    }
-  }
-
-
-  function initDraggable() {
-    const panel = document.getElementById('qm-panel');
-    const header = document.getElementById('qm-header');
-    if (!panel || !header) return;
-
-    let isDragging = false;
-    let offset = { x: 0, y: 0 };
-
-    if (state.panelPos) {
-      panel.style.left = state.panelPos.left;
-      panel.style.top = state.panelPos.top;
-      panel.style.transform = 'none';
-      panel.style.margin = '0';
-    }
-
-    header.style.cursor = 'move';
-    header.addEventListener('mousedown', (e) => {
-      if (e.target.closest('.qm-header-actions')) return;
-      isDragging = true;
-      const rect = panel.getBoundingClientRect();
-      offset = {
-        x: e.clientX - rect.left,
-        y: e.clientY - rect.top
-      };
-      panel.style.transition = 'none';
-      panel.style.transform = 'none';
-      panel.style.margin = '0';
-    });
-
-    document.addEventListener('mousemove', (e) => {
-      if (!isDragging) return;
-      const x = e.clientX - offset.x;
-      const y = e.clientY - offset.y;
-
-      const left = x + 'px';
-      const top = Math.max(0, y) + 'px';
-
-      panel.style.left = left;
-      panel.style.top = top;
-
-      state.panelPos = { left, top };
-    });
-
-    document.addEventListener('mouseup', () => {
-      if (isDragging) {
-        isDragging = false;
-        panel.style.transition = '';
-        GM_setValue('qm_panel_pos', JSON.stringify(state.panelPos));
-      }
-    });
-  }
-
-  /* ============================================================
-   * 8. UI SERVICE
-   * ============================================================ */
   const UI = {
     resultTimeout: null,
 
@@ -2619,2554 +4926,74 @@
     }
   };
 
-  /* ============================================================
-   * 9. ANOMALY HELPERS
-   * ============================================================ */
-  function addAnomaly(tgl, col, msg, link = '') {
-    state.anomalies.push({ tgl, col, msg, link });
-  }
 
-  /* pushLog and toggleLogModal moved/deduplicated to UI Helpers */
+  function now() { return new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }); }
+  function pushLog(msg, type = 'info') {
+    const time = Logger._formatTime();
+    state.batchLogs.push({ time, msg, level: type });
+    if (state.batchLogs.length > 500) state.batchLogs.shift();
 
-  /* ============================================================
-   * 10. BATCH CHECK NRPs
-   * ============================================================ */
-  function parseBatchNrps(text) {
-    return text.split(/[\n,]+/).map(s => s.trim()).filter(s => /^\d{4}$|^\d{8}$/.test(s));
-  }
-
-  function runBatchCheck() {
-    const inputMulti = document.getElementById('qm-input-multi-nrp');
-    const inputBulan = document.getElementById('qm-input-bulan');
-    const inputTahun = document.getElementById('qm-input-tahun');
-    const btnCheck = document.getElementById('qm-btn-batch-check');
-    const btnExport = document.getElementById('qm-btn-export-batch');
-    const progress = document.getElementById('qm-batch-progress');
-    const results = document.getElementById('qm-batch-results');
-
-    const nrps = parseBatchNrps(inputMulti ? inputMulti.value : '');
-    if (nrps.length === 0) { UI.showResult('warning', 'Data Tidak Valid', 'Masukkan NRP yang valid (4 atau 8 digit).'); return; }
-    if (nrps.length > APP_CONFIG.BATCH_MAX_LIMIT) { UI.showResult('warning', 'Terlalu Banyak', `Maksimal ${APP_CONFIG.BATCH_MAX_LIMIT} NRP per batch.`); return; }
-
-    const localBulan = parseInt(inputBulan ? inputBulan.value : '') || (new Date().getMonth() + 1);
-    const localTahun = parseInt(inputTahun ? inputTahun.value : '') || new Date().getFullYear();
-    state.batchBulan = Math.min(12, Math.max(1, localBulan));
-    state.batchTahun = Math.min(2035, Math.max(2020, localTahun));
-    state.batchTotal = nrps.length;
-    state.batchAborted = false;
-    const prof = startProfile('runBatchCheck:init');
-
-    state.batchQueue = nrps.map(nrp => ({ nrp, status: 'pending', msg: '' }));
-    state.batchResults = [];
-    state.batchLogs = [];
-    resetBatchProfile();
     const logBody = document.getElementById('qm-log-body');
-    if (logBody) setInnerHTML(logBody, '');
-    pushLog(`Memulai batch check untuk ${nrps.length} NRP...`);
-
-    if (btnCheck) { btnCheck.dataset.running = 'true'; btnCheck.textContent = 'Memproses...'; }
-    if (progress) progress.classList.remove('qm-hidden');
-    if (results) setInnerHTML(results, '');
-    if (btnExport) btnExport.classList.add('qm-hidden');
-
-    const poolSize = Math.min(APP_CONFIG.BATCH_POOL_SIZE, state.batchQueue.length);
-    const workers = [];
-    for (let i = 0; i < poolSize; i++) workers.push(processBatchWorker());
-    Promise.all(workers).then(finishBatch);
-    finishProfile(prof, { totalNrp: nrps.length, poolSize });
-  }
-
-  function onBatchCancel() {
-    state.batchAborted = true;
-    state.batchQueue = [];
-    const btnCheck = document.getElementById('qm-btn-batch-check');
-    if (btnCheck) btnCheck.textContent = 'Membatalkan...';
-  }
-
-  async function processBatchWorker() {
-    while (state.batchQueue.length > 0 && !state.batchAborted) {
-      const item = state.batchQueue.shift();
-      const prof = startProfile('processBatchWorker:item', { nrp: item?.nrp });
-      try {
-        pushLog(`Memproses NRP ${item.nrp}...`);
-        const emp = await getEmp(item.nrp);
-        item.found = emp.found;
-        item.jk = emp.jk || '-';
-        item.nama = emp.nama || '-';
-        item.bagian = emp.bagian || '-';
-        item.seksi = emp.seksi || '-';
-        item.group = emp.group || '-';
-        if (!emp.found) {
-          item.anomalies = [];
-          item.msg = '';
-        } else {
-          try {
-            const scanRes = await fetchAttendance(item.nrp, state.batchBulan, state.batchTahun, item.bagian, item.seksi);
-            item.anomalies = scanRes.anomalies || [];
-            item.rekaps = scanRes.rekaps || null;
-            item.msg = item.anomalies.length + ' anomali ditemukan';
-          } catch (e) {
-            item.msg = 'Gagal ambil data kehadiran';
-            item.anomalies = [];
-          }
-        }
-      } catch (e) {
-        item.found = false;
-        item.msg = 'Gagal akses HRIS';
-        item.anomalies = [];
-        pushLog(`Gagal memproses NRP ${item.nrp}: ${e.message}`, 'error');
-      }
-      pushBatchResult(item);
-      if (item.found) pushLog(`Selesai memproses ${item.nama} (${item.nrp}).`, 'success');
-      else pushLog(`NRP ${item.nrp} tidak ditemukan.`, 'error');
-      const duration = finishProfile(prof, {
-        nrp: item.nrp,
-        found: !!item.found,
-        anomalyCount: (item.anomalies || []).length
-      });
-      if (state.batchProfile && duration) {
-        state.batchProfile.itemDurations.push(duration);
-        if (state.batchProfile.itemDurations.length > PROFILE_CONFIG.SAMPLE_HISTORY_LIMIT) {
-          state.batchProfile.itemDurations.shift();
-        }
-      }
+    if (logBody) {
+      const div = document.createElement('div');
+      div.className = 'qm-log-item';
+      setInnerHTML(div, `<span class="qm-log-time">[${time}]</span><span class="qm-log-msg ${type}">${escHtml(msg)}</span>`);
+      logBody.appendChild(div);
+      logBody.scrollTop = logBody.scrollHeight;
     }
   }
 
-  function finishBatch() {
-    const btnCheck = document.getElementById('qm-btn-batch-check');
-    const btnExport = document.getElementById('qm-btn-export-batch');
-    const progress = document.getElementById('qm-batch-progress');
-    const statusBar = document.getElementById('qm-batch-status');
-    const progressBar = document.getElementById('qm-batch-progress-bar');
 
-    if (btnCheck) {
-      btnCheck.textContent = 'Proses Batch';
-      delete btnCheck.dataset.running;
-    }
-    if (progress) progress.classList.add('qm-hidden');
-    if (btnExport && state.batchResults.length > 0) btnExport.classList.remove('qm-hidden');
+  function initDraggable() {
+    const panel = document.getElementById('qm-panel');
+    const header = document.getElementById('qm-header');
+    if (!panel || !header) return;
 
-    if (statusBar) statusBar.textContent = 'Selesai: ' + state.batchResults.length + '/' + state.batchTotal + ' NRP';
-    if (progressBar) progressBar.style.width = '100%';
+    let isDragging = false;
+    let offset = { x: 0, y: 0 };
 
-    if (state.batchAborted) {
-      UI.showResult('warning', 'Dibatalkan', 'Proses pemeriksaan batch dihentikan oleh pengguna.');
-      pushLog('Proses batch dibatalkan oleh pengguna.', 'error');
-    } else {
-      pushLog(`Batch check selesai. Total ${state.batchResults.length} NRP diproses.`);
+    if (state.panelPos) {
+      panel.style.left = state.panelPos.left;
+      panel.style.top = state.panelPos.top;
+      panel.style.transform = 'none';
+      panel.style.margin = '0';
     }
 
-    if (state.debug && state.batchProfile) {
-      const renderTotal = Number((state.batchProfile.renderTotal || 0).toFixed(2));
-      Logger.debug('[PROFILE] batchSummary', {
-        processed: state.batchResults.length,
-        renderTotalMs: renderTotal,
-        recentWorkerMedianMs: Number(getMedian((state.batchProfile.itemDurations || []).slice(-PROFILE_CONFIG.MEDIAN_SAMPLE_SIZE)).toFixed(2))
-      });
-      if (renderTotal >= PROFILE_CONFIG.HOT_BATCH_RENDER_TOTAL_MS) {
-        Logger.warn(`Profiling: total render batch ${renderTotal.toFixed(2)}ms melewati ambang ${PROFILE_CONFIG.HOT_BATCH_RENDER_TOTAL_MS}ms.`);
-      }
-    }
-  }
-
-  function pushBatchResult(item) {
-    state.batchResults.push(item);
-    renderBatchResults();
-    updateBatchProgress();
-  }
-
-  function updateBatchProgress() {
-    const pct = state.batchTotal > 0 ? Math.round((state.batchResults.length / state.batchTotal) * 100) : 0;
-    const barEl = document.getElementById('qm-batch-progress-bar');
-    const statusEl = document.getElementById('qm-batch-status');
-    if (barEl) barEl.style.width = pct + '%';
-    if (statusEl) statusEl.textContent = 'Memproses... ' + state.batchResults.length + '/' + state.batchTotal;
-  }
-
-  let renderBatchTimeout;
-  function renderBatchResults() {
-    clearTimeout(renderBatchTimeout);
-    renderBatchTimeout = setTimeout(() => {
-      _renderBatchResultsImmediate();
-    }, 150);
-  }
-
-  function _renderBatchResultsImmediate() {
-    const prof = startProfile('renderBatchResults', { items: state.batchResults.length });
-    const container = document.getElementById('qm-batch-results');
-    if (!container) {
-      finishProfile(prof, { skipped: true });
-      return;
-    }
-    if (state.batchResults.length === 0) {
-      setInnerHTML(container, '');
-      finishProfile(prof, { items: 0 });
-      return;
-    }
-
-    let sumOtb = 0, sumOtl = 0, sumOta = 0, sumOtp = 0, sumHariKerja = 0;
-    const ketMap = {};
-
-    const sortedResults = [...state.batchResults].sort((a, b) => {
-      const bagA = (a.bagian || '').toLowerCase();
-      const bagB = (b.bagian || '').toLowerCase();
-      if (bagA !== bagB) return bagA.localeCompare(bagB);
-
-      const sekA = (a.seksi || '').toLowerCase();
-      const sekB = (b.seksi || '').toLowerCase();
-      if (sekA !== sekB) return sekA.localeCompare(sekB);
-
-      return (parseInt(a.nrp) || 0) - (parseInt(b.nrp) || 0);
+    header.style.cursor = 'move';
+    header.addEventListener('mousedown', (e) => {
+      if (e.target.closest('.qm-header-actions')) return;
+      isDragging = true;
+      const rect = panel.getBoundingClientRect();
+      offset = {
+        x: e.clientX - rect.left,
+        y: e.clientY - rect.top
+      };
+      panel.style.transition = 'none';
+      panel.style.transform = 'none';
+      panel.style.margin = '0';
     });
 
-    const tree = {};
-    sortedResults.forEach(item => {
-      if (item.rekaps) {
-        sumOtb += item.rekaps.otb; sumOtl += item.rekaps.otl;
-        sumOta += item.rekaps.ota; sumOtp += item.rekaps.otp;
-        sumHariKerja += item.rekaps.hariKerja;
-        for (const [k, v] of Object.entries(item.rekaps.keterangan)) { ketMap[k] = (ketMap[k] || 0) + v; }
-      }
+    document.addEventListener('mousemove', (e) => {
+      if (!isDragging) return;
+      const x = e.clientX - offset.x;
+      const y = e.clientY - offset.y;
 
-      const bag = item.bagian || 'Tanpa Bagian';
-      const sek = item.seksi || 'Tanpa Seksi';
-      if (!tree[bag]) tree[bag] = {};
-      if (!tree[bag][sek]) tree[bag][sek] = [];
-      tree[bag][sek].push(item);
+      const left = x + 'px';
+      const top = Math.max(0, y) + 'px';
+
+      panel.style.left = left;
+      panel.style.top = top;
+
+      state.panelPos = { left, top };
     });
 
-    var html = '<table class="qm-batch-table"><tbody>';
-
-    let bagIdx = 0;
-    for (const bag in tree) {
-      const bagSafeId = 'bag-' + (bagIdx++);
-      html += `<tr class="qm-batch-group-header qm-batch-header-bg" data-target=".${bagSafeId}">`;
-      html += `<td colspan="5" class="qm-batch-bagian-cell"><div class="qm-flex qm-items-center qm-justify-between qm-w-full"><span>${escHtml(bag)}</span><span class="qm-chevron qm-accordion-chevron">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>
-              </span></div></td></tr>`;
-
-      html += `<tr class="qm-batch-group-row ${bagSafeId} qm-table-header qm-batch-sub-header-bg qm-hidden">`;
-      html += '<td class="qm-batch-cell-header qm-batch-col-nrp">NRP</td>';
-      html += '<td class="qm-batch-cell-header qm-batch-col-nama">Nama</td>';
-      html += '<td class="qm-batch-cell-header qm-batch-col-ot">Lembur</td>';
-      html += '<td class="qm-batch-cell-header qm-batch-col-ket">Keterangan</td>';
-      html += '<td class="qm-batch-cell-header qm-batch-col-msg">Masalah / Anomali</td>';
-      html += '</tr>';
-
-      let sekIdx = 0;
-      for (const sek in tree[bag]) {
-        const sekSafeId = bagSafeId + '-sek-' + (sekIdx++);
-        html += `<tr class="qm-batch-group-row ${bagSafeId} qm-batch-seksi-header qm-batch-sub-header-bg qm-hidden" data-target=".${sekSafeId}">`;
-        html += `<td colspan="5" class="qm-batch-seksi-cell" style="padding-left: 32px;"><div class="qm-flex qm-items-center qm-justify-between qm-w-full"><span>${escHtml(sek)} <span class="qm-batch-seksi-count">(${tree[bag][sek].length})</span></span><span class="qm-chevron qm-accordion-chevron">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>
-              </span></div></td></tr>`;
-
-        tree[bag][sek].forEach(item => {
-          var nrpLink = item.nrp
-            ? '<a href="#" class="qm-batch-nrp-link" data-nrp="' + escHtml(item.nrp) + '" style="padding-left: 64px;">' + escHtml(item.nrp) + '</a>'
-            : '-';
-          var nama = item.found ? escHtml(item.nama || '-') : '<span class="qm-batch-not-found">Tidak Ditemukan</span>';
-          var masalahHtml = '';
-
-          if (item.anomalies && item.anomalies.length > 0) {
-            const byTgl = {};
-            item.anomalies.forEach(a => {
-              const t = String(a.tgl);
-              if (!byTgl[t]) byTgl[t] = [];
-              byTgl[t].push(a);
-            });
-
-            let listItems = '';
-            const sortedDates = Object.keys(byTgl).sort((a, b) => parseInt(a) - parseInt(b));
-            for (const tgl of sortedDates) {
-              const anomaliesTgl = byTgl[tgl];
-              const firstAnomWithLink = anomaliesTgl.find(a => a.link);
-              const firstLink = firstAnomWithLink?.link;
-              const firstFullDate = firstAnomWithLink?.fullDate || '';
-
-              let fixBtn = '';
-              if (firstLink) {
-                let finalLink = firstLink;
-                let titleStr = firstAnomWithLink.msg || 'Fix Anomali';
-
-                if (titleStr.includes('SPKL')) {
-                  const isOS = item.nrp && item.nrp.length === 8;
-                  const base = getSpklBaseUrl(item.nrp);
-                  const bulanStr = String(state.batchBulan).padStart(2, '0');
-                  const tglStr = String(tgl).padStart(2, '0');
-                  const shiftVal = firstAnomWithLink.shift || '';
-                  const shiftParam = shiftVal ? `&shift=${shiftVal}` : '';
-                  const fDate = firstAnomWithLink.fullDate || `${state.batchTahun}-${bulanStr}-${tglStr}`;
-
-                  const ev = v => (v === '-' ? '' : encodeURIComponent(v));
-                  finalLink = `${base}?tahun=${state.batchTahun}&bulan=${bulanStr}&kode_bagian=${ev(item.bagian)}&kode_seksi=${ev(item.seksi)}&kode_group=${ev(item.group)}&nrp=${item.nrp}&qm_auto_spkl_fix=1&full_date=${fDate}${shiftParam}`;
-                  titleStr = 'Cek Halaman SPKL';
-                }
-
-                const tglPad = String(tgl).padStart(2, '0');
-                const fDate = firstAnomWithLink.fullDate || `${state.batchTahun}-${String(state.batchBulan).padStart(2, '0')}-${tglPad}`;
-
-                fixBtn = `<button class="qm-fix-dot" title="${escHtml(titleStr)}" data-fix-link="${escHtml(finalLink)}" data-fix-date="${escHtml(tglPad)}" data-full-date="${escHtml(fDate)}"></button>`;
-              }
-
-              listItems += '<div class="qm-batch-date-row">';
-              listItems += '<div class="qm-batch-date-header qm-flex qm-items-center qm-justify-between"><span style="position: relative; padding-right: 15px;"><b>Tgl ' + escHtml(tgl) + '</b>' + fixBtn + '</span><span class="qm-chevron qm-accordion-chevron"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg></span></div>';
-              listItems += '<div class="qm-batch-date-content qm-hidden">';
-              // Deduplicate anomalies by message for the same date
-              const msgMap = new Map();
-              anomaliesTgl.forEach(a => {
-                if (!msgMap.has(a.msg)) msgMap.set(a.msg, []);
-                msgMap.get(a.msg).push(a.col);
-              });
-
-              msgMap.forEach((cols, msg) => {
-                const uniqueCols = [...new Set(cols)].filter(Boolean);
-                const colNames = uniqueCols.map(c => escHtml(c)).join(', ');
-                const colPrefix = colNames ? colNames + ': ' : '';
-                listItems += '<div class="qm-batch-anomaly-detail">• ' + colPrefix + escHtml(msg) + '</div>';
-              });
-              listItems += '</div></div>';
-            }
-            masalahHtml = '<div class="qm-batch-masalah-scroll">' + listItems + '</div>';
-          } else if (item.found) {
-            masalahHtml = '<span class="qm-batch-no-anomaly">Tidak ada anomali</span>';
-          } else {
-            masalahHtml = '<span class="qm-batch-not-found">' + escHtml(item.msg || 'Error') + '</span>';
-          }
-
-          const rk = item.rekaps || { otb: 0, otl: 0, ota: 0, otp: 0, keterangan: {} };
-          const otValues = `B:${rk.otb.toFixed(1)} L:${rk.otl.toFixed(1)} A:${rk.ota.toFixed(1)} P:${rk.otp.toFixed(1)}`;
-
-          const ketKeys = ['CT', 'CH', 'SD', 'I', 'IS', 'IA', 'A'];
-          const ketStr = ketKeys.map(k => `${k}:${rk.keterangan[k] || 0}`).join(' | ');
-
-          const lemburHtml = `<div class="qm-text-xs qm-font-mono" style="color: var(--qm-olive);">${otValues}</div>`;
-          const ketHtml = `<div class="qm-text-xs qm-font-mono" style="color: var(--qm-stone); opacity: 0.8;">${ketStr}</div>`;
-
-          html += `<tr class="qm-batch-group-row ${bagSafeId} ${sekSafeId} qm-batch-item-row qm-hidden">`;
-          html += '<td class="qm-batch-cell">' + nrpLink + '</td>';
-          html += '<td class="qm-batch-cell qm-batch-nama">' + nama + '</td>';
-          html += '<td class="qm-batch-cell">' + lemburHtml + '</td>';
-          html += '<td class="qm-batch-cell">' + ketHtml + '</td>';
-          html += '<td class="qm-batch-cell">' + masalahHtml + '</td>';
-          html += '</tr>';
-        });
-      }
-    }
-
-    html += '</tbody></table>';
-
-    setInnerHTML(container, html);
-    const duration = finishProfile(prof, { items: state.batchResults.length });
-    if (state.batchProfile) state.batchProfile.renderTotal += duration;
-  }
-
-  function exportBatchResults() {
-    if (state.batchResults.length === 0) { alert('Tidak ada hasil untuk diekspor.'); return; }
-    if (typeof XLSX !== 'undefined') {
-      const ketHeaders = ['CT', 'CH', 'SD', 'I', 'IS', 'IA', 'A'];
-      const headers = ['Bagian', 'Seksi', 'NRP', 'Nama', 'JK', 'OTB', 'OTL', 'OTA', 'OTP', 'Hari Kerja', ...ketHeaders, 'Jml Anomali', 'Detail Anomali'];
-      var wsData = [headers];
-
-      state.batchResults.forEach(function (r) {
-        var detailAnomali = (r.anomalies || []).map(function (a) {
-          return 'Tgl ' + a.tgl + ' ' + a.col + ': ' + a.msg;
-        }).join('; ');
-
-        const rk = r.rekaps || { otb: 0, otl: 0, ota: 0, otp: 0, hariKerja: 0, keterangan: {} };
-        const row = [
-          r.bagian || '-',
-          r.seksi || '-',
-          r.nrp,
-          r.nama || '-',
-          r.jk || '-',
-          rk.otb,
-          rk.otl,
-          rk.ota,
-          rk.otp,
-          rk.hariKerja
-        ];
-
-        ketHeaders.forEach(k => row.push(rk.keterangan[k] || 0));
-        row.push(r.anomalies ? r.anomalies.length : 0);
-        row.push(detailAnomali);
-        wsData.push(row);
-      });
-      const ws = XLSX.utils.aoa_to_sheet(wsData);
-      const wb = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(wb, ws, 'Batch Check');
-      XLSX.writeFile(wb, `Batch_Check_NRP_${new Date().toISOString().slice(0, 10)}.xlsx`);
-    } else {
-      alert('Library XLSX gagal dimuat.');
-    }
-  }
-
-  function renderAnomalies() {
-    const prof = startProfile('renderAnomalies', { count: state.anomalies.length });
-    const badge = document.getElementById('qm-badge-anomali');
-    const list = document.getElementById('qm-anomali-list');
-    if (!badge || !list) {
-      finishProfile(prof, { skipped: true });
-      return;
-    }
-
-    if (state.anomalies.length > 0) {
-      badge.textContent = state.anomalies.length;
-      badge.classList.remove('qm-hidden');
-      badge.classList.add('qm-visible-inline-flex');
-
-      const grouped = {};
-      state.anomalies.forEach(a => {
-        if (!grouped[a.tgl]) grouped[a.tgl] = [];
-        grouped[a.tgl].push(a);
-      });
-
-      const sortedKeys = Object.keys(grouped).sort((a, b) => parseInt(a) - parseInt(b));
-      let html = '';
-
-      for (const tgl of sortedKeys) {
-        const items = grouped[tgl];
-        const spklStatusItem = items.find(a => a.col === 'SPKL Status' && a.link);
-        const itemWithLink = spklStatusItem || items.find(a => a.link);
-        let btnText = 'Perbaikan';
-
-        if (itemWithLink) {
-          if (itemWithLink.msg === 'Buka Halaman Kehadiran') btnText = 'Buka Halaman Kehadiran';
-          else if (itemWithLink.msg && itemWithLink.msg.includes('Pulang awal')) btnText = 'Cek Kehadiran';
-          else if (itemWithLink.msg === 'Cek Distribusi' || itemWithLink.msg === 'Shift kosong' || itemWithLink.msg === 'Shift muncul') btnText = 'Fix Distribusi';
-          else if (itemWithLink.msg === 'SPKL Disetujui (Cek Jenis OT)') btnText = 'Cek Halaman SPKL';
-          else if (itemWithLink.msg === 'SPKL Belum Disetujui') btnText = 'Cek SPKL Online';
-          else if (itemWithLink.msg === 'SPKL Ditolak') btnText = 'Cek SPKL (Ditolak)';
-          else if (itemWithLink.msg === 'SPKL Online tidak ada') btnText = 'Input SPKL Online';
-          else if (itemWithLink.msg === 'SPKL Online tidak sesuai') btnText = 'Cek SPKL Online';
-        }
-
-        const fixBtn = itemWithLink
-          ? `<button class="qm-btn-fix-pill" data-fix-link="${escHtml(itemWithLink.link)}" data-fix-date="${escHtml(tgl)}" data-full-date="${escHtml(itemWithLink.fullDate || '')}" title="${escHtml(btnText)}">${btnText}</button>`
-          : '';
-
-        const detailsHtml = items.map(a => {
-          const type = escHtml(COL_LABELS[a.colIndex] || a.col || ('Kolom ' + a.colIndex));
-          return `
-            <div class="qm-anomaly-card">
-              <div class="qm-anomaly-card-type">${type}</div>
-              <div class="qm-anomaly-card-msg">${escHtml(a.msg)}</div>
-            </div>
-          `;
-        }).join('');
-
-        html += `
-          <div class="qm-anomaly-item">
-            <div class="qm-anomaly-left">
-              <span class="qm-anomaly-date">Tgl ${tgl}</span>
-              <span class="qm-badge qm-text-muted" style="background:var(--qm-sand); border-radius:4px; padding:2px 6px; font-size:10px;">${items.length}</span>
-            </div>
-            <div class="qm-anomaly-content">
-              ${detailsHtml}
-            </div>
-            <div class="qm-anomaly-actions">
-              ${fixBtn}
-            </div>
-          </div>
-        `;
-      }
-      setInnerHTML(list, html);
-    } else {
-      badge.classList.add('qm-hidden');
-      badge.classList.remove('qm-visible-inline-flex');
-      setInnerHTML(list, '<div class="qm-anomaly-empty-state qm-text-center qm-text-muted qm-mt-xl">Tidak ada anomali ditemukan.</div>');
-    }
-    finishProfile(prof, { count: state.anomalies.length });
-  }
-
-  /* ============================================================
-   * 11. SPKL HIGHLIGHT
-   * ============================================================ */
-  function spklHighlight() {
-    if (!isSpklPagePath()) return;
-    const hlDate = sessionStorage.getItem('qm_highlight_spkl_date');
-    if (!hlDate) return;
-    sessionStorage.removeItem('qm_highlight_spkl_date');
-    setTimeout(() => {
-      let hasScrolled = false;
-      const rows = document.querySelectorAll('table tbody tr');
-      rows.forEach(function (row) {
-        let matched = false;
-        const tds = row.querySelectorAll('td');
-        tds.forEach(function (td) {
-          const val = td.textContent.trim();
-          const m = val.match(/^(\d{2})[-\/]\d{2}[-\/]\d{4}/) || val.match(/^(\d{4})[-\/]\d{2}[-\/](\d{2})/);
-          if (m) {
-            const d = m[1].length === 2 ? m[1] : m[2];
-            if (d === hlDate.padStart(2, '0')) matched = true;
-          }
-        });
-        if (matched) {
-          row.classList.add('qm-row-highlight');
-          tds.forEach(td => td.classList.add('qm-row-highlight'));
-          if (!hasScrolled) {
-            const y = row.getBoundingClientRect().top + window.scrollY - 150;
-            window.scrollTo({ top: y, behavior: 'smooth' });
-            hasScrolled = true;
-          }
-        }
-      });
-    }, 500);
-  }
-
-
-
-  /* ============================================================
-   * 12. NRP CHECK & AUTOFILL
-   * ============================================================ */
-  function checkNrp() {
-    const inputNrp = document.getElementById('qm-input-nrp');
-    const inputBulan = document.getElementById('qm-input-bulan');
-    const nrp = inputNrp ? inputNrp.value.trim() : '';
-    const bulan = inputBulan ? inputBulan.value.trim() : '';
-    if (!nrp || !bulan) { UI.showResult('warning', 'Data Tidak Lengkap', 'Silakan masukkan NRP dan Bulan terlebih dahulu.'); return; }
-    if (!/^\d+$/.test(nrp) || (nrp.length !== 4 && nrp.length !== 8)) { UI.showResult('warning', 'Format Tidak Valid', 'Hanya menerima 4 dan 8 angka NRP'); return; }
-    UI.setLoading(true);
-    sessionStorage.setItem(STORAGE.AUTO_NRP, nrp);
-    sessionStorage.setItem(STORAGE.AUTO_BULAN, bulan);
-    const year = new Date().getFullYear();
-    window.location.href = getAttendanceUrl(bulan, year, nrp);
-  }
-
-  function autoFillTargetPage() {
-    if (!isAttendancePagePath()) return;
-    const autoNrp = sessionStorage.getItem(STORAGE.AUTO_NRP);
-    const autoBulan = sessionStorage.getItem(STORAGE.AUTO_BULAN);
-    if (autoNrp && autoBulan) {
-      setTimeout(() => {
-        setFieldValue(document.querySelector('#bulan'), autoBulan);
-        setFieldValue(document.querySelector('input[name="nrp"]'), autoNrp, ['input']);
-
-        sessionStorage.removeItem(STORAGE.AUTO_NRP);
-        sessionStorage.removeItem(STORAGE.AUTO_BULAN);
-      }, TIMING.AUTO_FILL_DELAY);
-    }
-  }
-
-  /* ============================================================
-   * 13. PANEL TOGGLE
-   * ============================================================ */
-  function openPanel() {
-    state.isOpen = true;
-    document.body.classList.add('qm-no-scroll');
-    document.querySelectorAll('#qm-panel, #qm-fab, #qm-backdrop').forEach(el => el.classList.add('qm-open'));
-    setTimeout(() => {
-      const input = document.querySelector('#qm-input-nrp');
-      if (input) input.focus();
-    }, 250);
-  }
-
-  function closePanel() {
-    state.isOpen = false;
-    document.body.classList.remove('qm-no-scroll');
-    document.querySelectorAll('#qm-panel, #qm-fab, #qm-backdrop').forEach(el => el.classList.remove('qm-open'));
-  }
-
-  function togglePanel() {
-    state.isOpen ? closePanel() : openPanel();
-  }
-
-  /* ============================================================
-   * 14. ANOMALY DETECTION
-   * ============================================================ */
-
-  function isShiftChecked(td) {
-    if (!td) return false;
-    const text = td.textContent.trim().toLowerCase();
-    if (text !== '' && (text.includes('check') || text.includes('ok') || text.includes('✓') || text.includes('☑') || text.includes('v'))) return true;
-    if (td.querySelector('input:checked')) return true;
-    const html = td.innerHTML.toLowerCase();
-    if (html.includes('check') || html.includes('fa-check') || html.includes('fa-square-check')) return true;
-    return false;
-  }
-
-  function tebakShiftSebenarnya(waktuMsk, rules) {
-    if (waktuMsk === null) return '1';
-    const jamMentah = waktuMsk >= 24.0 ? waktuMsk - 24.0 : waktuMsk;
-    if (jamMentah >= rules.shift1.jamTebakMulai && jamMentah <= rules.shift1.jamTebakAkhir) return '1';
-    if (jamMentah > rules.shift2.jamTebakMulai && jamMentah <= rules.shift2.jamTebakAkhir) return '2';
-    return '3';
-  }
-
-  /** Count rows marked as libur by CSS classes/colors. */
-  function countLibur(docContext) {
-    const root = docContext || document;
-    const trs = root.querySelectorAll('table tbody tr');
-    let total = 0;
-
-    trs.forEach(tr => {
-      const tds = tr.querySelectorAll('td');
-      if (tds.length < 12 || tr.textContent.toLowerCase().includes('total')) return;
-      const { isLiburColor } = parseRowCssFlags(tr);
-      if (isLiburColor) total++;
-    });
-    return total;
-  }
-
-  /** Push an anomaly record. Pure — no DOM side effects. */
-  function markAnomalyCell(anomalies, tglText, colIndex, title, customLink, cekSpklCells, fullDate, shiftVal) {
-    anomalies.push({ tgl: tglText, fullDate, colIndex, msg: title, link: customLink || '', shift: shiftVal });
-    if (title.includes('Cek SPKL') && cekSpklCells) {
-      if (!cekSpklCells.some(c => c.tgl === tglText && c.colIndex === colIndex)) {
-        cekSpklCells.push({ tgl: tglText, fullDate, colIndex, shift: shiftVal });
-      }
-    }
-  }
-
-  /** Apply visual anomaly marks to the live DOM table. Called only on the attendance page. */
-  function applyMark(docContext, anomalies) {
-    const prof = startProfile('applyMark', { count: anomalies.length });
-    const lookup = {};
-    anomalies.forEach(a => {
-      const key = a.tgl;
-      if (!lookup[key]) lookup[key] = [];
-      lookup[key].push(a);
-    });
-
-    const root = docContext || document;
-    const trs = root.querySelectorAll('table tbody tr');
-
-    trs.forEach(tr => {
-      const tds = tr.querySelectorAll('td');
-      if (tds.length < 12 || tr.textContent.toLowerCase().includes('total')) return;
-      const tgl = tds[COL.TGL].textContent.trim();
-      const rowAnomalies = lookup[tgl];
-      if (!rowAnomalies) return;
-
-      rowAnomalies.forEach(a => {
-        const colIdx = a.colIndex;
-        if (colIdx === undefined) return;
-        const td = tds[colIdx];
-        if (!td) return;
-
-        const existingTitle = td.getAttribute('title') || '';
-        const newTitle = existingTitle && !existingTitle.includes(a.msg) ? existingTitle + ' | ' + a.msg : a.msg;
-        td.classList.add('qm-anomaly-cell');
-        td.setAttribute('title', newTitle);
-
-        if (!td.querySelector('.qm-fix-dot')) {
-          const linkStr = a.link ? `data-fix-link="${escHtml(a.link)}" data-fix-date="${escHtml(String(a.tgl))}" data-full-date="${escHtml(String(a.fullDate || ''))}"` : '';
-
-          let titleStr = 'Buka Halaman Kehadiran';
-          if (a.msg === 'Buka Halaman Kehadiran') titleStr = 'Buka Halaman Kehadiran';
-          else if (a.msg && (a.msg.includes('Duplikasi') || a.msg.includes('Double entry'))) titleStr = 'Lihat Duplikasi Shift';
-          else if (a.msg && a.msg.includes('Pulang awal')) titleStr = 'Cek Kehadiran (Pulang Awal)';
-          else if (a.msg === 'Cek Distribusi' || a.msg === 'Shift kosong' || a.msg === 'Shift muncul') titleStr = 'Perbaiki Distribusi Jam Kerja';
-          else if (a.msg === 'Cek SPKL') titleStr = 'Cek SPKL Online';
-          else if (!a.link) titleStr = 'Perbaiki Anomali (Segera Hadir)';
-
-          td.insertAdjacentHTML('beforeend', `<button class="qm-fix-dot" title="${titleStr}" ${linkStr}></button>`);
-        } else if (a.link) {
-          const btn = td.querySelector('.qm-fix-dot');
-          btn.setAttribute('data-fix-link', a.link);
-          btn.setAttribute('data-fix-date', String(a.tgl));
-          if (a.fullDate) btn.setAttribute('data-full-date', String(a.fullDate));
-
-          let titleStr = 'Buka Halaman Kehadiran';
-          if (a.msg === 'Buka Halaman Kehadiran') titleStr = 'Buka Halaman Kehadiran';
-          else if (a.msg && (a.msg.includes('Duplikasi') || a.msg.includes('Double entry'))) titleStr = 'Lihat Duplikasi Shift';
-          else if (a.msg && a.msg.includes('Pulang awal')) titleStr = 'Cek Kehadiran';
-          else if (a.msg === 'Cek Distribusi' || a.msg === 'Shift kosong' || a.msg === 'Shift muncul') titleStr = 'Perbaiki Distribusi Jam Kerja';
-          else if (a.msg === 'Cek SPKL') titleStr = 'Cek SPKL Online';
-
-          btn.setAttribute('title', titleStr);
-        }
-      });
-    });
-    finishProfile(prof, { count: anomalies.length });
-  }
-
-  function validateShiftRow(tds, tglText, mskText, klrText, rules, ctx, cekSpklCells, anomalies, isLibur, isHalfDay, fullDate) {
-    const ketText = tds[COL.KET].textContent.trim().toUpperCase();
-    let shift1 = isShiftChecked(tds[COL.SHIFT1]);
-    let shift2 = isShiftChecked(tds[COL.SHIFT2]);
-    let shift3 = isShiftChecked(tds[COL.SHIFT3]);
-
-    // No shift checked but has clock data or is Mangkir → guess shift
-    if (!shift1 && !shift2 && !shift3 && (mskText || klrText || ketText === 'A')) {
-      const guessed = tebakShiftSebenarnya(parseTime(mskText), rules);
-      const link = getDistribusiLink(ctx, tglText, guessed);
-      const msg = 'Shift kosong';
-      markAnomalyCell(anomalies, tglText, COL.SHIFT1, msg, link, cekSpklCells, fullDate);
-      markAnomalyCell(anomalies, tglText, COL.SHIFT2, msg, link, cekSpklCells, fullDate);
-      markAnomalyCell(anomalies, tglText, COL.SHIFT3, msg, link, cekSpklCells, fullDate);
-    }
-
-    // Derive active shift from clock-in if still unknown
-    const mskTime = parseTime(mskText);
-    if (!shift1 && !shift2 && !shift3) {
-      if (mskTime !== null) {
-        if (mskTime >= rules.shift1.jamTebakMulai && mskTime <= rules.shift1.jamTebakAkhir) shift1 = true;
-        else if (mskTime > rules.shift2.jamTebakMulai && mskTime <= rules.shift2.jamTebakAkhir) shift2 = true;
-        else shift3 = true;
-      }
-    }
-
-    const activeShift = shift1 ? '1' : (shift2 ? '2' : (shift3 ? '3' : null));
-    return { shift1, shift2, shift3, activeShift, mskTime };
-  }
-
-  /** Determine half-day Pulang Awal threshold based on actual clock-in time. */
-  function getHalfDayPulangAwalThreshold(shift1, shift2, shift3, mskTime) {
-    if (shift1) return HALFDAY_RULES.shift1.batasPulangAwal;
-    if (shift3) return HALFDAY_RULES.shift3.batasPulangAwal;
-    if (shift2) {
-      if (mskTime !== null && mskTime >= HALFDAY_RULES.shift2.altJamMulai) {
-        return HALFDAY_RULES.shift2.altBatasPulangAwal;
-      }
-      return HALFDAY_RULES.shift2.batasPulangAwal;
-    }
-    return null;
-  }
-
-  function validateOvertime(tds, tglText, mskTime, klrTime, shift1, shift2, shift3, isLibur, isHalfDay, rules, ctx, cekSpklCells, anomalies, is5HariKerja, fullDate) {
-    let mskLembur = false, klrLembur = false;
-    let adjMsk = mskTime, adjKlr = klrTime;
-
-    if (shift2) { if (adjKlr !== null && adjKlr <= THRESHOLDS.ADJ_KLR_SHIFT2_BATAS) adjKlr += 24.0; }
-    else if (shift3) {
-      if (adjMsk !== null && adjMsk <= THRESHOLDS.ADJ_MSK_SHIFT3_BATAS) adjMsk += 24.0;
-      if (adjKlr !== null && adjKlr <= THRESHOLDS.ADJ_KLR_SHIFT3_BATAS) adjKlr += 24.0;
-    }
-
-    if (adjMsk === null && adjKlr === null) return { mskLembur, klrLembur };
-
-    if (isLibur) {
-      if (adjMsk !== null) mskLembur = true;
-      if (adjKlr !== null) klrLembur = true;
-    }
-
-    // Pulang Awal threshold: half-day uses shorter threshold
-    const paThreshold = isHalfDay
-      ? getHalfDayPulangAwalThreshold(shift1, shift2, shift3, mskTime)
-      : null;
-
-    // Dynamic Shift 1 Models
-    let s1MasukLembur = rules.shift1.batasMasukLembur;
-    let s1KeluarLembur = rules.shift1.batasKeluarLembur;
-    let s1Terlambat = rules.shift1.batasTerlambatMasuk;
-    let s1PulangAwal = rules.shift1.batasPulangAwal;
-
-    if (is5HariKerja) {
-      // Differentiate between 06.00-15.00 and 07.30-16.30 based on clock-in time
-      if ((adjMsk !== null && adjMsk < 6.5) || (adjMsk === null && adjKlr !== null && adjKlr < 16.0)) {
-        s1KeluarLembur = 15.5;
-        s1Terlambat = 6.25;
-        s1PulangAwal = 15.0;
-
-        // Support 06.00 - 14.00 model (e.g., NRP 2869)
-        if (adjMsk !== null && adjMsk <= 6.0) s1PulangAwal = 14.0;
-      } else {
-        s1KeluarLembur = THRESHOLDS.SHIFT1_KLR_LEMBUR_5HR;
-        s1Terlambat = THRESHOLDS.SHIFT1_TERLAMBAT_5HR;
-        s1PulangAwal = THRESHOLDS.SHIFT1_PULANG_AWAL_5HR;
-      }
-    }
-
-    if (shift1) {
-      if (adjMsk !== null && adjMsk < s1MasukLembur) mskLembur = true;
-      if (adjKlr !== null && adjKlr > s1KeluarLembur) klrLembur = true;
-      if (adjMsk !== null && adjMsk > s1Terlambat) {
-        if (adjMsk > THRESHOLDS.SHIFT1_MSK_UPPER_BATAS) markAnomalyCell(anomalies, tglText, COL.SHIFT1, 'Cek Distribusi', getDistribusiLink(ctx, tglText, tebakShiftSebenarnya(adjMsk, rules)), cekSpklCells, fullDate);
-        else if (adjMsk !== adjKlr) markAnomalyCell(anomalies, tglText, COL.MSK, 'Terlambat Shift I', '', cekSpklCells, fullDate);
-      }
-      const paShift1 = isHalfDay && paThreshold !== null ? paThreshold : s1PulangAwal;
-      if (adjKlr !== null && adjKlr < paShift1 && adjMsk !== adjKlr) markAnomalyCell(anomalies, tglText, COL.KLR, 'Pulang awal Shift I', getKehadiranLink(ctx), cekSpklCells, fullDate, '1');
-    } else if (shift2) {
-      if (adjMsk !== null && adjMsk < rules.shift2.batasMasukLembur) mskLembur = true;
-      if (adjKlr !== null && adjKlr > rules.shift2.batasKeluarLembur) klrLembur = true;
-      if (adjMsk !== null) {
-        if (adjMsk < THRESHOLDS.SHIFT2_MSK_LOWER_BATAS || adjMsk > THRESHOLDS.SHIFT2_MSK_UPPER_BATAS) markAnomalyCell(anomalies, tglText, COL.SHIFT2, 'Cek Distribusi', getDistribusiLink(ctx, tglText, tebakShiftSebenarnya(adjMsk, rules)), cekSpklCells, fullDate, '2');
-        else if (adjMsk > rules.shift2.batasTerlambatMasuk && adjMsk !== adjKlr) markAnomalyCell(anomalies, tglText, COL.MSK, 'Terlambat Shift II', '', cekSpklCells, fullDate, '2');
-      }
-      const paShift2 = isHalfDay && paThreshold !== null ? paThreshold : rules.shift2.batasPulangAwal;
-      if (adjKlr !== null && adjKlr < paShift2 && adjMsk !== adjKlr) markAnomalyCell(anomalies, tglText, COL.KLR, 'Pulang awal Shift II', getKehadiranLink(ctx), cekSpklCells, fullDate, '2');
-    } else if (shift3) {
-      if (adjMsk !== null && adjMsk > rules.shift3.batasMasukLemburAwal && adjMsk < rules.shift3.batasMasukLemburAkhir) mskLembur = true;
-      if (adjKlr !== null && adjKlr > rules.shift3.batasKeluarLembur) klrLembur = true;
-      if (adjMsk !== null) {
-        if (adjMsk < rules.shift3.batasAwalMasuk || adjMsk > THRESHOLDS.SHIFT3_MSK_UPPER_BATAS) markAnomalyCell(anomalies, tglText, COL.SHIFT3, 'Cek Distribusi', getDistribusiLink(ctx, tglText, tebakShiftSebenarnya(adjMsk, rules)), cekSpklCells, fullDate, '3');
-        else if (adjMsk > rules.shift3.batasTerlambatMasuk && adjMsk !== adjKlr) markAnomalyCell(anomalies, tglText, COL.MSK, 'Terlambat Shift III', '', cekSpklCells, fullDate, '3');
-      }
-      const paShift3 = isHalfDay && paThreshold !== null ? paThreshold : rules.shift3.batasPulangAwal;
-      if (adjKlr !== null && adjKlr < paShift3 && adjMsk !== adjKlr) markAnomalyCell(anomalies, tglText, COL.KLR, 'Pulang awal Shift III', getKehadiranLink(ctx), cekSpklCells, fullDate, '3');
-    }
-    return { mskLembur, klrLembur };
-  }
-
-  /** Unified row status detector (Libur, HalfDay, Normal). */
-  function getRowStatus(tr) {
-    const tds = tr.querySelectorAll('td');
-    if (tds.length === 0) return { isLibur: false, isHalfDay: false, ketText: '' };
-
-    const { isLiburColor, isHalfDayColor } = parseRowCssFlags(tr);
-
-    let ketText = '';
-    if (tds.length > COL.KET) ketText = tds[COL.KET].textContent.trim().toUpperCase();
-
-    const isLibur = isLiburColor || ['L', 'LB', 'LH'].includes(ketText);
-    const isHalfDay = !isLibur && (isHalfDayColor || ['S', 'CH', 'HD'].includes(ketText));
-
-    return { isLibur, isHalfDay, ketText };
-  }
-
-  function scanAttendanceTable(doc, ctx) {
-    const prof = startProfile('scanAttendanceTable', { nrp: ctx?.nrp, bulan: ctx?.bulan, tahun: ctx?.tahun });
-    const anomalies = [];
-    const absentDates = [];
-    const cekSpklCells = [];
-
-    const rekaps = {
-      hariKerja: 0,
-      otb: 0,
-      otl: 0,
-      ota: 0,
-      otp: 0,
-      keterangan: {}
-    };
-
-    const totalLibur = countLibur(doc);
-    const is5HariKerja = totalLibur >= THRESHOLDS.MIN_LIBUR_5_HARI_KERJA;
-    const rules = structuredClone(SHIFT_RULES);
-    if (is5HariKerja) {
-      rules.shift2.batasKeluarLembur = THRESHOLDS.SHIFT2_KLR_LEMBUR_5HR;
-    }
-
-    const root = doc || document;
-    const trs = root.querySelectorAll('table tbody tr');
-
-    // Pre-calculate shift counts per date to detect duplicates
-    const dateShiftCounts = {};
-    trs.forEach(tr => {
-      const tds = tr.querySelectorAll('td');
-      if (tds.length < 12 || tr.textContent.toLowerCase().includes('total')) return;
-      const tgl = tds[COL.TGL].textContent.trim();
-      const hasChecked = isShiftChecked(tds[COL.SHIFT1]) || isShiftChecked(tds[COL.SHIFT2]) || isShiftChecked(tds[COL.SHIFT3]);
-      if (tgl && hasChecked) dateShiftCounts[tgl] = (dateShiftCounts[tgl] || 0) + 1;
-    });
-
-    trs.forEach(tr => {
-      const tds = tr.querySelectorAll('td');
-      if (tds.length < 12 || tr.textContent.toLowerCase().includes('total')) return;
-
-      const tglText = tds[COL.TGL].textContent.trim();
-      const fullDate = `${ctx.tahun}-${String(ctx.bulan).padStart(2, '0')}-${String(tglText).padStart(2, '0')}`;
-
-      const mskText = tds[COL.MSK].textContent.trim();
-      const klrText = tds[COL.KLR].textContent.trim();
-      const { isLibur, isHalfDay, ketText } = getRowStatus(tr);
-
-      const shiftInfo = validateShiftRow(tds, tglText, mskText, klrText, rules, ctx, cekSpklCells, anomalies, isLibur, isHalfDay, fullDate);
-      const { shift1, shift2, shift3, activeShift, mskTime } = shiftInfo;
-      const klrTime = parseTime(klrText);
-
-      // Detect multiple rows for same date with checked shifts (Barcode overlap/error)
-      const isSaturday = new Date(ctx.tahun, ctx.bulan - 1, parseInt(tglText)).getDay() === 6;
-      if (activeShift && dateShiftCounts[tglText] > 1 && !isHalfDay && !isSaturday) {
-        const barcodeLink = getKehadiranLink(ctx);
-        let msg = 'Duplikasi Shift pada tanggal yang sama';
-
-        let adjMsk = mskTime;
-        let adjKlr = klrTime;
-        // Apply basic shift-based adjustments for accurate comparison
-        if (shift2 && adjKlr !== null && adjKlr <= THRESHOLDS.ADJ_KLR_SHIFT2_BATAS) adjKlr += 24.0;
-        else if (shift3) {
-          if (adjMsk !== null && adjMsk <= THRESHOLDS.ADJ_MSK_SHIFT3_BATAS) adjMsk += 24.0;
-          if (adjKlr !== null && adjKlr <= THRESHOLDS.ADJ_KLR_SHIFT3_BATAS) adjKlr += 24.0;
-        }
-
-        if (adjMsk !== null && adjKlr !== null && adjMsk >= adjKlr) {
-          msg = 'Double entry / Error Barcode (MSK >= KLR)';
-        }
-
-        markAnomalyCell(anomalies, tglText, COL.TGL, msg, barcodeLink, cekSpklCells, fullDate);
-        if (shift1) markAnomalyCell(anomalies, tglText, COL.SHIFT1, msg, barcodeLink, cekSpklCells, fullDate);
-        if (shift2) markAnomalyCell(anomalies, tglText, COL.SHIFT2, msg, barcodeLink, cekSpklCells, fullDate);
-        if (shift3) markAnomalyCell(anomalies, tglText, COL.SHIFT3, msg, barcodeLink, cekSpklCells, fullDate);
-      }
-
-      if (activeShift && mskTime !== null && !isLibur && !isHalfDay) {
-        const guessed = tebakShiftSebenarnya(mskTime, rules);
-        if (guessed !== activeShift) {
-          const msg = 'Jam MSK tidak cocok dengan Shift ' + activeShift + ' (Terdeteksi Shift ' + guessed + ')';
-          const link = getDistribusiLink(ctx, tglText, guessed);
-          markAnomalyCell(anomalies, tglText, COL.MSK, msg, link, cekSpklCells, fullDate);
-          if (shift1) markAnomalyCell(anomalies, tglText, COL.SHIFT1, msg, '', cekSpklCells, fullDate);
-          if (shift2) markAnomalyCell(anomalies, tglText, COL.SHIFT2, msg, '', cekSpklCells, fullDate);
-          if (shift3) markAnomalyCell(anomalies, tglText, COL.SHIFT3, msg, '', cekSpklCells, fullDate);
-        }
-      }
-
-      let isAbsent = ketText === 'A';
-      for (let i = 11; i < tds.length; i++) {
-        if (tds[i].textContent.trim() === 'A') isAbsent = true;
-      }
-      if (isAbsent) {
-        absentDates.push({ date: tglText, tr: tr });
-      }
-
-      const barcodeLink = getKehadiranLink(ctx);
-
-      if (!isLibur) {
-        if (!mskText && !ketText) markAnomalyCell(anomalies, tglText, COL.MSK, 'Buka Halaman Kehadiran', barcodeLink, cekSpklCells, fullDate);
-        if (!klrText && !ketText) markAnomalyCell(anomalies, tglText, COL.KLR, 'Buka Halaman Kehadiran', barcodeLink, cekSpklCells, fullDate);
-      } else {
-        if (mskText || klrText) {
-          if (!mskText) markAnomalyCell(anomalies, tglText, COL.MSK, 'Buka Halaman Kehadiran', barcodeLink, cekSpklCells, fullDate);
-          if (!klrText) markAnomalyCell(anomalies, tglText, COL.KLR, 'Buka Halaman Kehadiran', barcodeLink, cekSpklCells, fullDate);
-        }
-      }
-
-
-      const ot = validateOvertime(tds, tglText, mskTime, klrTime, shift1, shift2, shift3, isLibur, isHalfDay, rules, ctx, cekSpklCells, anomalies, is5HariKerja, fullDate);
-
-      const otbText = tds[COL.OTB].textContent.trim();
-      const otlText = tds[COL.OTL].textContent.trim();
-      const otpText = tds[COL.OTP].textContent.trim();
-
-      const valOtb = parseFloat(otbText) || 0;
-      const valOtl = parseFloat(otlText) || 0;
-      const valOtp = parseFloat(otpText) || 0;
-
-      const hkText = tds[COL.HARI_KERJA] ? tds[COL.HARI_KERJA].textContent.trim() : '0';
-      rekaps.hariKerja += parseFloat(hkText) || 0;
-
-      if (ketText && ketText !== '-') {
-        rekaps.keterangan[ketText] = (rekaps.keterangan[ketText] || 0) + 1;
-      }
-
-      rekaps.otb += valOtb;
-      rekaps.otl += valOtl;
-      rekaps.otp += valOtp;
-      rekaps.ota += (valOtb + valOtl);
-
-      if (valOtb > THRESHOLDS.OT_BATAS_WAJAR) markAnomalyCell(anomalies, tglText, COL.OTB, 'Angka OTB tidak wajar', '', cekSpklCells, fullDate);
-      if (valOtl > THRESHOLDS.OT_BATAS_WAJAR) markAnomalyCell(anomalies, tglText, COL.OTL, 'Angka OTL tidak wajar', '', cekSpklCells, fullDate);
-      if (valOtp > THRESHOLDS.OT_BATAS_WAJAR) markAnomalyCell(anomalies, tglText, COL.OTP, 'Angka OTP tidak wajar', '', cekSpklCells, fullDate);
-
-      const hasAnyOT = parseFloat(otbText) > 0 || parseFloat(otlText) > 0 || parseFloat(otpText) > 0;
-      if ((ot.mskLembur || ot.klrLembur) && !hasAnyOT) {
-        const d = String(tglText).padStart(2, '0');
-        const spklUrl = ROUTES.SPKL_ONLINE(ctx.tahun, String(ctx.bulan).padStart(2, '0'), d, d, ctx.nrp);
-        const sVal = activeShift || '';
-        markAnomalyCell(anomalies, tglText, COL.OTB, 'Cek SPKL', spklUrl, cekSpklCells, fullDate, sVal);
-        markAnomalyCell(anomalies, tglText, COL.OTL, 'Cek SPKL', spklUrl, cekSpklCells, fullDate, sVal);
-        markAnomalyCell(anomalies, tglText, COL.OTP, 'Cek SPKL', spklUrl, cekSpklCells, fullDate, sVal);
-        if (ot.mskLembur) markAnomalyCell(anomalies, tglText, COL.MSK, 'Cek SPKL', spklUrl, cekSpklCells, fullDate, sVal);
-        if (ot.klrLembur) markAnomalyCell(anomalies, tglText, COL.KLR, 'Cek SPKL', spklUrl, cekSpklCells, fullDate, sVal);
+    document.addEventListener('mouseup', () => {
+      if (isDragging) {
+        isDragging = false;
+        panel.style.transition = '';
+        GM_setValue('qm_panel_pos', JSON.stringify(state.panelPos));
       }
     });
-
-    const result = { anomalies, absentDates, cekSpklCells, rekaps };
-    finishProfile(prof, {
-      nrp: ctx?.nrp,
-      anomalyCount: anomalies.length,
-      absentCount: absentDates.length,
-      spklCheckCount: cekSpklCells.length
-    });
-    return result;
-  }
-
-  function detectAnomalies() {
-    if (!isAttendancePagePath()) return;
-
-    const prof = startProfile('detectAnomalies');
-
-    try {
-      state.anomalies = [];
-      state.pendingChecks = 0;
-
-      const anomaliTab = document.querySelector('[data-pane="anomali"]');
-      if (anomaliTab) anomaliTab.classList.remove('qm-tab-loading');
-
-      const ctx = getPageContext();
-      const result = scanAttendanceTable(document, ctx);
-      state.anomalies = result.anomalies;
-
-      applyMark(document, result.anomalies);
-      renderAnomalies();
-
-      if (result.absentDates.length > 0) { state.pendingChecks++; checkBarcodeMangkir(result.absentDates); }
-      if (result.cekSpklCells.length > 0) { state.pendingChecks++; checkSPKLOnline(result.cekSpklCells); }
-      if (state.pendingChecks > 0 && anomaliTab) anomaliTab.classList.add('qm-tab-loading');
-    } finally {
-      finishProfile(prof, { anomalyCount: state.anomalies.length });
-    }
-  }
-
-  /* ============================================================
-   * 15. SPKL ONLINE CHECK
-   * ============================================================ */
-  async function checkSPKLOnline(cells) {
-    const prof = startProfile('checkSPKLOnline', { cellCount: cells.length });
-    const ctx = getPageContext();
-    const bulan = String(ctx.bulan).padStart(2, '0');
-    if (!ctx.nrp) {
-      finishProfile(prof, { skipped: true });
-      return;
-    }
-
-    const dates = cells.map(c => parseInt(c.tgl)).filter(n => !isNaN(n));
-    if (!dates.length) {
-      finishProfile(prof, { skipped: true });
-      return;
-    }
-    const minDate = Math.min(...dates).toString().padStart(2, '0');
-    const maxDate = Math.max(...dates).toString().padStart(2, '0');
-
-    const spklUrl = buildSpklOnlineUrl(ctx, minDate, maxDate);
-
-    try {
-      const data = await req(spklUrl);
-      const doc = parseHTML(data);
-
-      // Deteksi data nyata: ada tidaknya baris dengan minimal 3 kolom di tbody
-      // (lebih andal dari pengecekan teks — "Belum ada data" bisa muncul di nav/notif)
-      const allTableRows = doc.querySelectorAll('table tbody tr');
-      let isNoData = true;
-      allTableRows.forEach(tr => {
-        if (tr.querySelectorAll('td').length >= 3) isNoData = false;
-      });
-
-      // Dynamic Header Detection for SPKL Online
-      let tglColIdx = -1;
-      const ths = doc.querySelectorAll('th');
-      ths.forEach((th, i) => {
-        const text = th.textContent.trim().toLowerCase();
-        if (text.includes('tanggal') || text.includes('tgl')) tglColIdx = i;
-      });
-
-      const spklMap = {};
-      Logger.debug('checkSPKLOnline: isNoData=', isNoData, 'tglColIdx=', tglColIdx, 'html preview:', data.slice(0, 500));
-      if (!isNoData) {
-        const rows = doc.querySelectorAll('table tbody tr');
-        rows.forEach(tr => {
-          const tds = tr.querySelectorAll('td');
-          if (tds.length < 3) return;
-
-          let rowTgl = '';
-          if (tglColIdx !== -1 && tds[tglColIdx]) {
-            rowTgl = tds[tglColIdx].textContent.trim();
-          }
-          if (!rowTgl) {
-            // Fallback heuristics for date
-            tds.forEach(td => {
-              const val = td.textContent.trim();
-              if (/^\d{4}[-\/]\d{2}[-\/]\d{2}/.test(val) || /^\d{2}[-\/]\d{2}[-\/]\d{4}/.test(val) || /^\d{2}[-\s]+[a-zA-Z]+[-\s]+\d{4}/.test(val)) {
-                rowTgl = val;
-              }
-            });
-          }
-
-          let rowStatus = '';
-          const badge = tr.querySelector('.badge');
-          if (badge) {
-            rowStatus = badge.textContent.trim().toUpperCase();
-          } else {
-            // Fallback status
-            tds.forEach(td => {
-              const val = td.textContent.trim().toUpperCase();
-              if (val === 'APPROVED' || val === 'DISETUJUI' || val.includes('APPROVE') || val.includes('SETUJU') || val.includes('REJECT') || val.includes('TOLAK') || val.includes('DRAFT') || val.includes('MENUNGGU') || val.includes('ASK FOR APPROVAL')) {
-                rowStatus = val;
-              }
-            });
-          }
-
-          if (rowTgl) {
-            let dayNum = NaN;
-            // Coba format ISO: YYYY-MM-DD atau YYYY/MM/DD (dengan atau tanpa leading zero)
-            const isoM = rowTgl.match(/^(\d{4})[-\/](\d{1,2})[-\/](\d{1,2})/);
-            if (isoM) {
-              dayNum = parseInt(isoM[3], 10);
-            } else {
-              // Coba format DD[-/]MM[-/]YYYY atau DD[-/]MM[-/]YY (hari di posisi pertama, 1-2 digit)
-              const dmyM = rowTgl.match(/^(\d{1,2})[-\/](\d{1,2})[-\/]\d{2,4}/);
-              if (dmyM) {
-                dayNum = parseInt(dmyM[1], 10);
-              } else {
-                // Fallback: cari angka 1-2 digit yang berdiri sendiri (bukan bagian dari angka lebih panjang)
-                const numM = rowTgl.match(/\b(\d{1,2})\b/);
-                if (numM) dayNum = parseInt(numM[1], 10);
-              }
-            }
-            if (!isNaN(dayNum) && dayNum >= 1 && dayNum <= 31) {
-              Logger.debug(`row rowTgl: ${rowTgl} | dayNum: ${dayNum} | rowStatus: ${rowStatus}`);
-              spklMap[dayNum] = rowStatus || 'APPROVED';
-            }
-          } else if (minDate === maxDate) {
-            spklMap[parseInt(minDate)] = rowStatus || 'APPROVED';
-          }
-        });
-      }
-      Logger.debug('spklMap final:', JSON.stringify(spklMap));
-
-      const processedDays = {};
-
-      // Build DOM row index once (O(n)) — used for cell title/dot updates
-      const domRowMap = {};
-      const domRows = document.querySelectorAll('table tbody tr');
-      for (let i = 0; i < domRows.length; i++) {
-        const tds = domRows[i].querySelectorAll('td');
-        if (tds.length >= 12) {
-          const rowTgl = tds[COL.TGL]?.textContent.trim();
-          const dNum = parseInt(rowTgl);
-          if (!isNaN(dNum)) domRowMap[dNum] = tds;
-        }
-      }
-
-      // Note: we can skip domRowMap entirely for dots because we have data-fix-date
-      cells.forEach(item => {
-        const dayNum = parseInt(item.tgl);
-        let newMsg = '';
-        const statusRaw = (spklMap[dayNum] || '').toUpperCase();
-        Logger.debug(`cell tgl=${item.tgl} | dayNum=${dayNum} | statusRaw=${statusRaw}`);
-
-        if (statusRaw) {
-          if (statusRaw.includes('ASK FOR APPROVAL') || statusRaw.includes('MENUNGGU') || statusRaw.includes('DRAFT')) {
-            newMsg = 'SPKL Belum Disetujui';
-          } else if (statusRaw.includes('REJECTED') || statusRaw.includes('DITOLAK') || statusRaw.includes('DISAPPROVED')) {
-            newMsg = 'SPKL Ditolak';
-          } else if (statusRaw.includes('APPROVED') || statusRaw.includes('DISETUJUI')) {
-            newMsg = 'SPKL Disetujui (Cek Jenis OT)';
-          } else {
-            // Status tidak dikenali tapi baris ditemukan → asumsikan approved, cek jenis OT
-            newMsg = 'SPKL Disetujui (Cek Jenis OT)';
-          }
-        } else {
-          newMsg = 'SPKL Online tidak ada';
-        }
-
-        let link = '';
-        const isEntryFix = newMsg === 'SPKL Online tidak sesuai' || newMsg === 'SPKL Online tidak ada' || newMsg === 'SPKL Belum Disetujui';
-
-        if (isEntryFix) {
-          link = ROUTES.SPKL_ONLINE_SINGLE(item.fullDate, ctx.nrp);
-        } else {
-          const base = getSpklBaseUrl(ctx.nrp);
-          const shiftParam = item.shift ? `&shift=${item.shift}` : '';
-          link = `${base}?tahun=${ctx.tahun}&bulan=${bulan}&kode_bagian=&kode_seksi=&kode_group=&nrp=${ctx.nrp}&qm_auto_spkl_fix=1&full_date=${item.fullDate}${shiftParam}`;
-        }
-
-        if (newMsg && !processedDays[dayNum]) {
-          state.anomalies.push({ tgl: item.tgl, fullDate: item.fullDate, col: 'SPKL Status', msg: newMsg, link: link });
-          processedDays[dayNum] = true;
-        }
-
-        // Direct DOM update: find all dots for this date that are related to SPKL
-        const dots = document.querySelectorAll(`.qm-fix-dot[data-fix-date="${item.tgl}"]`);
-        dots.forEach(fixDot => {
-          const currentTitle = fixDot.getAttribute('title') || '';
-          if (currentTitle.includes('SPKL')) {
-            let titleDot = 'Buka SPKL Online';
-            if (newMsg === 'SPKL Belum Disetujui') titleDot = 'Buka SPKL Online (Menunggu Persetujuan)';
-            else if (newMsg === 'SPKL Ditolak') titleDot = 'SPKL Ditolak, Cek Halaman SPKL';
-            else if (newMsg === 'SPKL Disetujui (Cek Jenis OT)') titleDot = 'Cek Halaman SPKL';
-            else if (isEntryFix) titleDot = 'Cek SPKL Online';
-            else titleDot = 'Buka Halaman SPKL';
-
-            fixDot.setAttribute('title', titleDot);
-            fixDot.setAttribute('data-fix-link', link);
-
-            // Also update the parent cell title if possible
-            const td = fixDot.closest('td');
-            if (td) {
-              const cellTitle = td.getAttribute('title') || '';
-              if (!cellTitle.includes(newMsg) && newMsg !== '') {
-                td.setAttribute('title', cellTitle + (cellTitle ? ' | ' : '') + newMsg);
-              }
-            }
-          }
-        });
-      });
-      renderAnomalies();
-    } catch (e) {
-      Logger.warn('Gagal mengambil data SPKL Online.', e);
-    } finally {
-      finishProfile(prof, { cellCount: cells.length, anomalyCount: state.anomalies.length });
-      decrementPendingChecks();
-    }
-  }
-
-  /* ============================================================
-   * 16. BARCODE MANGKIR CHECK
-   * ============================================================ */
-  async function checkBarcodeMangkir(absentDates) {
-    const prof = startProfile('checkBarcodeMangkir', { absentCount: absentDates.length });
-    const ctx = getPageContext();
-    if (!ctx.nrp) {
-      finishProfile(prof, { skipped: true });
-      return;
-    }
-
-    const barcodeUrl = getKehadiranLink(ctx);
-
-    try {
-      const data = await req(barcodeUrl);
-      const doc = parseHTML(data);
-      let dateColIdx = -1, statusColIdx = -1;
-
-      const ths = doc.querySelectorAll('th');
-      ths.forEach(function (th, i) {
-        const text = th.textContent.trim().toLowerCase();
-        if (text.includes('tanggal')) dateColIdx = i;
-        if (text.includes('status')) statusColIdx = i;
-      });
-
-      const barcodeData = {};
-
-      const rows = doc.querySelectorAll('table tbody tr');
-      rows.forEach(function (row) {
-        const tds = row.querySelectorAll('td');
-        if (tds.length < 2) return;
-        let tglText = '', statusText = '';
-
-        if (dateColIdx !== -1 && statusColIdx !== -1) {
-          tglText = tds[dateColIdx] ? tds[dateColIdx].textContent.trim() : '';
-          statusText = tds[statusColIdx] ? tds[statusColIdx].textContent.trim() : '';
-        } else {
-          tds.forEach(function (td) {
-            const val = td.textContent.trim();
-            if (/masuk|keluar/i.test(val)) statusText = val;
-            if (/^\d{2}[-\/]\d{2}[-\/]\d{4}/.test(val) || /^\d{2}$/.test(val)) tglText = val;
-          });
-        }
-
-        if (tglText && statusText) {
-          const tglStr = tglText.split(/\s+/)[0];
-          let day = '';
-          const m1 = tglStr.match(/^(\d{2})[-\/]/);
-          const m2 = tglStr.match(/[-\/](\d{2})$/);
-          const m3 = tglStr.match(/^(\d{1,2})$/);
-          if (m1) day = m1[1]; else if (m2) day = m2[1]; else if (m3) day = m3[1].padStart(2, '0');
-          if (day) {
-            if (!barcodeData[day]) barcodeData[day] = [];
-            barcodeData[day].push(statusText.toLowerCase());
-          }
-        }
-      });
-
-      absentDates.forEach(item => {
-        const day = item.date.toString().padStart(2, '0');
-        const statuses = barcodeData[day] || [];
-        const hasMasuk = statuses.some(s => s.includes('masuk'));
-        const hasKeluar = statuses.some(s => s.includes('keluar'));
-        let errMessage = '';
-        if (!hasMasuk && !hasKeluar) errMessage = 'Kedua jam masuk dan keluar kosong';
-        else if (!hasMasuk) errMessage = 'Jam Masuk Kosong';
-        else if (!hasKeluar) errMessage = 'Jam Keluar Kosong';
-
-        if (errMessage) {
-          const tds = item.tr.querySelectorAll('td');
-          if (tds.length <= 3) return;
-          const ketTd = tds[3];
-
-          const existingTitle = ketTd.getAttribute('title') || '';
-          const barcodeTitle = `Validasi Barcode: ${errMessage}`;
-          ketTd.classList.add('qm-anomaly-cell');
-          ketTd.setAttribute('title', existingTitle ? existingTitle + ' | ' + barcodeTitle : barcodeTitle);
-          state.anomalies.push({ tgl: item.date, colIndex: 3, msg: 'Validasi Barcode: ' + errMessage, link: barcodeUrl });
-        }
-      });
-      applyMark(document, state.anomalies);
-      renderAnomalies();
-    } catch (e) {
-      Logger.warn('Gagal mengambil data barcode.');
-    } finally {
-      finishProfile(prof, { absentCount: absentDates.length, anomalyCount: state.anomalies.length });
-      decrementPendingChecks();
-    }
-  }
-
-  /* ============================================================
-   * 17. AUTO FIX SPKL TYPE
-   * ============================================================ */
-  async function processSpklBackgroundSingle(item) {
-    Logger.info(`Fetching ${item.link}`);
-    const html = await req(item.link);
-    const doc = parseHTML(html);
-
-    const dateObj = parseHrisDate(item.fullDate);
-    const dateStrId = dateObj ? dateObj.toLocaleDateString('id-ID') : item.fullDate;
-
-    let tglColIdx = 0;
-    const ths = doc.querySelectorAll('table th');
-    ths.forEach((th, i) => {
-      const text = th.textContent.trim().toLowerCase();
-      if (text.includes('tanggal') || text === 'tgl') tglColIdx = i;
-    });
-
-    let editBtn = null;
-    const rows = doc.querySelectorAll(SELECTORS.SPKL_TABLE_ROWS);
-    for (const row of rows) {
-      const tds = row.querySelectorAll('td');
-      if (tds.length === 0) continue;
-
-      const dateTd = tds[tglColIdx] || tds[0];
-      const rowDateText = dateTd.textContent.trim();
-      const rowDateObj = parseHrisDate(rowDateText);
-
-      let isMatch = false;
-      if (rowDateObj && dateObj) {
-        isMatch = rowDateObj.getTime() === dateObj.getTime();
-      } else {
-        isMatch = Array.from(tds).some(td => {
-          const v = td.textContent.trim();
-          return v === rowDateText && parseHrisDate(v)?.getTime() === dateObj?.getTime();
-        }) || rowDateText.includes(item.fullDate);
-      }
-
-      if (isMatch) {
-        const lastTd = tds[tds.length - 1];
-        const actionCandidates = Array.from(lastTd.querySelectorAll('button, a, .btn'));
-        const allCandidates = Array.from(row.querySelectorAll(SELECTORS.SPKL_EDIT_BTN));
-
-        const findEdit = (els) => els.find(el => {
-          const txt = el.textContent.trim().toLowerCase();
-          const target = (el.getAttribute('data-target') || '').toLowerCase();
-          const href = (el.getAttribute('href') || '').toLowerCase();
-          return txt.includes('edit') || target.includes('edit') || href.includes('edit');
-        });
-
-        editBtn = findEdit(actionCandidates) || findEdit(allCandidates);
-        if (editBtn) break;
-      }
-    }
-
-    if (!editBtn) {
-      Logger.warn(`Baris tanggal ${dateStrId} tidak ditemukan.`);
-      return false;
-    }
-
-    const modalId = editBtn.getAttribute('data-target');
-    if (!modalId) return false;
-
-    const modal = doc.getElementById(modalId.replace('#', ''));
-    if (!modal) return false;
-
-    const form = modal.querySelector('form');
-    if (!form) return false;
-
-    const mskInput = form.querySelector(SELECTORS.SPKL_MODAL_MSK);
-    const otTypeSelect = form.querySelector(SELECTORS.SPKL_MODAL_OT_TYPE);
-    if (!otTypeSelect) return false;
-
-    const mskValue = mskInput ? mskInput.value : '';
-    const mskTime = parseTime(mskValue);
-    const urlParams = new URLSearchParams(item.link.split('?')[1] || '');
-    const shift = urlParams.get('shift') || tebakShiftSebenarnya(mskTime, SHIFT_RULES);
-    const currentOtType = otTypeSelect.value;
-
-    let matchedRule = null;
-    for (const rule of SPKL_RULES) {
-      if (shift === rule.shift && currentOtType === rule.currentOtType) {
-        matchedRule = rule;
-        break;
-      }
-    }
-
-    if (!matchedRule) {
-      Logger.info(`No fix needed for ${dateStrId}: shift ${shift}, type ${currentOtType}`);
-      return true; // Already correct
-    }
-
-    const params = new URLSearchParams();
-    const headers = {
-      'Content-Type': 'application/x-www-form-urlencoded',
-      'X-Requested-With': 'XMLHttpRequest'
-    };
-
-    const csrfMeta = doc.querySelector('meta[name="csrf-token"], meta[name="csrf-test-name"], meta[name="_token"]');
-    if (csrfMeta) {
-      const token = csrfMeta.getAttribute('content');
-      if (!token) {
-        throw new Error('Token CSRF tidak ditemukan. Struktur halaman mungkin berubah.');
-      }
-      headers['X-CSRF-TOKEN'] = token;
-      headers['X-XSRF-TOKEN'] = token;
-    } else {
-      const csrfHidden = form.querySelector('input[name="_token"], input[name="csrf_token"], input[name="csrf-token"]');
-      if (csrfHidden && csrfHidden.value) {
-        headers['X-CSRF-TOKEN'] = csrfHidden.value;
-        headers['X-XSRF-TOKEN'] = csrfHidden.value;
-      } else {
-        throw new Error('Token CSRF tidak ditemukan. Struktur halaman mungkin berubah.');
-      }
-    }
-
-    form.querySelectorAll('input, select, textarea').forEach(el => {
-      if (!el.name || el.type === 'submit' || el.type === 'button') return;
-      if ((el.type === 'checkbox' || el.type === 'radio') && !el.checked) return;
-
-      let val = el.value;
-      if (el === otTypeSelect) val = matchedRule.targetOtType;
-
-      params.append(el.name, val);
-    });
-
-    const actionUrl = form.action.startsWith('http') ? form.action : ROUTES.BASE + (form.action.startsWith('/') ? '' : '/') + form.action;
-
-    Logger.info(`Sending POST to ${actionUrl} for ${dateStrId}`);
-    const res = await fetchWithTimeout(actionUrl, {
-      method: 'POST',
-      headers,
-      body: params.toString()
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    return true;
-  }
-
-  async function runSpklBackgroundQueue(queue) {
-    UI.showGlobalLoader('Auto Fix SPKL', `Memulai perbaikan ${queue.length} data...`, true);
-    let successCount = 0;
-
-    for (let i = 0; i < queue.length; i++) {
-      if (!document.getElementById('qm-global-loader')) {
-        Logger.info('User cancelled background queue');
-        return;
-      }
-
-      const item = queue[i];
-      UI.setGlobalProgress(Math.round((i / queue.length) * 100), `Antrean ${i + 1}/${queue.length}: ${item.fullDate}...`);
-
-      try {
-        const result = await processSpklBackgroundSingle(item);
-        if (result) successCount++;
-        await new Promise(r => setTimeout(r, 800)); // Be nice to server
-      } catch (e) {
-        Logger.error(`Error processing ${item.fullDate}`, e);
-      }
-    }
-
-    UI.setGlobalProgress(100, 'Selesai!');
-    setTimeout(() => {
-      UI.hideGlobalLoader();
-      UI.showResult('success', 'Perbaikan SPKL', `Berhasil memproses ${successCount} dari ${queue.length} antrean.`);
-      setTimeout(() => window.location.reload(), 1500); // Reload attendance table to update anomalies
-    }, 1000);
-  }
-
-  /* ============================================================
-   * 18. AUTO DISTRIBUSI JAM KERJA
-   * ============================================================ */
-
-  /** Select dropdown value with MutationObserver support. */
-  /** Select dropdown value with robust option polling (waits for AJAX options to load). */
-  async function pilihDropdownDinamis(selector, nilaiTarget, callback, timeout = 5000) {
-    if (!nilaiTarget) return callback();
-    const startTime = Date.now();
-    const target = nilaiTarget.toLowerCase();
-
-    const poll = async () => {
-      const select = document.querySelector(selector);
-      if (select) {
-        const options = select.querySelectorAll('option');
-        let foundOpt = null;
-
-        for (const opt of options) {
-          if (opt.value.toLowerCase() === target || opt.textContent.trim().toLowerCase() === target) {
-            foundOpt = opt;
-            break;
-          }
-        }
-
-        if (foundOpt) {
-          select.value = foundOpt.value;
-          if (typeof window.$ !== 'undefined' && window.$(select).selectpicker) {
-            window.$(select).selectpicker('render').selectpicker('refresh');
-          }
-          select.dispatchEvent(new Event('change', { bubbles: true }));
-          select.dispatchEvent(new Event('input', { bubbles: true }));
-          setTimeout(callback, 400); // Small buffer for server-side triggers
-          return;
-        }
-      }
-
-      if (Date.now() - startTime < timeout) {
-        setTimeout(poll, 150);
-      } else {
-        Logger.warn('Timeout waiting for option "' + nilaiTarget + '" in ' + selector);
-        callback();
-      }
-    };
-
-    poll();
-  }
-
-  // fetchEmployeeData — removed, replaced by getEmp()
-
-  /** 
-   * Enhanced logger that respects state.debug.
-   * @param {string} msg 
-   * @param {any} data 
-   */
-  // log(msg, data) — removed, replaced by Logger
-
-  /**
-   * Robust date parser for HRIS formats: 
-   * - DD/MM/YYYY
-   * - DD-MM-YYYY
-   * - DD-MMM-YYYY (e.g. 21-Apr-2026)
-   * @param {string} str 
-   * @returns {Date|null}
-   */
-  function parseHrisDate(str) {
-    if (!str) return null;
-    const clean = str.trim();
-
-    // DD/MM/YYYY or DD-MM-YYYY
-    const dmyMatch = clean.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$/);
-    if (dmyMatch) {
-      return new Date(dmyMatch[3], dmyMatch[2] - 1, dmyMatch[1]);
-    }
-
-    // DD-MMM-YYYY
-    const dMmmYMatch = clean.match(/^(\d{1,2})-(\w{3})-(\d{4})$/);
-    if (dMmmYMatch) {
-      const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-      const monthNamesId = ["Jan", "Feb", "Mar", "Apr", "Mei", "Jun", "Jul", "Agu", "Sep", "Okt", "Nov", "Des"];
-      const mStr = dMmmYMatch[2].charAt(0).toUpperCase() + dMmmYMatch[2].slice(1).toLowerCase();
-
-      let mIdx = monthNames.indexOf(mStr);
-      if (mIdx === -1) mIdx = monthNamesId.indexOf(mStr);
-
-      if (mIdx !== -1) {
-        return new Date(dMmmYMatch[3], mIdx, dMmmYMatch[1]);
-      }
-    }
-
-    // YYYY-MM-DD
-    const ymdMatch = clean.match(/^(\d{4})[/-](\d{1,2})[/-](\d{1,2})$/);
-    if (ymdMatch) {
-      return new Date(ymdMatch[1], ymdMatch[2] - 1, ymdMatch[3]);
-    }
-
-    // Fallback: browser default
-    const d = new Date(clean);
-    // Adjust ISO parsing to local time to prevent mismatch
-    if (clean.match(/^\d{4}-\d{2}-\d{2}$/)) {
-      return new Date(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
-    }
-    return isNaN(d.getTime()) ? null : d;
-  }
-
-  /** Strips unsafe tags and attributes from HTML strings. */
-  /** Fill the distribusi form and submit. */
-  function fillDistribusiForm(dataKaryawan, nrp, tanggal, shift) {
-    setTimeout(() => {
-      UI.setGlobalProgress(20, 'Mengisi Jam Kerja...');
-
-      const jkSelect = document.querySelector('select[name*="jam_kerja"], select[name*="jk"]');
-      if (jkSelect && dataKaryawan.jk) {
-        selectOption(jkSelect, opt => {
-          const optVal = opt.value.trim();
-          const textKode = opt.textContent.trim().split('-')[0].trim();
-          return optVal === dataKaryawan.jk || textKode === dataKaryawan.jk;
-        });
-        selectPickerRefresh(jkSelect);
-      }
-
-      UI.setGlobalProgress(35, 'Mengisi Periode...');
-      const dateAwal = document.querySelectorAll('input[name*="tanggal_awal"], input[name*="periode_awal"], input[name*="tgl_awal"], input[name*="tgl_dari"], input[id*="tanggal_awal"], input[id*="tgl_awal"], input[name="start_date"]');
-      const dateAkhir = document.querySelectorAll('input[name*="tanggal_akhir"], input[name*="periode_akhir"], input[name*="tgl_akhir"], input[name*="tgl_sampai"], input[name*="tgl_ke"], input[id*="tanggal_akhir"], input[id*="tgl_akhir"], input[name="end_date"]');
-
-      const tglAwal = Array.isArray(tanggal) ? tanggal[0] : tanggal;
-      const tglAkhir = Array.isArray(tanggal) ? (tanggal[1] || tglAwal) : tglAwal;
-
-      dateAwal.forEach(input => setFieldValue(input, tglAwal));
-      dateAkhir.forEach(input => setFieldValue(input, tglAkhir));
-
-      UI.setGlobalProgress(50, 'Menyesuaikan Bagian...');
-      pilihDropdownDinamis('select[name*="bagian"]', dataKaryawan.bag, () => {
-        UI.setGlobalProgress(65, 'Menyesuaikan Seksi...');
-        pilihDropdownDinamis('select[name*="seksi"]', dataKaryawan.sek, () => {
-          UI.setGlobalProgress(75, 'Menyesuaikan Group & NRP...');
-          const grpSelect = document.querySelector('select[name="kode_group"]');
-          if (grpSelect && dataKaryawan.grp) {
-            setFieldValue(grpSelect, dataKaryawan.grp);
-            selectPickerRefresh(grpSelect);
-          }
-
-          if (typeof nrp === 'object' && nrp.awal !== undefined) {
-            const nrpIn1 = document.querySelector('input[list="nrp_awal"], input[name*="nrp_awal"], input[id*="nrp_initial"], input[name*="nrp_initial"], input[name*="nrp1"], input[name*="nrp_initial_text"]');
-            const nrpIn2 = document.querySelector('input[list="nrp_akhir"], input[name*="nrp_akhir"], input[id*="nrp_final"], input[name*="nrp_final"], input[name*="nrp2"], input[name*="nrp_final_text"]');
-            if (nrpIn1) setFieldValue(nrpIn1, nrp.awal, ['input', 'change', 'blur']);
-            if (nrpIn2) setFieldValue(nrpIn2, nrp.akhir || nrp.awal, ['input', 'change', 'blur']);
-          } else {
-            let nrpInputs = document.querySelectorAll('input[list="nrp_awal"], input[list="nrp_akhir"], input[name*="nrp_awal"], input[name*="nrp_akhir"], input[name*="nrp1"], input[name*="nrp2"], input[name*="nrp_1"], input[name*="nrp_2"]');
-            if (nrpInputs.length === 0) nrpInputs = document.querySelectorAll('input[name*="nrp"]');
-            nrpInputs.forEach(input => setFieldValue(input, nrp, ['input', 'change', 'blur']));
-          }
-
-          if (shift) {
-            const targetShiftRoman = shift === '1' ? 'I' : (shift === '2' ? 'II' : 'III');
-            const expectedText = `${targetShiftRoman} - SHIFT ${targetShiftRoman}`;
-            const shiftSelect = document.querySelector('select[name="kode_shift"], select[name="shift"]');
-            if (shiftSelect) {
-              selectOption(shiftSelect, opt => {
-                const optText = opt.textContent.trim().toUpperCase();
-                return opt.value === shift || optText === expectedText || optText === targetShiftRoman || optText === 'SHIFT ' + targetShiftRoman;
-              });
-              selectPickerRefresh(shiftSelect);
-            }
-          }
-
-          UI.setGlobalProgress(90, 'Validasi Form...');
-          setTimeout(() => {
-            // Final Validation: Ensure critical fields are NOT empty
-            const requiredFields = [
-              { sel: 'select[name*="jam_kerja"], select[name*="jk"]', label: 'Jam Kerja' },
-              { sel: 'input[name*="tanggal_awal"], input[name*="periode_awal"], input[id*="tanggal_awal"]', label: 'Tanggal Awal' },
-              { sel: 'select[name*="bagian"]', label: 'Bagian' },
-              { sel: 'select[name*="seksi"]', label: 'Seksi' }
-            ];
-
-            const missing = requiredFields.filter(f => {
-              const el = document.querySelector(f.sel);
-              return el && (!el.value || el.value === '' || el.value === '0');
-            });
-
-            const nrpIn = document.querySelector('input[name*="nrp"], #nrp_initial_text');
-            if (nrpIn && !nrpIn.value && typeof nrp !== 'object') missing.push({ label: 'NRP' });
-
-            if (missing.length > 0) {
-              const msg = 'Gagal: Field [' + missing.map(m => m.label).join(', ') + '] masih kosong.';
-              UI.setGlobalProgress(100, msg);
-              UI.showResult('danger', 'Validasi Gagal', msg);
-              // Do not hide loader automatically so user can see what's missing
-              return;
-            }
-
-            UI.setGlobalProgress(95, 'Mengirim permintaan...');
-            sessionStorage.setItem(STORAGE.AUTO_FINISHED, 'true');
-            const buttons = document.querySelectorAll('button, input[type="submit"], .btn-primary');
-            let submitBtn = null;
-            for (const btn of buttons) {
-              if ((btn.textContent && btn.textContent.includes('Start Distribusi')) || btn.value === 'Start Distribusi') {
-                submitBtn = btn; break;
-              }
-            }
-            if (submitBtn) submitBtn.click();
-            else { const form = document.querySelector('form'); if (form) form.submit(); }
-          }, 1200);
-        });
-      }, 6000); // 6s timeout for Bagian
-    }, 500);
-  }
-
-  async function autoDistribusi() {
-    const urlParams = getCurrentQueryParams();
-    if (!urlParams.get('qm_auto_distribusi')) {
-      // Check if we are on the result page of a distribution (no qm_auto param but AUTO_FINISHED is true)
-      if (sessionStorage.getItem(STORAGE.AUTO_FINISHED) === 'true') {
-        const pageText = document.body.textContent;
-        const successAlert = document.querySelector('.alert-success, .alert-info');
-
-        if (successAlert || pageText.includes('Distribution Process Completed')) {
-          UI.showResult('success', 'Distribusi Selesai', 'Distribution Process Completed');
-          const returnUrl = sessionStorage.getItem(STORAGE.RETURN_URL);
-          if (returnUrl) {
-            setTimeout(() => {
-              sessionStorage.removeItem(STORAGE.RETURN_URL);
-              window.location.href = returnUrl;
-            }, 1500);
-          }
-        }
-      }
-      return;
-    }
-
-    const cleanUrl = new URL(window.location);
-    cleanUrl.searchParams.delete('qm_auto_distribusi');
-    window.history.replaceState({}, document.title, cleanUrl.toString());
-
-    const nrp = urlParams.get('nrp');
-    const tanggalAwal = urlParams.get('tanggal') || urlParams.get('tanggal_awal');
-    const tanggalAkhir = urlParams.get('tanggal_akhir') || tanggalAwal;
-    const shift = urlParams.get('shift');
-    const urlJk = urlParams.get('jk');
-    Logger.info('Auto Distribusi started', { nrp, tanggalAwal, tanggalAkhir, shift, urlJk });
-    if (!nrp || !tanggalAwal) return;
-
-    UI.showGlobalLoader('Auto Distribusi', 'Mengambil Data...');
-    try {
-      const emp = await getEmp(nrp);
-      if (!emp.found) {
-        UI.setGlobalProgress(100, 'Data karyawan tidak ditemukan.');
-        UI.hideGlobalLoader(3000);
-        return;
-      }
-      fillDistribusiForm({ jk: urlJk || emp.jk, bag: emp.bagian, sek: emp.seksi, grp: emp.group }, nrp, [tanggalAwal, tanggalAkhir], shift);
-    } catch (e) {
-      UI.setGlobalProgress(100, 'Gagal mengakses data karyawan.');
-      UI.hideGlobalLoader(3000);
-    }
-  }
-
-  async function autoDistribusiSubsi() {
-    const urlParams = getCurrentQueryParams();
-    if (!urlParams.get('qm_auto_distribusi_subsi')) return;
-
-    const cleanUrl = new URL(window.location);
-    cleanUrl.searchParams.delete('qm_auto_distribusi_subsi');
-    window.history.replaceState({}, document.title, cleanUrl.toString());
-
-    const jk = urlParams.get('jk');
-    const tglAwal = urlParams.get('tglAwal');
-    const tglAkhir = urlParams.get('tglAkhir');
-    const shift = urlParams.get('shift');
-    const bagian = urlParams.get('bagian');
-    const seksi = urlParams.get('seksi');
-    const grup = urlParams.get('grup');
-    const nrp = urlParams.get('nrp');
-
-    if (!jk || !tglAwal || !tglAkhir) return;
-
-    UI.showGlobalLoader('Auto Distribusi Subsi', 'Mengisi data...');
-
-    try {
-      const isOS = nrp && nrp.length === 8;
-      const nrpAwal = isOS ? '00000000' : '0000';
-      const nrpAkhir = isOS ? '99999999' : '9999';
-
-      fillDistribusiForm({ jk, bag: bagian, sek: seksi, grp: grup }, { awal: nrpAwal, akhir: nrpAkhir }, [tglAwal, tglAkhir], shift);
-    } catch (e) {
-      Logger.error('autoDistribusiSubsi error', e);
-      UI.setGlobalProgress(100, 'Gagal: ' + e.message);
-      UI.hideGlobalLoader(3000);
-    }
-  }
-
-  /* ============================================================
-   * 19. BATCH SPKL INPUT
-   * ============================================================ */
-  async function runSpklBatchProcess() {
-    const elNrp = document.getElementById("qm-fix-spkl-nrp");
-    const elBulan = document.getElementById("qm-fix-spkl-bulan");
-    const elTahun = document.getElementById("qm-fix-spkl-tahun");
-    const elData = document.getElementById("qm-fix-spkl-data");
-
-    const nrp = elNrp ? elNrp.value.trim() : "";
-    const bulan = elBulan ? elBulan.value : "";
-    const tahun = elTahun ? elTahun.value : "";
-    const batchData = elData ? elData.value.trim() : "";
-
-    if (!nrp || !bulan || !tahun || !batchData) {
-      UI.showResult('warning', 'Data Belum Lengkap', 'Silakan isi NRP, Periode, dan Data Batch.');
-      return;
-    }
-
-    sessionStorage.setItem(STORAGE.RETURN_URL, window.location.href);
-
-    if (!/^\d{4}$|^\d{8}$/.test(nrp)) {
-      UI.showResult('warning', 'NRP Tidak Valid', 'Gunakan 4 digit (Reguler) atau 8 digit (OS).');
-      return;
-    }
-
-    let targetUrl = getSpklCreateUrl(nrp);
-
-    // Save OT 7 details if any
-    let jamAwal = "", jamAkhir = "", shiftVal = "";
-    const elAwal = document.getElementById("qm-fix-spkl-jam-awal");
-    const elAkhir = document.getElementById("qm-fix-spkl-jam-akhir");
-    const elShift = document.getElementById("qm-fix-spkl-shift");
-    jamAwal = elAwal ? elAwal.value : "";
-    jamAkhir = elAkhir ? elAkhir.value : "";
-    shiftVal = elShift ? elShift.value : "";
-
-    if (!window.location.href.includes(targetUrl)) {
-      sessionStorage.setItem("spkl_saved_data", JSON.stringify({ nrp, tahun, bulan, batchData, jamAwal, jamAkhir, shiftVal }));
-      UI.showResult('success', 'Mengalihkan...', 'Halaman akan berpindah. Proses dilanjutkan otomatis.');
-      setTimeout(() => { window.location.href = targetUrl; }, 1000);
-      return;
-    }
-
-    _continueSpklBatch(nrp, tahun, bulan, batchData, jamAwal, jamAkhir, shiftVal);
-  }
-
-  async function _continueSpklBatch(nrp, tahun, bulan, batchData, jamAwal, jamAkhir, shiftVal) {
-    const taskList = [];
-    const items = batchData.split(',');
-    for (let item of items) {
-      item = item.trim();
-      if (!item) continue;
-      const parts = item.split(/[-:=]/);
-      const hari = parts[0].trim();
-      const jenisOt = parts.length > 1 ? parts[1].trim().toUpperCase() : "1";
-      if (!isNaN(hari) && hari !== "") {
-        taskList.push({ hari, jenisOt });
-      }
-    }
-
-    if (taskList.length === 0) {
-      UI.showResult('danger', 'Format Salah', 'Tidak ada data valid yang ditemukan.');
-      return;
-    }
-
-    UI.showGlobalLoader('Proses SPKL Batch', 'Memulai...');
-
-    // Hoist DOM lookups outside loop (constant per batch run)
-    const nrpInput = document.getElementById("nrp_input");
-    const tanggalInput = document.getElementById("tanggal");
-    const jenisOtSelect = document.getElementById("jenis_ot");
-    const btnTambah = document.getElementById("btnTambah");
-    const jamAwalEl = document.querySelector("#jam_awal_ot");
-    const jamAkhirEl = document.querySelector("#jam_akhir_ot");
-    const shiftEl = document.querySelector("#shift");
-
-    for (let i = 0; i < taskList.length; i++) {
-      const task = taskList[i];
-      const formatBulan = String(bulan).padStart(2, '0');
-      const formatHari = String(task.hari).padStart(2, '0');
-      const fullDate = `${tahun}-${formatBulan}-${formatHari}`;
-
-      UI.setGlobalProgress((i / taskList.length) * 100, `Memproses Tgl ${task.hari}...`);
-
-      setFieldValue(nrpInput, nrp, ['input', 'change']);
-      setFieldValue(tanggalInput, fullDate, ['input', 'change']);
-      if (jenisOtSelect) {
-        setFieldValue(jenisOtSelect, task.jenisOt);
-        if (window.jQuery && window.jQuery(jenisOtSelect).selectpicker) {
-          window.jQuery(jenisOtSelect).selectpicker('refresh');
-        }
-      }
-
-      if (task.jenisOt === "7") {
-        setFieldValue(jamAwalEl, jamAwal);
-        setFieldValue(jamAkhirEl, jamAkhir);
-        setFieldValue(shiftEl, shiftVal);
-      }
-
-      await new Promise(r => setTimeout(r, TIMING.SPKL_INPUT_DELAY));
-      if (btnTambah) btnTambah.click();
-      await new Promise(r => setTimeout(r, TIMING.SPKL_CLICK_DELAY));
-    }
-
-    UI.setGlobalProgress(95, 'Menyimpan...');
-    const btnSubmit = document.getElementById("submit");
-    if (btnSubmit) {
-      sessionStorage.setItem(STORAGE.AUTO_FINISHED, 'true');
-      await new Promise(r => setTimeout(r, TIMING.SPKL_SUBMIT_DELAY));
-      btnSubmit.click();
-      UI.setGlobalProgress(100, 'Selesai, Master!');
-      UI.hideGlobalLoader(2000);
-    }
-  }
-
-  function checkSpklBatchResume() {
-    // 1. Resume Per NRP (Batch Tanggal)
-    const sessionData = sessionStorage.getItem("spkl_saved_data");
-    if (sessionData) {
-      const parsed = JSON.parse(sessionData);
-      sessionStorage.removeItem("spkl_saved_data");
-
-      setTimeout(() => {
-        const elNrp = document.getElementById("qm-fix-spkl-nrp");
-        const elBulan = document.getElementById("qm-fix-spkl-bulan");
-        const elTahun = document.getElementById("qm-fix-spkl-tahun");
-        const elData = document.getElementById("qm-fix-spkl-data");
-
-        if (elNrp) elNrp.value = parsed.nrp;
-        if (elBulan) elBulan.value = parsed.bulan;
-        if (elTahun) elTahun.value = parsed.tahun;
-        if (elData) elData.value = parsed.batchData;
-        if (parsed.jamAwal) {
-          const elA = document.getElementById("qm-fix-spkl-jam-awal");
-          const elK = document.getElementById("qm-fix-spkl-jam-akhir");
-          const elS = document.getElementById("qm-fix-spkl-shift");
-          if (elA) elA.value = parsed.jamAwal;
-          if (elK) elK.value = parsed.jamAkhir;
-          if (elS) elS.value = parsed.shiftVal;
-          const box = document.getElementById("qm-fix-spkl-ot7-box");
-          if (box) box.classList.remove('qm-hidden');
-        }
-
-        // openPanel();
-        // const tabFix = document.querySelector('[data-pane="fix"]');
-        // if (tabFix) tabFix.click();
-
-        UI.showResult('success', 'Melanjutkan...', 'Memulai proses batch otomatis.');
-        _continueSpklBatch(parsed.nrp, parsed.tahun, parsed.bulan, parsed.batchData);
-      }, 1200);
-      return;
-    }
-
-    // 2. Resume Banyak NRP (Batch NRP)
-    const MANY_NRP_KEY = "hris_spkl_ot_runner_v1";
-    const st = JSON.parse(sessionStorage.getItem(MANY_NRP_KEY) || "null");
-    if (st) {
-      const pRoute = (function (s) {
-        const current = getSpklAddPageKind();
-        if (current && s.indexes[current] < s[current].length) return current;
-        if (s.indexes.internal < s.internal.length) return "internal";
-        if (s.indexes.outsource < s.outsource.length) return "outsource";
-        return null;
-      })(st);
-
-      if (pRoute) {
-        const current = getSpklAddPageKind();
-        if (current === pRoute) {
-          setTimeout(() => {
-            // Populate fields for visibility
-            const elNrps = document.getElementById("qm-fix-many-nrps");
-            const elDate = document.getElementById("qm-fix-many-date");
-            const elOt = document.getElementById("qm-fix-many-ot");
-            if (elNrps) elNrps.value = [...st.internal, ...st.outsource].join(", ");
-            if (elDate) elDate.value = st.date;
-            if (elOt) {
-              elOt.value = st.jenisOt;
-              elOt.dispatchEvent(new Event('change', { bubbles: true }));
-            }
-            if (st.jenisOt === "7") {
-              const elAwal = document.getElementById("qm-fix-many-jam-awal");
-              const elAkhir = document.getElementById("qm-fix-many-jam-akhir");
-              const elShift = document.getElementById("qm-fix-many-shift");
-              if (elAwal) elAwal.value = st.jamAwal;
-              if (elAkhir) elAkhir.value = st.jamAkhir;
-              if (elShift) elShift.value = st.shiftVal;
-            }
-
-            // openPanel();
-            // const tabFix = document.querySelector('[data-pane="fix"]');
-            // if (tabFix) tabFix.click();
-
-            UI.showGlobalLoader('Batch NRP', 'Melanjutkan...');
-            _processManyNrpPage(pRoute, st);
-          }, 1500);
-        } else {
-          Logger.info('Batch NRP pending redirect to ' + pRoute);
-        }
-      }
-    }
-  }
-
-  /* ============================================================
-   * 20. BATCH BANYAK NRP
-   * ============================================================ */
-  async function runSpklManyNrpBatch() {
-    const STORAGE_KEY = "hris_spkl_ot_runner_v1";
-
-    const elNrps = document.getElementById("qm-fix-many-nrps");
-    const elDate = document.getElementById("qm-fix-many-date");
-    const elOt = document.getElementById("qm-fix-many-ot");
-
-    const raw = elNrps ? elNrps.value.trim() : "";
-    const dateVal = elDate ? elDate.value : "";
-    const jO = elOt ? elOt.value : "";
-
-    if (!raw || !dateVal || !jO) {
-      UI.showResult('warning', 'Data Belum Lengkap', 'Silakan isi daftar NRP, Tanggal, dan Jenis OT.');
-      return;
-    }
-
-    sessionStorage.setItem(STORAGE.RETURN_URL, window.location.href);
-
-    let jamAwal = "", jamAkhir = "", shiftVal = "";
-    if (jO === "7") {
-      const elAwal = document.getElementById("qm-fix-many-jam-awal");
-      const elAkhir = document.getElementById("qm-fix-many-jam-akhir");
-      const elShift = document.getElementById("qm-fix-many-shift");
-      jamAwal = elAwal ? elAwal.value : "";
-      jamAkhir = elAkhir ? elAkhir.value : "";
-      shiftVal = elShift ? elShift.value : "";
-      if (!jamAwal || !jamAkhir || !shiftVal) {
-        UI.showResult('warning', 'Detail OT 7 Kosong', 'Silakan isi Jam Awal, Akhir, dan Shift.');
-        return;
-      }
-    }
-
-    const nrps = raw.split(/[,\n\s]+/).map(v => v.trim()).filter(Boolean);
-    const int = [], out = [], inv = [];
-    for (const nrp of nrps) {
-      if (/^\d{4}$/.test(nrp)) int.push(nrp);
-      else if (/^\d{8}$/.test(nrp)) out.push(nrp);
-      else inv.push(nrp);
-    }
-
-    if (inv.length) {
-      UI.showResult('danger', 'NRP Tidak Valid', 'Ditemukan NRP salah: ' + inv.slice(0, 3).join(', ') + (inv.length > 3 ? '...' : ''));
-      return;
-    }
-
-    const state = {
-      date: dateVal,
-      jenisOt: jO, jamAwal, jamAkhir, shiftVal,
-      internal: int, outsource: out,
-      indexes: { internal: 0, outsource: 0 }
-    };
-
-    sessionStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-
-    const current = getSpklAddPageKind();
-    const target = (int.length > 0 ? "internal" : "outsource");
-
-    if (current !== target) {
-      UI.showResult('success', 'Mengalihkan...', 'Pindah ke halaman input ' + target + '.');
-      setTimeout(() => { window.location.href = getSpklAddUrlByKind(target); }, 1000);
-    } else {
-      _processManyNrpPage(target, state);
-    }
-  }
-
-  async function _processManyNrpPage(route, s) {
-    const STORAGE_KEY = "hris_spkl_ot_runner_v1";
-    const tEl = document.querySelector("#tanggal");
-    const nEl = document.querySelector("#nrp_input");
-    const jEl = document.querySelector("#jenis_ot");
-    const tbBtn = document.querySelector("#btnTambah");
-    const sbBtn = document.querySelector("#submit");
-
-    if (!tEl || !nEl || !jEl || !tbBtn || !sbBtn) {
-      alert("Elemen form tidak lengkap. Pastikan berada di halaman input yang benar.");
-      return;
-    }
-
-    const list = s[route];
-    let idx = s.indexes[route];
-
-    for (; idx < list.length; idx++) {
-      const nrp = list[idx];
-      UI.setGlobalProgress((idx / list.length) * 100, `Batch NRP: ${nrp}`);
-
-      const setVal = (el, val) => setFieldValue(el, val);
-
-      setVal(tEl, s.date);
-      await new Promise(r => setTimeout(r, TIMING.SESSION_SAVE_DELAY));
-      setVal(nEl, nrp);
-      await new Promise(r => setTimeout(r, TIMING.SESSION_SAVE_DELAY2));
-      setVal(jEl, s.jenisOt);
-      await new Promise(r => setTimeout(r, TIMING.SESSION_SAVE_DELAY3));
-
-      if (s.jenisOt === "7") {
-        setVal(document.querySelector("#jam_awal_ot"), s.jamAwal);
-        setVal(document.querySelector("#jam_akhir_ot"), s.jamAkhir);
-        setVal(document.querySelector("#shift"), s.shiftVal);
-        await new Promise(r => setTimeout(r, TIMING.SESSION_SAVE_DELAY2));
-      }
-
-      tbBtn.click();
-      s.indexes[route] = idx + 1;
-      sessionStorage.setItem(STORAGE_KEY, JSON.stringify(s));
-      await new Promise(r => setTimeout(r, TIMING.SPKL_BATCH_NRP_CLICK_DELAY));
-    }
-
-    const nextR = (function (st) {
-      if (st.indexes.internal < st.internal.length) return "internal";
-      if (st.indexes.outsource < st.outsource.length) return "outsource";
-      return null;
-    })(s);
-
-    if (!nextR) {
-      sessionStorage.removeItem(STORAGE_KEY);
-      UI.setGlobalProgress(100, 'Selesai!');
-      sessionStorage.setItem(STORAGE.AUTO_FINISHED, 'true');
-    } else {
-      sessionStorage.setItem(STORAGE_KEY, JSON.stringify(s));
-    }
-    sbBtn.click();
-  }
-
-  async function runHadirManyNrpBatch() {
-    const elNrps = document.getElementById("qm-input-hadir-many-nrps");
-    const elDate = document.getElementById("qm-input-hadir-many-tanggal");
-    const elJam = document.getElementById("qm-input-hadir-many-jam");
-    const elStatus = document.getElementById("qm-input-hadir-many-status");
-
-    const raw = elNrps ? elNrps.value.trim() : "";
-    const dateVal = elDate ? elDate.value : "";
-    const jamVal = elJam ? elJam.value : "";
-    const statusVal = elStatus ? elStatus.value : "";
-
-    if (!raw || !dateVal || !jamVal || statusVal === "") {
-      UI.showResult('warning', 'Data Belum Lengkap', 'Silakan isi daftar NRP, Tanggal, Jam, dan Status.');
-      return;
-    }
-
-    sessionStorage.setItem(STORAGE.RETURN_URL, window.location.href);
-
-    const nrps = raw.split(/[,\n\s]+/).map(v => v.trim()).filter(Boolean);
-    const int = [], out = [], inv = [];
-    for (const nrp of nrps) {
-      if (/^\d{4}$/.test(nrp)) int.push(nrp);
-      else if (/^\d{8}$/.test(nrp)) out.push(nrp);
-      else inv.push(nrp);
-    }
-
-    if (inv.length) {
-      UI.showResult('danger', 'NRP Tidak Valid', 'Ditemukan NRP salah: ' + inv.slice(0, 3).join(', ') + (inv.length > 3 ? '...' : ''));
-      return;
-    }
-
-    const batchState = {
-      date: dateVal,
-      jam: jamVal,
-      status: statusVal,
-      internal: int,
-      outsource: out,
-      indexes: { internal: 0, outsource: 0 }
-    };
-
-    sessionStorage.setItem(STORAGE.HADIR_BATCH, JSON.stringify(batchState));
-
-    const current = getAbsenCreatePageKind();
-    const target = (int.length > 0 ? "internal" : "outsource");
-
-    if (current !== target) {
-      UI.showResult('success', 'Mengalihkan...', 'Pindah ke halaman input ' + target + '.');
-      const targetUrl = getAbsenCreateUrlByKind(target);
-      setTimeout(() => { window.location.href = targetUrl; }, 1000);
-    } else {
-      _processHadirManyNrpPage(target, batchState);
-    }
-  }
-
-  async function _processHadirManyNrpPage(route, s) {
-    const tEl = document.querySelector("#tanggal");
-    const nEl = document.querySelector("#nrp_input");
-    const jEl = document.querySelector("#jam");
-    const sEl = document.querySelector("#status");
-    const tbBtn = document.querySelector("#btnTambah");
-    const sbBtn = document.querySelector("#submit");
-
-    if (!tEl || !nEl || !jEl || !sEl || !tbBtn || !sbBtn) {
-      alert("Elemen form tidak lengkap. Pastikan berada di halaman input yang benar.");
-      return;
-    }
-
-    const list = s[route];
-    let idx = s.indexes[route];
-
-    UI.showGlobalLoader('Batch Kehadiran', 'Memulai...');
-
-    for (; idx < list.length; idx++) {
-      const nrp = list[idx];
-      UI.setGlobalProgress((idx / list.length) * 100, `Batch Kehadiran: ${nrp}`);
-
-      setFieldValue(tEl, s.date, ['change']);
-      setFieldValue(nEl, nrp, ['input', 'change']);
-      setFieldValue(jEl, s.jam, ['change']);
-      setFieldValue(sEl, s.status, ['change']);
-
-      await new Promise(r => setTimeout(r, 600));
-      tbBtn.click();
-
-      s.indexes[route] = idx + 1;
-      sessionStorage.setItem(STORAGE.HADIR_BATCH, JSON.stringify(s));
-      await new Promise(r => setTimeout(r, 1200));
-    }
-
-    const nextR = (function (st) {
-      if (st.indexes.internal < st.internal.length) return "internal";
-      if (st.indexes.outsource < st.outsource.length) return "outsource";
-      return null;
-    })(s);
-
-    if (!nextR) {
-      sessionStorage.removeItem(STORAGE.HADIR_BATCH);
-      UI.setGlobalProgress(100, 'Selesai!');
-      sessionStorage.setItem(STORAGE.AUTO_FINISHED, 'true');
-    } else {
-      sessionStorage.setItem(STORAGE.HADIR_BATCH, JSON.stringify(s));
-      const targetUrl = getAbsenCreateUrlByKind(nextR);
-      window.location.href = targetUrl;
-      return;
-    }
-    sbBtn.click();
-  }
-
-  function checkHadirBatchResume() {
-    const st = JSON.parse(sessionStorage.getItem(STORAGE.HADIR_BATCH) || "null");
-    if (st) {
-      const current = getAbsenCreatePageKind();
-
-      const pRoute = (function (s) {
-        if (current && s.indexes[current] < s[current].length) return current;
-        if (s.indexes.internal < s.internal.length) return "internal";
-        if (s.indexes.outsource < s.outsource.length) return "outsource";
-        return null;
-      })(st);
-
-      if (pRoute) {
-        if (current === pRoute) {
-          setTimeout(() => {
-            _processHadirManyNrpPage(pRoute, st);
-          }, 1500);
-        } else {
-          const targetUrl = getAbsenCreateUrlByKind(pRoute);
-          window.location.href = targetUrl;
-        }
-      }
-    }
-  }
-
-  /* ============================================================
-   * 21. AUTOMASI HADIR BULANAN
-   * ============================================================ */
-  async function runHadirBulanBatch() {
-    const elNrp = document.getElementById("qm-input-hadir-bulan-nrp");
-    const elBulan = document.getElementById("qm-input-hadir-bulan-bln");
-    const elTahun = document.getElementById("qm-input-hadir-bulan-thn");
-    const elHari = document.getElementById("qm-input-hadir-bulan-hari");
-    const elMasuk = document.getElementById("qm-input-hadir-bulan-masuk");
-    const elKeluar = document.getElementById("qm-input-hadir-bulan-keluar");
-
-    const NRP = elNrp ? elNrp.value.trim() : "";
-    const BULAN = elBulan ? parseInt(elBulan.value, 10) : 0;
-    const TAHUN = elTahun ? parseInt(elTahun.value, 10) : 2026;
-    const HARI_KERJA = elHari ? parseInt(elHari.value, 10) : 5;
-    const jamMasuk = elMasuk ? elMasuk.value : "07:00";
-    const jamKeluar = elKeluar ? elKeluar.value : "15:00";
-
-    if (!NRP || !/^\d{4}$|^\d{8}$/.test(NRP)) {
-      UI.showResult('warning', 'NRP Tidak Valid', 'Gunakan 4 digit (Reguler) atau 8 digit (OS).');
-      return;
-    }
-
-    if (!BULAN || BULAN < 1 || BULAN > 12) {
-      UI.showResult('warning', 'Bulan Tidak Valid', 'Silakan pilih bulan.');
-      return;
-    }
-
-    UI.showGlobalLoader('Kalender Disiapkan', 'Menghitung hari kerja...');
-
-    const liburBulanIni = LIBUR_NASIONAL_2026[BULAN] || [];
-    const hariValid = [];
-    const jumlahHariSeBulan = new Date(TAHUN, BULAN, 0).getDate();
-
-    for (let tanggal = 1; tanggal <= jumlahHariSeBulan; tanggal++) {
-      const dateObj = new Date(TAHUN, BULAN - 1, tanggal);
-      const hari = dateObj.getDay(); // 0: Sunday, 6: Saturday
-      const isWeekend = (HARI_KERJA === 5) ? (hari === 0 || hari === 6) : (hari === 0);
-
-      if (!isWeekend && !liburBulanIni.includes(tanggal)) {
-        hariValid.push(tanggal);
-      }
-    }
-
-    if (hariValid.length === 0) {
-      UI.showResult('warning', 'Tidak Ada Hari Kerja', 'Bulan ini tidak memiliki hari kerja valid.');
-      UI.hideGlobalLoader();
-      return;
-    }
-
-    const antrean = [];
-    const bulanStr = String(BULAN).padStart(2, '0');
-    hariValid.forEach(tgl => {
-      const tglStr = String(tgl).padStart(2, '0');
-      antrean.push({ waktu: `${TAHUN}-${bulanStr}-${tglStr}T${jamMasuk}`, status: "1", label: "Masuk" });
-      antrean.push({ waktu: `${TAHUN}-${bulanStr}-${tglStr}T${jamKeluar}`, status: "0", label: "Keluar" });
-    });
-
-    sessionStorage.setItem('qm_auto_hadir_bulan_active', 'true');
-    sessionStorage.setItem('qm_auto_hadir_bulan_nrp', NRP);
-    sessionStorage.setItem('qm_auto_hadir_bulan_antrean', JSON.stringify(antrean));
-    sessionStorage.setItem(STORAGE.RETURN_URL, window.location.href);
-
-    const targetURL = getAbsenAddUrl(NRP);
-
-    UI.setGlobalProgress(100, 'Berhasil! Mengalihkan...');
-    setTimeout(() => {
-      window.location.href = targetURL;
-    }, 1200);
-  }
-
-  async function checkHadirBulanResume() {
-    if (sessionStorage.getItem('qm_auto_hadir_bulan_active') !== 'true') return;
-
-    const NRP = sessionStorage.getItem('qm_auto_hadir_bulan_nrp');
-    const antrean = JSON.parse(sessionStorage.getItem('qm_auto_hadir_bulan_antrean') || "[]");
-
-    if (!NRP || antrean.length === 0) {
-      sessionStorage.removeItem('qm_auto_hadir_bulan_active');
-      return;
-    }
-
-    // Check if we are on the correct page
-    const isAddPage = isBarcodeAddPagePath();
-    if (!isAddPage) return;
-
-    UI.showGlobalLoader('Automasi Berjalan', `Sisa data: ${antrean.length / 2} hari`);
-
-    const inputNrp = document.getElementById('nrp_input');
-    const inputTanggal = document.getElementById('tanggal');
-    const inputStatus = document.getElementById('status');
-    const btnTambah = document.getElementById('btnTambah');
-
-    if (!inputNrp || !inputTanggal || !inputStatus || !btnTambah) {
-      Logger.warn('Elemen form tidak ditemukan untuk resume automasi.');
-      return;
-    }
-
-    // Start processing the queue
-    for (let i = 0; i < antrean.length; i++) {
-      const aksi = antrean[i];
-      UI.setGlobalProgress((i / antrean.length) * 100, `Menyuntikkan: ${aksi.label} | ${aksi.waktu.split('T')[0]}`);
-
-      setFieldValue(inputNrp, NRP, ['input', 'change']);
-      setFieldValue(inputTanggal, aksi.waktu, ['input', 'change']);
-      setFieldValue(inputStatus, aksi.status, ['change']);
-
-      if (window.jQuery && window.jQuery(inputStatus).selectpicker) {
-        window.jQuery(inputStatus).selectpicker('refresh');
-      }
-
-      await new Promise(r => setTimeout(r, 500));
-      btnTambah.click();
-      await new Promise(r => setTimeout(r, 1000));
-    }
-
-    sessionStorage.removeItem('qm_auto_hadir_bulan_active');
-    sessionStorage.removeItem('qm_auto_hadir_bulan_nrp');
-    sessionStorage.removeItem('qm_auto_hadir_bulan_antrean');
-
-    UI.setGlobalProgress(100, 'Selesai! Menyimpan...');
-    const btnSubmit = document.getElementById('submit');
-    if (btnSubmit) {
-      sessionStorage.setItem(STORAGE.AUTO_FINISHED, 'true');
-      setTimeout(() => btnSubmit.click(), 500);
-    } else {
-      UI.hideGlobalLoader(1500);
-      alert(`[Quick Menu] Automasi Selesai!\n- NRP: ${NRP}\n- Total dieksekusi: ${antrean.length} baris.\nSilakan klik Simpan secara manual.`);
-    }
-  }
-
-  /* ============================================================
-   * 22. EVENT HANDLERS
-   * ============================================================ */
-  function onExportAnomali() {
-    if (state.anomalies.length === 0) { alert('Tidak ada anomali untuk diekspor.'); return; }
-    const wsData = [['Tanggal', 'Kolom', 'Pesan Anomali']];
-    const sorted = [...state.anomalies].sort((a, b) => parseInt(a.tgl) - parseInt(b.tgl));
-    sorted.forEach(a => wsData.push([a.tgl, a.col, a.msg]));
-    if (typeof XLSX !== 'undefined') {
-      const ws = XLSX.utils.aoa_to_sheet(wsData);
-      const wb = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(wb, ws, 'Anomali');
-      const inputBulan = document.getElementById('qm-input-bulan');
-      const month = (inputBulan && inputBulan.value) ? inputBulan.value : (new Date().getMonth() + 1);
-      XLSX.writeFile(wb, `Anomali_Bulan_${month}.xlsx`);
-    } else {
-      alert('Library XLSX gagal dimuat. Harap periksa koneksi atau header script.');
-    }
-  }
-
-  function onToggleAnomalyGroup(e) {
-    if (e.target.closest('.qm-fix-dot') || e.target.closest('.qm-batch-fix-btn')) return;
-
-    const content = this.nextElementSibling;
-    if (content && content.classList.contains('qm-anomaly-group-content')) {
-      const expanded = this.classList.toggle('expanded');
-      // Gunakan class 'qm-content-open' pada content agar tidak bentrok dengan
-      // selector CSS '.expanded' yang bisa bocor ke elemen lain
-      content.classList.toggle('qm-content-open', expanded);
-
-      const tgl = this.dataset.tgl;
-      if (tgl) {
-        if (expanded) state.expandedAnomalyGroups.add(String(tgl));
-        else state.expandedAnomalyGroups.delete(String(tgl));
-      }
-    }
-  }
-
-  function onCekSpklOnline() {
-    const nrp = document.getElementById('qm-spkl-online-nrp')?.value.trim();
-    const dateInput = document.getElementById('qm-spkl-online-date')?.value;
-    if (!nrp || !dateInput) { alert('Harap isi NRP dan Tanggal.'); return; }
-
-    const d = new Date(dateInput);
-    const day = String(d.getDate()).padStart(2, '0');
-    const month = String(d.getMonth() + 1).padStart(2, '0');
-    const year = d.getFullYear();
-
-    const url = ROUTES.SPKL_ONLINE(year, month, day, day, nrp);
-    window.open(url, '_blank');
-  }
-
-  function onProsesInputHadir() {
-    const nrp = document.getElementById('qm-input-hadir-nrp')?.value.trim();
-    const tgl = document.getElementById('qm-input-hadir-tanggal')?.value;
-    const jam = document.getElementById('qm-input-hadir-jam')?.value;
-    const status = document.getElementById('qm-input-hadir-status')?.value;
-
-    if (!nrp || !tgl || !jam || status === "") {
-      alert('Harap isi semua field (NRP, Tanggal, Jam, dan Status).');
-      return;
-    }
-
-    sessionStorage.setItem(STORAGE.RETURN_URL, window.location.href);
-
-    const data = { nrp, tgl, jam, status };
-    sessionStorage.setItem(STORAGE.INPUT_HADIR, JSON.stringify(data));
-
-    const targetUrl = getAbsenCreateUrl(nrp);
-    window.open(targetUrl, '_blank');
-  }
-
-  function onProsesDistribusi() {
-    onSaveJkChange();
-  }
-
-  function onKeydownAnomalyGroup(e) {
-    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); this.click(); }
-  }
-
-  function onFixDotClick(e) {
-    e.stopPropagation();
-    handleFixClick(
-      this.getAttribute('data-fix-link'),
-      this.getAttribute('data-fix-date'),
-      this.getAttribute('title'),
-      this.getAttribute('data-full-date')
-    );
-  }
-
-  function onTabClick() {
-    const pane = this.getAttribute('data-pane');
-    document.querySelectorAll('.qm-tab').forEach(el => el.classList.remove('active'));
-    this.classList.add('active');
-    document.querySelectorAll('.qm-pane').forEach(el => el.classList.remove('active'));
-    const targetPane = document.getElementById(`qm-pane-${pane}`);
-    if (targetPane) targetPane.classList.add('active');
-    localStorage.setItem('qm_last_tab', pane);
-
-    if (pane === 'distribusi' || pane === 'check-nrp' || pane === 'spkl' || pane === 'kehadiran') {
-      refreshGlobalData();
-    }
-  }
-
-  function onInputBulan() {
-    const val = parseInt(this.value);
-    if (isNaN(val)) return;
-    if (val < 1) this.value = 1;
-    else if (val > 12) this.value = 12;
-  }
-
-  function onDocumentClick(e) {
-    if (state.isOpen && !e.target.closest('#qm-panel, #qm-fab, #qm-backdrop')) closePanel();
-  }
-
-  function onRecordShortcut() {
-    isRecordingShortcut = true;
-    this.textContent = 'Tunggu...';
-    document.getElementById('qm-input-shortcut').value = 'Tekan tombol...';
-  }
-
-  function onBatchNrpClick(e) {
-    e.preventDefault();
-    var nrp = this.getAttribute('data-nrp');
-    if (!nrp) return;
-    var url = getAttendanceUrl(state.batchBulan, state.batchTahun, nrp);
-    window.open(url, '_blank');
-  }
-
-  function onBatchFixClick(e) {
-    e.stopPropagation();
-    handleFixClick(
-      this.getAttribute('data-fix-link'),
-      this.getAttribute('data-fix-date'),
-      this.getAttribute('title'),
-      this.getAttribute('data-full-date')
-    );
-  }
-
-  function onKeydownDocument(e) {
-    if (isRecordingShortcut) {
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        isRecordingShortcut = false;
-        const btn = document.getElementById('qm-btn-record-shortcut');
-        if (btn) btn.textContent = 'Ubah';
-        const input = document.getElementById('qm-input-shortcut');
-        if (input) input.value = shortcutKey;
-        return;
-      }
-      e.preventDefault();
-      const keys = [];
-      if (e.ctrlKey) keys.push('Ctrl');
-      if (e.altKey) keys.push('Alt');
-      if (e.shiftKey) keys.push('Shift');
-      if (['Control', 'Alt', 'Shift', 'Meta'].includes(e.key)) return;
-      keys.push(e.key.length === 1 ? e.key.toUpperCase() : e.key);
-      shortcutKey = keys.join('+');
-      const input = document.getElementById('qm-input-shortcut');
-      if (input) input.value = shortcutKey;
-      const btn = document.getElementById('qm-btn-record-shortcut');
-      if (btn) btn.textContent = 'Ubah';
-      GM_setValue('qm_shortcut', shortcutKey);
-      isRecordingShortcut = false;
-      return;
-    }
-
-    if (e.key === 'Escape' && state.isOpen) {
-      closePanel();
-      return;
-    }
-
-    if (shortcutKey) {
-      const parts = shortcutKey.split('+');
-      const key = parts[parts.length - 1].toLowerCase();
-      if (e.key.toLowerCase() === key && e.ctrlKey === parts.includes('Ctrl') && e.shiftKey === parts.includes('Shift') && e.altKey === parts.includes('Alt')) {
-        const targetTag = e.target.tagName.toLowerCase();
-        if ((targetTag === 'input' || targetTag === 'textarea') && parts.length === 1) return;
-        e.preventDefault();
-        togglePanel();
-      }
-    }
-  }
-
-  function onToggleDebugMode() {
-    state.debug = this.checked;
-    GM_setValue('qm_debug', state.debug);
-    Logger.info(`Debug mode ${state.debug ? 'diaktifkan' : 'dimatikan'}`);
-  }
-
-  function onShowLogs() {
-    const container = document.getElementById('qm-log-container');
-    const btn = document.getElementById('qm-btn-show-logs');
-    if (container && btn) {
-      const isHidden = container.classList.toggle('qm-hidden');
-      if (!isHidden) {
-        btn.classList.add('qm-active');
-        renderLogs();
-        btn.querySelector('span').textContent = 'Sembunyikan Log';
-      } else {
-        btn.classList.remove('qm-active');
-        btn.querySelector('span').textContent = 'Lihat Log Aktivitas';
-      }
-    }
-  }
-
-  function onClearLogs() {
-    if (confirm('Bersihkan semua riwayat log aktivitas?')) {
-      state.batchLogs = [];
-      renderLogs();
-    }
-  }
-
-  function onExportLogs() {
-    if (state.batchLogs.length === 0) {
-      alert('Tidak ada log untuk diekspor.');
-      return;
-    }
-    const content = state.batchLogs.map(l => {
-      const level = (l.level || l.type || 'info').toUpperCase();
-      return `[${l.time}] [${level}] ${l.msg}`;
-    }).join('\n');
-
-    const header = `# HRIS Quick Menu Activity Log\nExported: ${new Date().toLocaleString()}\n\n`;
-    const blob = new Blob([header + '```\n' + content + '\n```'], { type: 'text/markdown' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `hris_log_${new Date().toISOString().slice(0, 10)}.md`;
-    a.click();
-    URL.revokeObjectURL(url);
-    Logger.info('Log diekspor ke format Markdown (.md).');
   }
 
   function renderLogs() {
@@ -5187,575 +5014,10 @@
     logBody.scrollTop = logBody.scrollHeight;
   }
 
-  let manualSidebarOverride = false;
-  function enforceSidebar() {
-    if (!alwaysCollapseMenu || manualSidebarOverride) return;
-    if (!document.body.classList.contains('enlarged')) {
-      document.body.classList.add('enlarged');
-      document.body.classList.remove('sidebar-enable');
-    }
-  }
-
-  function autoClickAddData() {
-    if (!isBarcodePagePath()) return;
-    if (sessionStorage.getItem('qm_auto_add_data') === 'true') {
-      sessionStorage.removeItem('qm_auto_add_data');
-      setTimeout(() => {
-        const btn = document.querySelector('[data-target="#addData"]');
-        if (btn) btn.click();
-
-        // Fill NRP and Date if available
-        const nrpFill = sessionStorage.getItem(STORAGE.AUTO_NRP_FILL);
-        const dateFill = sessionStorage.getItem(STORAGE.AUTO_DATE_FILL);
-        if (nrpFill || dateFill) {
-          setTimeout(() => {
-            if (nrpFill) {
-              const nrpInput = document.getElementById('nrp_input');
-              if (nrpInput) {
-                setFieldValue(nrpInput, nrpFill, ['input', 'change']);
-              }
-              sessionStorage.removeItem(STORAGE.AUTO_NRP_FILL);
-            }
-            if (dateFill) {
-              const dateInput = document.getElementById('tanggal');
-              if (dateInput) {
-                const ctx = getPageContext();
-                const fullDate = `${ctx.tahun}-${String(ctx.bulan).padStart(2, '0')}-${String(dateFill).padStart(2, '0')}`;
-                setFieldValue(dateInput, fullDate, ['change']);
-              }
-              sessionStorage.removeItem(STORAGE.AUTO_DATE_FILL);
-            }
-          }, 600);
-        }
-      }, 500);
-    }
-  }
-
-  function autoInputHadir() {
-    if (!isBarcodeCreatePagePath()) return;
-
-    const saved = sessionStorage.getItem(STORAGE.INPUT_HADIR);
-    if (!saved) return;
-
-    const data = JSON.parse(saved);
-    sessionStorage.removeItem(STORAGE.INPUT_HADIR);
-
-    UI.showGlobalLoader('Auto Input Kehadiran', 'Mengisi data...');
-
-    setTimeout(async () => {
-      try {
-        const elTgl = document.getElementById('tanggal');
-        const elNrp = document.getElementById('nrp_input');
-        const elJam = document.getElementById('jam');
-        const elStatus = document.getElementById('status');
-        const btnTambah = document.getElementById('btnTambah');
-        const btnSubmit = document.getElementById('submit');
-
-        if (elTgl) setFieldValue(elTgl, data.tgl, ['change']);
-        if (elNrp) setFieldValue(elNrp, data.nrp, ['input', 'change']);
-        if (elJam) setFieldValue(elJam, data.jam, ['change']);
-        if (elStatus) setFieldValue(elStatus, data.status, ['change']);
-
-        await new Promise(r => setTimeout(r, 600));
-        if (btnTambah) btnTambah.click();
-
-        await new Promise(r => setTimeout(r, 800));
-        if (btnSubmit) {
-          sessionStorage.setItem(STORAGE.AUTO_FINISHED, 'true');
-          btnSubmit.click();
-        }
-
-        UI.hideGlobalLoader();
-      } catch (e) {
-        Logger.error('Auto Input Kehadiran Error', e);
-        UI.hideGlobalLoader();
-      }
-    }, 1000);
-  }
-
   /* ============================================================
-   * 23A. STORAGE & DOM VALIDATION
+   * 12. JK/KK CHANGE LOGIC
    * ============================================================ */
 
-  /**
-   * Validates sessionStorage schema version. Clears all qm_* keys if
-   * the version is missing or does not match the current STORAGE_SCHEMA_VERSION.
-   * @returns {boolean} true if schema was already valid, false if it was cleared.
-   */
-  function validateStorageSchema() {
-    const stored = sessionStorage.getItem(STORAGE.SCHEMA_VERSION);
-    if (stored === String(STORAGE_SCHEMA_VERSION)) return true;
-
-    const keysToRemove = [];
-    for (let i = 0; i < sessionStorage.length; i++) {
-      const key = sessionStorage.key(i);
-      if (key && key.startsWith('qm_')) keysToRemove.push(key);
-    }
-    keysToRemove.forEach(k => sessionStorage.removeItem(k));
-    sessionStorage.setItem(STORAGE.SCHEMA_VERSION, String(STORAGE_SCHEMA_VERSION));
-    Logger.info(`Schema versi lama (${stored || 'kosong'}) dihapus. Versi baru: ${STORAGE_SCHEMA_VERSION}`);
-    return false;
-  }
-
-  /**
-   * Validates critical DOM selectors based on the current page type.
-   * @param {{ silent?: boolean }} options - If silent is true, suppresses UI notification
-   * @returns {{ valid: boolean, missing: string[] }}
-   */
-  function validateDomStructure(options) {
-    const silent = options && options.silent;
-    const missing = [];
-
-    if (isAttendancePagePath()) {
-      if (!document.querySelector('table tbody tr')) {
-        missing.push('table tbody tr (tabel kehadiran)');
-      } else {
-        const headers = Array.from(document.querySelectorAll('table th'));
-        const headerTexts = headers.map(th => th.textContent.trim().toLowerCase());
-        const requiredHeaders = ['tanggal', 'msk', 'klr'];
-        const missingHeaders = requiredHeaders.filter(h => !headerTexts.some(t => t.includes(h)));
-        if (missingHeaders.length > 0) {
-          missing.push('kolom header: ' + missingHeaders.join(', ') + ' (tabel kehadiran)');
-        }
-      }
-    }
-    if (isBarcodeCreatePagePath()) {
-      if (!document.querySelector('form')) missing.push('form (barcode create)');
-    }
-    if (isDistribusiKalenderPagePath()) {
-      if (!document.querySelector('form')) missing.push('form (distribusi kalender)');
-    }
-    if (isSpklPagePath()) {
-      if (!document.querySelector('table')) {
-        missing.push('table (SPKL)');
-      } else {
-        const headers = Array.from(document.querySelectorAll('table th'));
-        const headerTexts = headers.map(th => th.textContent.trim().toLowerCase());
-        const hasDateCol = headerTexts.some(t => t.includes('tanggal') || t === 'tgl');
-        if (!hasDateCol) {
-          missing.push('kolom tanggal (tabel SPKL)');
-        }
-      }
-    }
-
-    const valid = missing.length === 0;
-    if (!valid) {
-      Logger.warn('Validasi DOM gagal. Elemen tidak ditemukan: ' + missing.join(', '));
-      if (!silent) {
-        UI.showResult('warning', 'Struktur Halaman Berubah', 'Elemen kritis tidak ditemukan: ' + missing.join(', ') + '. Beberapa fitur mungkin tidak berfungsi.');
-      }
-    }
-    return { valid, missing };
-  }
-
-  /* ============================================================
-   * 23. INIT
-   * ============================================================ */
-  function init() {
-
-    const schemaValid = validateStorageSchema();
-
-    spklHighlight();
-    autoFillTargetPage();
-    autoClickAddData();
-    autoInputHadir();
-    autoDistribusi();
-    autoDistribusiSubsi();
-    autoDistKK();
-    checkSpklBatchResume();
-    checkHadirBatchResume();
-    checkHadirBulanResume();
-    initJkChangeEvents();
-    checkJkRestoration();
-
-
-
-    // Return to source page after process finish (autoDistribusi result page)
-    const returnUrl = sessionStorage.getItem(STORAGE.RETURN_URL);
-    const isFinished = sessionStorage.getItem(STORAGE.AUTO_FINISHED) === 'true';
-    const hasRestorationPending = sessionStorage.getItem('qm_jk_to_restore_' + getPageContext().nrp);
-
-    if (isFinished && returnUrl) {
-      const currentUrl = window.location.href.split('?')[0];
-      const targetUrlBase = returnUrl.split('?')[0];
-      const isReturnPage = currentUrl === targetUrlBase || window.location.href.includes(returnUrl);
-
-      if (isReturnPage) {
-        // We are back at the start page. Cleanup if no restoration is pending.
-        if (!hasRestorationPending) {
-          sessionStorage.removeItem(STORAGE.AUTO_FINISHED);
-          sessionStorage.removeItem(STORAGE.RETURN_URL);
-          UI.showResult('success', 'Selesai', 'Tugas latar belakang telah diselesaikan.');
-
-          // If on attendance table, trigger anomaly refresh to show the fix
-          if (isAttendancePagePath()) {
-            setTimeout(() => {
-              const btn = document.querySelector('[data-pane="anomali"]');
-              if (btn) btn.click();
-            }, 500);
-          }
-        }
-      } else if (!window.location.search.includes('qm_auto')) {
-        // We are on a result page, redirect back
-        UI.showGlobalLoader('Selesai', 'Kembali ke halaman awal...');
-        setTimeout(() => {
-          window.location.href = returnUrl;
-        }, 1500);
-      }
-    }
-
-    if (!document.getElementById('qm-fab')) {
-      document.body.insertAdjacentHTML('beforeend', HTML);
-
-      // Default NRP for FIX Panel
-      const ctx = getPageContext();
-      const elFixNrp = document.getElementById('qm-fix-spkl-nrp');
-      if (elFixNrp && ctx.nrp) elFixNrp.value = ctx.nrp;
-
-      const elBulanNrp = document.getElementById('qm-input-hadir-bulan-nrp');
-      if (elBulanNrp && ctx.nrp) elBulanNrp.value = ctx.nrp;
-
-      const elDistNrp = document.getElementById('qm-input-distribusi-nrp');
-      if (elDistNrp && ctx.nrp) elDistNrp.value = ctx.nrp;
-
-      const elDistKKNrp = document.getElementById('qm-dist-KK-nrp');
-      if (elDistKKNrp && ctx.nrp) elDistKKNrp.value = ctx.nrp;
-
-      const now = new Date();
-      const currentMonth = now.getMonth() + 1;
-      const currentYear = now.getFullYear();
-
-      // Populate Month Select
-      const monthNames = ['Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni', 'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'];
-      const monthOptions = monthNames.map((name, i) => `<option value="${i + 1}" ${i + 1 === currentMonth ? 'selected' : ''}>${name}</option>`).join('');
-
-      const inputBulan = document.getElementById('qm-input-bulan');
-      if (inputBulan) setInnerHTML(inputBulan, monthOptions);
-
-      const fixBulan = document.getElementById('qm-fix-spkl-bulan');
-      if (fixBulan) setInnerHTML(fixBulan, monthOptions);
-
-      const bulanBulan = document.getElementById('qm-input-hadir-bulan-bln');
-      if (bulanBulan) setInnerHTML(bulanBulan, monthOptions);
-
-      // Populate Year Select
-      let years = '';
-      for (let y = currentYear - 2; y <= currentYear + 1; y++) {
-        years += `<option value="${y}" ${y === currentYear ? 'selected' : ''}>${y}</option>`;
-      }
-
-      const inputTahun = document.getElementById('qm-input-tahun');
-      if (inputTahun) setInnerHTML(inputTahun, years);
-
-      const fixTahun = document.getElementById('qm-fix-spkl-tahun');
-      if (fixTahun) setInnerHTML(fixTahun, years);
-
-      // Default date for Banyak NRP
-      const elManyDate = document.getElementById('qm-fix-many-date');
-      if (elManyDate) {
-        elManyDate.value = `${currentYear}-${String(currentMonth).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
-      }
-
-      const elDistKKDate = document.getElementById('qm-dist-KK-date');
-      if (elDistKKDate) {
-        elDistKKDate.value = `${currentYear}-${String(currentMonth).padStart(2, '0')}`;
-      }
-
-      const elDistDate = document.getElementById('qm-input-distribusi-tanggal');
-      if (elDistDate) {
-        elDistDate.value = `${currentYear}-${String(currentMonth).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
-      }
-
-      // Apply Theme
-      UI.applyTheme(state.theme);
-
-      // Restore Last Tab
-      const lastTab = localStorage.getItem('qm_last_tab');
-      if (lastTab) {
-        const tabBtn = document.querySelector(`.qm-tab[data-pane="${lastTab}"]`);
-        if (tabBtn) tabBtn.click();
-      }
-      initDraggable();
-      delegate('change', '#qm-config-debug-mode', onToggleDebugMode);
-      delegate('click', '#qm-btn-show-logs', onShowLogs);
-      delegate('click', '#qm-btn-clear-logs', onClearLogs);
-      delegate('click', '#qm-btn-export-logs', onExportLogs);
-    }
-    detectAnomalies();
-
-    if (!schemaValid) {
-      UI.showResult('warning', 'Data Direset', 'Versi data sesi tidak cocok. Data lama telah dibersihkan.');
-    }
-
-    // Validate DOM structure with polling to handle dynamic content loading
-    if (isAttendancePagePath() || isBarcodeCreatePagePath() || isDistribusiKalenderPagePath() || isSpklPagePath()) {
-      let domCheckAttempts = 0;
-      const maxDomCheckAttempts = 10; // 10 x 200ms = 2s max
-      const domCheckInterval = setInterval(function () {
-        domCheckAttempts++;
-        const isFinalAttempt = domCheckAttempts >= maxDomCheckAttempts;
-        const result = validateDomStructure({ silent: !isFinalAttempt });
-        if (result.valid || isFinalAttempt) {
-          clearInterval(domCheckInterval);
-        }
-      }, 200);
-    }
-
-    document.addEventListener('keydown', onKeydownDocument);
-    document.addEventListener('click', onDocumentClick);
-
-    delegate('click', '#qm-fab', togglePanel);
-    delegate('click', '#qm-backdrop', closePanel);
-    delegate('click', '#qm-btn-close-header', closePanel);
-    delegate('click', '#qm-btn-check', checkNrp);
-    delegate('click', '#qm-btn-spkl-batch', runSpklBatchProcess);
-    delegate('click', '#qm-btn-spkl-many-nrp', runSpklManyNrpBatch);
-    delegate('click', '#qm-btn-spkl-online-cek', onCekSpklOnline);
-    delegate('click', '#qm-btn-hadir-proses', onProsesInputHadir);
-    delegate('click', '#qm-btn-hadir-bulan-proses', runHadirBulanBatch);
-    delegate('click', '#qm-btn-hadir-many-proses', runHadirManyNrpBatch);
-    delegate('click', '#qm-btn-distribusi-proses', onProsesDistribusi);
-    delegate('click', '#qm-btn-distribusi-subsi-proses', onProsesDistribusiSubsi);
-    delegate('click', '#qm-global-cancel-btn', function () {
-      Logger.info('User cancelled automation');
-      sessionStorage.removeItem(STORAGE.SPKL_QUEUE);
-      sessionStorage.removeItem(STORAGE.SPKL_CURRENT_INDEX);
-      sessionStorage.removeItem(STORAGE.SPKL_FIX_PENDING);
-      sessionStorage.removeItem(STORAGE.AUTO_FINISHED);
-      UI.hideGlobalLoader(0);
-      UI.showResult('info', 'Dibatalkan', 'Proses otomasi dihentikan oleh pengguna.');
-    });
-
-    delegate('click', '.qm-progress-container', () => {
-      const tabBtn = document.querySelector('.qm-tab[data-pane="config"]');
-      if (tabBtn) tabBtn.click();
-      const btn = document.getElementById('qm-btn-show-logs');
-      if (container && btn) {
-        container.classList.remove('qm-hidden');
-        btn.classList.add('qm-active');
-        renderLogs();
-        btn.querySelector('span').textContent = 'Sembunyikan Log';
-      }
-    });
-
-    delegate('keydown', '#qm-spkl-online-nrp', function (e) {
-      if (e.key === 'Enter') { e.preventDefault(); document.getElementById('qm-btn-spkl-online-cek')?.click(); }
-    });
-
-    delegate('change', '#qm-fix-many-ot', function () {
-      const box = document.getElementById('qm-fix-many-ot7-box');
-      if (box) {
-        if (this.value === '7') box.classList.remove('qm-hidden');
-        else box.classList.add('qm-hidden');
-      }
-    });
-
-    delegate('input', '#qm-fix-spkl-data', function () {
-      const box = document.getElementById('qm-fix-spkl-ot7-box');
-      if (box) {
-        const has7 = this.value.split(/[,\n]+/).some(item => {
-          const parts = item.trim().split(/[-:=]/);
-          return parts.length > 1 && parts[1].trim() === '7';
-        });
-        if (has7) box.classList.remove('qm-hidden');
-        else box.classList.add('qm-hidden');
-      }
-    });
-
-    delegate('keydown', '#qm-input-nrp', function (e) {
-      if (e.key === 'Enter') {
-        e.preventDefault();
-        const nrp = this.value.trim();
-        if (nrp.length >= 4) {
-          refreshGlobalData(nrp);
-        }
-      }
-    });
-
-    // Sync other NRP inputs too
-    delegate('input', '#qm-spkl-online-nrp, #qm-fix-spkl-nrp, #qm-input-hadir-nrp, #qm-input-hadir-bulan-nrp', function () {
-      const nrp = this.value.trim();
-      if (nrp.length >= 4) {
-        refreshGlobalData(nrp);
-      }
-    });
-
-    // Sync Month/Year changes
-    delegate('change', '#qm-input-bulan, #qm-input-tahun, #qm-fix-spkl-bulan, #qm-fix-spkl-tahun, #qm-input-hadir-bulan-bln', function () {
-      refreshGlobalData();
-    });
-
-    // General Keyboard Navigation for forms
-    initKeyboardNavigation();
-
-    delegate('click', '.qm-tab', onTabClick);
-    delegate('click', '.qm-fix-dot', onFixDotClick);
-    delegate('click', '.qm-btn-fix-pill', onFixDotClick);
-
-    delegate('click', '#qm-btn-batch-check', function (e) {
-      if (this.dataset.running) {
-        onBatchCancel();
-      } else {
-        runBatchCheck();
-      }
-    });
-    delegate('mouseover', '#qm-btn-batch-check', function (e) {
-      if (this.dataset.running) {
-        this.classList.add('qm-btn-danger');
-        this.textContent = 'Batal';
-      }
-    });
-    delegate('mouseout', '#qm-btn-batch-check', function (e) {
-      if (this.dataset.running) {
-        this.classList.remove('qm-btn-danger');
-        this.textContent = 'Memproses...';
-      }
-    });
-    delegate('click', '#qm-btn-export-batch', exportBatchResults);
-    delegate('click', '.qm-batch-nrp-link', onBatchNrpClick);
-    delegate('click', '.qm-batch-fix-btn', onBatchFixClick);
-
-    // Batch Grouping (Bagian)
-    delegate('click', '.qm-batch-group-header', function () {
-      const targetSelector = this.dataset.target;
-      const rows = document.querySelectorAll(targetSelector);
-      const isExpanded = this.classList.contains('expanded');
-      this.classList.toggle('expanded');
-      rows.forEach(r => {
-        if (isExpanded) {
-          r.classList.add('qm-hidden');
-          r.classList.remove('qm-table-row', 'expanded'); // Collapse sub-groups too
-        } else {
-          if (r.classList.contains('qm-batch-seksi-header')) {
-            r.classList.remove('qm-hidden');
-            r.classList.add('qm-table-row');
-          } else {
-            r.classList.add('qm-hidden');
-            r.classList.remove('qm-table-row');
-          }
-        }
-      });
-    });
-
-    // Batch Grouping (Seksi)
-    delegate('click', '.qm-batch-seksi-header', function () {
-      const targetSelector = this.dataset.target;
-      const rows = document.querySelectorAll(targetSelector);
-      const isExpanded = this.classList.contains('expanded');
-      this.classList.toggle('expanded');
-      rows.forEach(r => {
-        if (isExpanded) {
-          r.classList.add('qm-hidden');
-          r.classList.remove('qm-table-row');
-        } else {
-          r.classList.remove('qm-hidden');
-          r.classList.add('qm-table-row');
-        }
-      });
-    });
-
-    delegate('click', '.qm-batch-date-header', function (e) {
-      if (e.target.closest('.qm-batch-fix-btn')) return;
-      const content = this.nextElementSibling;
-      this.classList.toggle('expanded');
-      if (content) {
-        content.classList.toggle('qm-hidden');
-        content.classList.toggle('qm-visible-block');
-      }
-    });
-
-    // 14. Accordion Toggle for FIX Panel
-    delegate('click', '.qm-accordion-header', function () {
-      this.classList.toggle('expanded');
-      const content = this.nextElementSibling;
-      if (content) {
-        content.classList.toggle('qm-content-open');
-      }
-    });
-
-    const collapseCheckbox = document.getElementById('qm-config-collapse-menu');
-    if (collapseCheckbox) {
-      collapseCheckbox.checked = alwaysCollapseMenu;
-      delegate('change', '#qm-config-collapse-menu', function () {
-        alwaysCollapseMenu = this.checked;
-        GM_setValue('qm_always_collapse', alwaysCollapseMenu);
-        if (alwaysCollapseMenu) {
-          enforceSidebar();
-        } else {
-          document.body.classList.remove('enlarged');
-        }
-      });
-    }
-
-    // Theme Switcher
-    delegate('click', '#qm-btn-theme-light', () => UI.applyTheme('light'));
-    delegate('click', '#qm-btn-theme-dark', () => UI.applyTheme('dark'));
-
-    enforceSidebar();
-    const _sidebarObserver = new MutationObserver(enforceSidebar);
-    _sidebarObserver.observe(document.body, { attributes: true, attributeFilter: ['class'] });
-
-    const shortcutInput = document.getElementById('qm-input-shortcut');
-    if (shortcutInput) shortcutInput.value = shortcutKey;
-    delegate('click', '#qm-btn-record-shortcut', onRecordShortcut);
-
-    // Sidebar Manual Override
-    delegate('click', '.button-menu-mobile, .open-left, #sidebar-menu', function () {
-      manualSidebarOverride = true;
-    });
-
-    // Make accordions keyboard accessible
-    document.querySelectorAll('.qm-accordion-header').forEach(el => {
-      if (!el.hasAttribute('tabindex')) el.setAttribute('tabindex', '0');
-    });
-  }
-
-  /**
-   * 16B. KEYBOARD NAVIGATION HELPERS
-   */
-  function initKeyboardNavigation() {
-    // Enter key logic for various inputs
-    delegate('keydown', '.qm-input, .qm-select, .qm-textarea', function (e) {
-      if (e.key !== 'Enter') return;
-      if (this.tagName === 'TEXTAREA' && !e.ctrlKey) return; // Allow newlines in textarea unless Ctrl+Enter
-
-      const pane = this.closest('.qm-pane');
-      if (!pane) return;
-
-      const card = this.closest('.qm-card');
-      if (!card) return;
-
-      // Find the primary button in the same card
-      const primaryBtn = card.querySelector('.qm-btn-primary') || card.querySelector('.qm-btn');
-      if (!primaryBtn || primaryBtn.disabled) return;
-
-      // Validate required fields in this card
-      const inputs = card.querySelectorAll('.qm-input:not([readonly]), .qm-select');
-      let allFilled = true;
-      inputs.forEach(input => {
-        if (!input.value.trim() && !input.classList.contains('qm-input-optional')) {
-          allFilled = false;
-        }
-      });
-
-      if (allFilled) {
-        e.preventDefault();
-        primaryBtn.click();
-      }
-    });
-
-    // Space/Enter for accordions
-    delegate('keydown', '.qm-accordion-header', function (e) {
-      if (e.key === 'Enter' || e.key === ' ') {
-        e.preventDefault();
-        this.click();
-      }
-    });
-  }
-
-  /* ============================================================
-   * 24. JK CHANGE LOGIC
-   * ============================================================ */
   function initJkChangeEvents() {
     delegate('click', '#qm-btn-KK-update', onUpdateKKMaster);
 
@@ -5960,6 +5222,7 @@
       }
     });
   }
+
 
   /**
    * Fetches the distribution page and synchronizes all dropdowns (Per Subsi & Kalender Kerja).
@@ -6511,9 +5774,7 @@
     }
   }
 
-  /* ============================================================
-   * 25. KK CHANGE LOGIC
-   * ============================================================ */
+
   // Removed in favor of unified refreshDistribusiPane
   // async function refreshKKOptionsInPane() { ... }
 
@@ -6788,8 +6049,731 @@
   }
 
   /* ============================================================
-   * 26. BOOT
+   * 13. EVENT HANDLERS & PANEL
    * ============================================================ */
+
+  function openPanel() {
+    state.isOpen = true;
+    document.body.classList.add('qm-no-scroll');
+    document.querySelectorAll('#qm-panel, #qm-fab, #qm-backdrop').forEach(el => el.classList.add('qm-open'));
+    setTimeout(() => {
+      const input = document.querySelector('#qm-input-nrp');
+      if (input) input.focus();
+    }, 250);
+  }
+
+  function closePanel() {
+    state.isOpen = false;
+    document.body.classList.remove('qm-no-scroll');
+    document.querySelectorAll('#qm-panel, #qm-fab, #qm-backdrop').forEach(el => el.classList.remove('qm-open'));
+  }
+
+  function togglePanel() {
+    state.isOpen ? closePanel() : openPanel();
+  }
+
+  function checkNrp() {
+    const inputNrp = document.getElementById('qm-input-nrp');
+    const inputBulan = document.getElementById('qm-input-bulan');
+    const nrp = inputNrp ? inputNrp.value.trim() : '';
+    const bulan = inputBulan ? inputBulan.value.trim() : '';
+    if (!nrp || !bulan) { UI.showResult('warning', 'Data Tidak Lengkap', 'Silakan masukkan NRP dan Bulan terlebih dahulu.'); return; }
+    if (!/^\d+$/.test(nrp) || (nrp.length !== 4 && nrp.length !== 8)) { UI.showResult('warning', 'Format Tidak Valid', 'Hanya menerima 4 dan 8 angka NRP'); return; }
+    UI.setLoading(true);
+    sessionStorage.setItem(STORAGE.AUTO_NRP, nrp);
+    sessionStorage.setItem(STORAGE.AUTO_BULAN, bulan);
+    const year = new Date().getFullYear();
+    window.location.href = getAttendanceUrl(bulan, year, nrp);
+  }
+
+  let manualSidebarOverride = false;
+  function enforceSidebar() {
+    if (!alwaysCollapseMenu || manualSidebarOverride) return;
+    if (!document.body.classList.contains('enlarged')) {
+      document.body.classList.add('enlarged');
+      document.body.classList.remove('sidebar-enable');
+    }
+  }
+
+  function onExportAnomali() {
+    if (state.anomalies.length === 0) { alert('Tidak ada anomali untuk diekspor.'); return; }
+    const wsData = [['Tanggal', 'Kolom', 'Pesan Anomali']];
+    const sorted = [...state.anomalies].sort((a, b) => parseInt(a.tgl) - parseInt(b.tgl));
+    sorted.forEach(a => wsData.push([a.tgl, a.col, a.msg]));
+    if (typeof XLSX !== 'undefined') {
+      const ws = XLSX.utils.aoa_to_sheet(wsData);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'Anomali');
+      const inputBulan = document.getElementById('qm-input-bulan');
+      const month = (inputBulan && inputBulan.value) ? inputBulan.value : (new Date().getMonth() + 1);
+      XLSX.writeFile(wb, `Anomali_Bulan_${month}.xlsx`);
+    } else {
+      alert('Library XLSX gagal dimuat. Harap periksa koneksi atau header script.');
+    }
+  }
+
+  function onToggleAnomalyGroup(e) {
+    if (e.target.closest('.qm-fix-dot') || e.target.closest('.qm-batch-fix-btn')) return;
+
+    const content = this.nextElementSibling;
+    if (content && content.classList.contains('qm-anomaly-group-content')) {
+      const expanded = this.classList.toggle('expanded');
+      // Gunakan class 'qm-content-open' pada content agar tidak bentrok dengan
+      // selector CSS '.expanded' yang bisa bocor ke elemen lain
+      content.classList.toggle('qm-content-open', expanded);
+
+      const tgl = this.dataset.tgl;
+      if (tgl) {
+        if (expanded) state.expandedAnomalyGroups.add(String(tgl));
+        else state.expandedAnomalyGroups.delete(String(tgl));
+      }
+    }
+  }
+
+  function onCekSpklOnline() {
+    const nrp = document.getElementById('qm-spkl-online-nrp')?.value.trim();
+    const dateInput = document.getElementById('qm-spkl-online-date')?.value;
+    if (!nrp || !dateInput) { alert('Harap isi NRP dan Tanggal.'); return; }
+
+    const d = new Date(dateInput);
+    const day = String(d.getDate()).padStart(2, '0');
+    const month = String(d.getMonth() + 1).padStart(2, '0');
+    const year = d.getFullYear();
+
+    const url = ROUTES.SPKL_ONLINE(year, month, day, day, nrp);
+    window.open(url, '_blank');
+  }
+
+  function onProsesInputHadir() {
+    const nrp = document.getElementById('qm-input-hadir-nrp')?.value.trim();
+    const tgl = document.getElementById('qm-input-hadir-tanggal')?.value;
+    const jam = document.getElementById('qm-input-hadir-jam')?.value;
+    const status = document.getElementById('qm-input-hadir-status')?.value;
+
+    if (!nrp || !tgl || !jam || status === "") {
+      alert('Harap isi semua field (NRP, Tanggal, Jam, dan Status).');
+      return;
+    }
+
+    sessionStorage.setItem(STORAGE.RETURN_URL, window.location.href);
+
+    const data = { nrp, tgl, jam, status };
+    sessionStorage.setItem(STORAGE.INPUT_HADIR, JSON.stringify(data));
+
+    const targetUrl = getAbsenCreateUrl(nrp);
+    window.open(targetUrl, '_blank');
+  }
+
+  function onProsesDistribusi() {
+    onSaveJkChange();
+  }
+
+  function onKeydownAnomalyGroup(e) {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); this.click(); }
+  }
+
+  function onFixDotClick(e) {
+    e.stopPropagation();
+    handleFixClick(
+      this.getAttribute('data-fix-link'),
+      this.getAttribute('data-fix-date'),
+      this.getAttribute('title'),
+      this.getAttribute('data-full-date')
+    );
+  }
+
+  function onTabClick() {
+    const pane = this.getAttribute('data-pane');
+    document.querySelectorAll('.qm-tab').forEach(el => el.classList.remove('active'));
+    this.classList.add('active');
+    document.querySelectorAll('.qm-pane').forEach(el => el.classList.remove('active'));
+    const targetPane = document.getElementById(`qm-pane-${pane}`);
+    if (targetPane) targetPane.classList.add('active');
+    localStorage.setItem('qm_last_tab', pane);
+
+    if (pane === 'distribusi' || pane === 'check-nrp' || pane === 'spkl' || pane === 'kehadiran') {
+      refreshGlobalData();
+    }
+  }
+
+  function onInputBulan() {
+    const val = parseInt(this.value);
+    if (isNaN(val)) return;
+    if (val < 1) this.value = 1;
+    else if (val > 12) this.value = 12;
+  }
+
+  function onDocumentClick(e) {
+    if (state.isOpen && !e.target.closest('#qm-panel, #qm-fab, #qm-backdrop')) closePanel();
+  }
+
+  function onRecordShortcut() {
+    isRecordingShortcut = true;
+    this.textContent = 'Tunggu...';
+    document.getElementById('qm-input-shortcut').value = 'Tekan tombol...';
+  }
+
+  function onBatchNrpClick(e) {
+    e.preventDefault();
+    var nrp = this.getAttribute('data-nrp');
+    if (!nrp) return;
+    var url = getAttendanceUrl(state.batchBulan, state.batchTahun, nrp);
+    window.open(url, '_blank');
+  }
+
+  function onBatchFixClick(e) {
+    e.stopPropagation();
+    handleFixClick(
+      this.getAttribute('data-fix-link'),
+      this.getAttribute('data-fix-date'),
+      this.getAttribute('title'),
+      this.getAttribute('data-full-date')
+    );
+  }
+
+  function onKeydownDocument(e) {
+    if (isRecordingShortcut) {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        isRecordingShortcut = false;
+        const btn = document.getElementById('qm-btn-record-shortcut');
+        if (btn) btn.textContent = 'Ubah';
+        const input = document.getElementById('qm-input-shortcut');
+        if (input) input.value = shortcutKey;
+        return;
+      }
+      e.preventDefault();
+      const keys = [];
+      if (e.ctrlKey) keys.push('Ctrl');
+      if (e.altKey) keys.push('Alt');
+      if (e.shiftKey) keys.push('Shift');
+      if (['Control', 'Alt', 'Shift', 'Meta'].includes(e.key)) return;
+      keys.push(e.key.length === 1 ? e.key.toUpperCase() : e.key);
+      shortcutKey = keys.join('+');
+      const input = document.getElementById('qm-input-shortcut');
+      if (input) input.value = shortcutKey;
+      const btn = document.getElementById('qm-btn-record-shortcut');
+      if (btn) btn.textContent = 'Ubah';
+      GM_setValue('qm_shortcut', shortcutKey);
+      isRecordingShortcut = false;
+      return;
+    }
+
+    if (e.key === 'Escape' && state.isOpen) {
+      closePanel();
+      return;
+    }
+
+    if (shortcutKey) {
+      const parts = shortcutKey.split('+');
+      const key = parts[parts.length - 1].toLowerCase();
+      if (e.key.toLowerCase() === key && e.ctrlKey === parts.includes('Ctrl') && e.shiftKey === parts.includes('Shift') && e.altKey === parts.includes('Alt')) {
+        const targetTag = e.target.tagName.toLowerCase();
+        if ((targetTag === 'input' || targetTag === 'textarea') && parts.length === 1) return;
+        e.preventDefault();
+        togglePanel();
+      }
+    }
+  }
+
+  function onToggleDebugMode() {
+    state.debug = this.checked;
+    GM_setValue('qm_debug', state.debug);
+    Logger.info(`Debug mode ${state.debug ? 'diaktifkan' : 'dimatikan'}`);
+  }
+
+  function onShowLogs() {
+    const container = document.getElementById('qm-log-container');
+    const btn = document.getElementById('qm-btn-show-logs');
+    if (container && btn) {
+      const isHidden = container.classList.toggle('qm-hidden');
+      if (!isHidden) {
+        btn.classList.add('qm-active');
+        renderLogs();
+        btn.querySelector('span').textContent = 'Sembunyikan Log';
+      } else {
+        btn.classList.remove('qm-active');
+        btn.querySelector('span').textContent = 'Lihat Log Aktivitas';
+      }
+    }
+  }
+
+  function onClearLogs() {
+    if (confirm('Bersihkan semua riwayat log aktivitas?')) {
+      state.batchLogs = [];
+      renderLogs();
+    }
+  }
+
+  function onExportLogs() {
+    if (state.batchLogs.length === 0) {
+      alert('Tidak ada log untuk diekspor.');
+      return;
+    }
+    const content = state.batchLogs.map(l => {
+      const level = (l.level || l.type || 'info').toUpperCase();
+      return `[${l.time}] [${level}] ${l.msg}`;
+    }).join('\n');
+
+    const header = `# HRIS Quick Menu Activity Log\nExported: ${new Date().toLocaleString()}\n\n`;
+    const blob = new Blob([header + '```\n' + content + '\n```'], { type: 'text/markdown' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `hris_log_${new Date().toISOString().slice(0, 10)}.md`;
+    a.click();
+    URL.revokeObjectURL(url);
+    Logger.info('Log diekspor ke format Markdown (.md).');
+  }
+
+  function initKeyboardNavigation() {
+    // Enter key logic for various inputs
+    delegate('keydown', '.qm-input, .qm-select, .qm-textarea', function (e) {
+      if (e.key !== 'Enter') return;
+      if (this.tagName === 'TEXTAREA' && !e.ctrlKey) return; // Allow newlines in textarea unless Ctrl+Enter
+
+      const pane = this.closest('.qm-pane');
+      if (!pane) return;
+
+      const card = this.closest('.qm-card');
+      if (!card) return;
+
+      // Find the primary button in the same card
+      const primaryBtn = card.querySelector('.qm-btn-primary') || card.querySelector('.qm-btn');
+      if (!primaryBtn || primaryBtn.disabled) return;
+
+      // Validate required fields in this card
+      const inputs = card.querySelectorAll('.qm-input:not([readonly]), .qm-select');
+      let allFilled = true;
+      inputs.forEach(input => {
+        if (!input.value.trim() && !input.classList.contains('qm-input-optional')) {
+          allFilled = false;
+        }
+      });
+
+      if (allFilled) {
+        e.preventDefault();
+        primaryBtn.click();
+      }
+    });
+
+    // Space/Enter for accordions
+    delegate('keydown', '.qm-accordion-header', function (e) {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        this.click();
+      }
+    });
+  }
+
+  /* ============================================================
+   * 14. INITIALIZATION
+   * ============================================================ */
+
+  function validateDomStructure(options) {
+    const silent = options && options.silent;
+    const missing = [];
+
+    if (isAttendancePagePath()) {
+      if (!document.querySelector('table tbody tr')) {
+        missing.push('table tbody tr (tabel kehadiran)');
+      } else {
+        const headers = Array.from(document.querySelectorAll('table th'));
+        const headerTexts = headers.map(th => th.textContent.trim().toLowerCase());
+        const requiredHeaders = ['tanggal', 'msk', 'klr'];
+        const missingHeaders = requiredHeaders.filter(h => !headerTexts.some(t => t.includes(h)));
+        if (missingHeaders.length > 0) {
+          missing.push('kolom header: ' + missingHeaders.join(', ') + ' (tabel kehadiran)');
+        }
+      }
+    }
+    if (isBarcodeCreatePagePath()) {
+      if (!document.querySelector('form')) missing.push('form (barcode create)');
+    }
+    if (isDistribusiKalenderPagePath()) {
+      if (!document.querySelector('form')) missing.push('form (distribusi kalender)');
+    }
+    if (isSpklPagePath()) {
+      if (!document.querySelector('table')) {
+        missing.push('table (SPKL)');
+      } else {
+        const headers = Array.from(document.querySelectorAll('table th'));
+        const headerTexts = headers.map(th => th.textContent.trim().toLowerCase());
+        const hasDateCol = headerTexts.some(t => t.includes('tanggal') || t === 'tgl');
+        if (!hasDateCol) {
+          missing.push('kolom tanggal (tabel SPKL)');
+        }
+      }
+    }
+
+    const valid = missing.length === 0;
+    if (!valid) {
+      Logger.warn('Validasi DOM gagal. Elemen tidak ditemukan: ' + missing.join(', '));
+      if (!silent) {
+        UI.showResult('warning', 'Struktur Halaman Berubah', 'Elemen kritis tidak ditemukan: ' + missing.join(', ') + '. Beberapa fitur mungkin tidak berfungsi.');
+      }
+    }
+    return { valid, missing };
+  }
+
+  function init() {
+
+    const schemaValid = validateStorageSchema();
+
+    spklHighlight();
+    autoFillTargetPage();
+    autoClickAddData();
+    autoInputHadir();
+    autoDistribusi();
+    autoDistribusiSubsi();
+    autoDistKK();
+    checkSpklBatchResume();
+    checkHadirBatchResume();
+    checkHadirBulanResume();
+    initJkChangeEvents();
+    checkJkRestoration();
+
+    // Return to source page after process finish (autoDistribusi result page)
+    const returnUrl = sessionStorage.getItem(STORAGE.RETURN_URL);
+    const isFinished = sessionStorage.getItem(STORAGE.AUTO_FINISHED) === 'true';
+    const hasRestorationPending = sessionStorage.getItem('qm_jk_to_restore_' + getPageContext().nrp);
+
+    if (isFinished && returnUrl) {
+      const currentUrl = window.location.href.split('?')[0];
+      const targetUrlBase = returnUrl.split('?')[0];
+      const isReturnPage = currentUrl === targetUrlBase || window.location.href.includes(returnUrl);
+
+      if (isReturnPage) {
+        // We are back at the start page. Cleanup if no restoration is pending.
+        if (!hasRestorationPending) {
+          sessionStorage.removeItem(STORAGE.AUTO_FINISHED);
+          sessionStorage.removeItem(STORAGE.RETURN_URL);
+          UI.showResult('success', 'Selesai', 'Tugas latar belakang telah diselesaikan.');
+
+          // If on attendance table, trigger anomaly refresh to show the fix
+          if (isAttendancePagePath()) {
+            setTimeout(() => {
+              const btn = document.querySelector('[data-pane="anomali"]');
+              if (btn) btn.click();
+            }, 500);
+          }
+        }
+      } else if (!window.location.search.includes('qm_auto')) {
+        // We are on a result page, redirect back
+        UI.showGlobalLoader('Selesai', 'Kembali ke halaman awal...');
+        setTimeout(() => {
+          window.location.href = returnUrl;
+        }, 1500);
+      }
+    }
+
+    if (!document.getElementById('qm-fab')) {
+      document.body.insertAdjacentHTML('beforeend', HTML);
+
+      // Default NRP for FIX Panel
+      const ctx = getPageContext();
+      const elFixNrp = document.getElementById('qm-fix-spkl-nrp');
+      if (elFixNrp && ctx.nrp) elFixNrp.value = ctx.nrp;
+
+      const elBulanNrp = document.getElementById('qm-input-hadir-bulan-nrp');
+      if (elBulanNrp && ctx.nrp) elBulanNrp.value = ctx.nrp;
+
+      const elDistNrp = document.getElementById('qm-input-distribusi-nrp');
+      if (elDistNrp && ctx.nrp) elDistNrp.value = ctx.nrp;
+
+      const elDistKKNrp = document.getElementById('qm-dist-KK-nrp');
+      if (elDistKKNrp && ctx.nrp) elDistKKNrp.value = ctx.nrp;
+
+      const now = new Date();
+      const currentMonth = now.getMonth() + 1;
+      const currentYear = now.getFullYear();
+
+      // Populate Month Select
+      const monthNames = ['Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni', 'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'];
+      const monthOptions = monthNames.map((name, i) => `<option value="${i + 1}" ${i + 1 === currentMonth ? 'selected' : ''}>${name}</option>`).join('');
+
+      const inputBulan = document.getElementById('qm-input-bulan');
+      if (inputBulan) setInnerHTML(inputBulan, monthOptions);
+
+      const fixBulan = document.getElementById('qm-fix-spkl-bulan');
+      if (fixBulan) setInnerHTML(fixBulan, monthOptions);
+
+      const bulanBulan = document.getElementById('qm-input-hadir-bulan-bln');
+      if (bulanBulan) setInnerHTML(bulanBulan, monthOptions);
+
+      // Populate Year Select
+      let years = '';
+      for (let y = currentYear - 2; y <= currentYear + 1; y++) {
+        years += `<option value="${y}" ${y === currentYear ? 'selected' : ''}>${y}</option>`;
+      }
+
+      const inputTahun = document.getElementById('qm-input-tahun');
+      if (inputTahun) setInnerHTML(inputTahun, years);
+
+      const fixTahun = document.getElementById('qm-fix-spkl-tahun');
+      if (fixTahun) setInnerHTML(fixTahun, years);
+
+      // Default date for Banyak NRP
+      const elManyDate = document.getElementById('qm-fix-many-date');
+      if (elManyDate) {
+        elManyDate.value = `${currentYear}-${String(currentMonth).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+      }
+
+      const elDistKKDate = document.getElementById('qm-dist-KK-date');
+      if (elDistKKDate) {
+        elDistKKDate.value = `${currentYear}-${String(currentMonth).padStart(2, '0')}`;
+      }
+
+      const elDistDate = document.getElementById('qm-input-distribusi-tanggal');
+      if (elDistDate) {
+        elDistDate.value = `${currentYear}-${String(currentMonth).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+      }
+
+      // Apply Theme
+      UI.applyTheme(state.theme);
+
+      // Restore Last Tab
+      const lastTab = localStorage.getItem('qm_last_tab');
+      if (lastTab) {
+        const tabBtn = document.querySelector(`.qm-tab[data-pane="${lastTab}"]`);
+        if (tabBtn) tabBtn.click();
+      }
+      initDraggable();
+      delegate('change', '#qm-config-debug-mode', onToggleDebugMode);
+      delegate('click', '#qm-btn-show-logs', onShowLogs);
+      delegate('click', '#qm-btn-clear-logs', onClearLogs);
+      delegate('click', '#qm-btn-export-logs', onExportLogs);
+    }
+    detectAnomalies();
+
+    if (!schemaValid) {
+      UI.showResult('warning', 'Data Direset', 'Versi data sesi tidak cocok. Data lama telah dibersihkan.');
+    }
+
+    // Validate DOM structure with polling to handle dynamic content loading
+    if (isAttendancePagePath() || isBarcodeCreatePagePath() || isDistribusiKalenderPagePath() || isSpklPagePath()) {
+      let domCheckAttempts = 0;
+      const maxDomCheckAttempts = 10; // 10 x 200ms = 2s max
+      const domCheckInterval = setInterval(function () {
+        domCheckAttempts++;
+        const isFinalAttempt = domCheckAttempts >= maxDomCheckAttempts;
+        const result = validateDomStructure({ silent: !isFinalAttempt });
+        if (result.valid || isFinalAttempt) {
+          clearInterval(domCheckInterval);
+        }
+      }, 200);
+    }
+
+    document.addEventListener('keydown', onKeydownDocument);
+    document.addEventListener('click', onDocumentClick);
+
+    delegate('click', '#qm-fab', togglePanel);
+    delegate('click', '#qm-backdrop', closePanel);
+    delegate('click', '#qm-btn-close-header', closePanel);
+    delegate('click', '#qm-btn-check', checkNrp);
+    delegate('click', '#qm-btn-spkl-batch', runSpklBatchProcess);
+    delegate('click', '#qm-btn-spkl-many-nrp', runSpklManyNrpBatch);
+    delegate('click', '#qm-btn-spkl-online-cek', onCekSpklOnline);
+    delegate('click', '#qm-btn-hadir-proses', onProsesInputHadir);
+    delegate('click', '#qm-btn-hadir-bulan-proses', runHadirBulanBatch);
+    delegate('click', '#qm-btn-hadir-many-proses', runHadirManyNrpBatch);
+    delegate('click', '#qm-btn-distribusi-proses', onProsesDistribusi);
+    delegate('click', '#qm-btn-distribusi-subsi-proses', onProsesDistribusiSubsi);
+    delegate('click', '#qm-global-cancel-btn', function () {
+      Logger.info('User cancelled automation');
+      sessionStorage.removeItem(STORAGE.SPKL_QUEUE);
+      sessionStorage.removeItem(STORAGE.SPKL_CURRENT_INDEX);
+      sessionStorage.removeItem(STORAGE.SPKL_FIX_PENDING);
+      sessionStorage.removeItem(STORAGE.AUTO_FINISHED);
+      UI.hideGlobalLoader(0);
+      UI.showResult('info', 'Dibatalkan', 'Proses otomasi dihentikan oleh pengguna.');
+    });
+
+    delegate('click', '.qm-progress-container', () => {
+      const tabBtn = document.querySelector('.qm-tab[data-pane="config"]');
+      if (tabBtn) tabBtn.click();
+      const btn = document.getElementById('qm-btn-show-logs');
+      if (container && btn) {
+        container.classList.remove('qm-hidden');
+        btn.classList.add('qm-active');
+        renderLogs();
+        btn.querySelector('span').textContent = 'Sembunyikan Log';
+      }
+    });
+
+    delegate('keydown', '#qm-spkl-online-nrp', function (e) {
+      if (e.key === 'Enter') { e.preventDefault(); document.getElementById('qm-btn-spkl-online-cek')?.click(); }
+    });
+
+    delegate('change', '#qm-fix-many-ot', function () {
+      const box = document.getElementById('qm-fix-many-ot7-box');
+      if (box) {
+        if (this.value === '7') box.classList.remove('qm-hidden');
+        else box.classList.add('qm-hidden');
+      }
+    });
+
+    delegate('input', '#qm-fix-spkl-data', function () {
+      const box = document.getElementById('qm-fix-spkl-ot7-box');
+      if (box) {
+        const has7 = this.value.split(/[,\n]+/).some(item => {
+          const parts = item.trim().split(/[-:=]/);
+          return parts.length > 1 && parts[1].trim() === '7';
+        });
+        if (has7) box.classList.remove('qm-hidden');
+        else box.classList.add('qm-hidden');
+      }
+    });
+
+    delegate('keydown', '#qm-input-nrp', function (e) {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        const nrp = this.value.trim();
+        if (nrp.length >= 4) {
+          refreshGlobalData(nrp);
+        }
+      }
+    });
+
+    // Sync other NRP inputs too
+    delegate('input', '#qm-spkl-online-nrp, #qm-fix-spkl-nrp, #qm-input-hadir-nrp, #qm-input-hadir-bulan-nrp', function () {
+      const nrp = this.value.trim();
+      if (nrp.length >= 4) {
+        refreshGlobalData(nrp);
+      }
+    });
+
+    // Sync Month/Year changes
+    delegate('change', '#qm-input-bulan, #qm-input-tahun, #qm-fix-spkl-bulan, #qm-fix-spkl-tahun, #qm-input-hadir-bulan-bln', function () {
+      refreshGlobalData();
+    });
+
+    // General Keyboard Navigation for forms
+    initKeyboardNavigation();
+
+    delegate('click', '.qm-tab', onTabClick);
+    delegate('click', '.qm-fix-dot', onFixDotClick);
+    delegate('click', '.qm-btn-fix-pill', onFixDotClick);
+
+    delegate('click', '#qm-btn-batch-check', function (e) {
+      if (this.dataset.running) {
+        onBatchCancel();
+      } else {
+        runBatchCheck();
+      }
+    });
+    delegate('mouseover', '#qm-btn-batch-check', function (e) {
+      if (this.dataset.running) {
+        this.classList.add('qm-btn-danger');
+        this.textContent = 'Batal';
+      }
+    });
+    delegate('mouseout', '#qm-btn-batch-check', function (e) {
+      if (this.dataset.running) {
+        this.classList.remove('qm-btn-danger');
+        this.textContent = 'Memproses...';
+      }
+    });
+    delegate('click', '#qm-btn-export-batch', exportBatchResults);
+    delegate('click', '.qm-batch-nrp-link', onBatchNrpClick);
+    delegate('click', '.qm-batch-fix-btn', onBatchFixClick);
+
+    // Batch Grouping (Bagian)
+    delegate('click', '.qm-batch-group-header', function () {
+      const targetSelector = this.dataset.target;
+      const rows = document.querySelectorAll(targetSelector);
+      const isExpanded = this.classList.contains('expanded');
+      this.classList.toggle('expanded');
+      rows.forEach(r => {
+        if (isExpanded) {
+          r.classList.add('qm-hidden');
+          r.classList.remove('qm-table-row', 'expanded'); // Collapse sub-groups too
+        } else {
+          if (r.classList.contains('qm-batch-seksi-header')) {
+            r.classList.remove('qm-hidden');
+            r.classList.add('qm-table-row');
+          } else {
+            r.classList.add('qm-hidden');
+            r.classList.remove('qm-table-row');
+          }
+        }
+      });
+    });
+
+    // Batch Grouping (Seksi)
+    delegate('click', '.qm-batch-seksi-header', function () {
+      const targetSelector = this.dataset.target;
+      const rows = document.querySelectorAll(targetSelector);
+      const isExpanded = this.classList.contains('expanded');
+      this.classList.toggle('expanded');
+      rows.forEach(r => {
+        if (isExpanded) {
+          r.classList.add('qm-hidden');
+          r.classList.remove('qm-table-row');
+        } else {
+          r.classList.remove('qm-hidden');
+          r.classList.add('qm-table-row');
+        }
+      });
+    });
+
+    delegate('click', '.qm-batch-date-header', function (e) {
+      if (e.target.closest('.qm-batch-fix-btn')) return;
+      const content = this.nextElementSibling;
+      this.classList.toggle('expanded');
+      if (content) {
+        content.classList.toggle('qm-hidden');
+        content.classList.toggle('qm-visible-block');
+      }
+    });
+
+    // 14. Accordion Toggle for FIX Panel
+    delegate('click', '.qm-accordion-header', function () {
+      this.classList.toggle('expanded');
+      const content = this.nextElementSibling;
+      if (content) {
+        content.classList.toggle('qm-content-open');
+      }
+    });
+
+    const collapseCheckbox = document.getElementById('qm-config-collapse-menu');
+    if (collapseCheckbox) {
+      collapseCheckbox.checked = alwaysCollapseMenu;
+      delegate('change', '#qm-config-collapse-menu', function () {
+        alwaysCollapseMenu = this.checked;
+        GM_setValue('qm_always_collapse', alwaysCollapseMenu);
+        if (alwaysCollapseMenu) {
+          enforceSidebar();
+        } else {
+          document.body.classList.remove('enlarged');
+        }
+      });
+    }
+
+    // Theme Switcher
+    delegate('click', '#qm-btn-theme-light', () => UI.applyTheme('light'));
+    delegate('click', '#qm-btn-theme-dark', () => UI.applyTheme('dark'));
+
+    enforceSidebar();
+    const _sidebarObserver = new MutationObserver(enforceSidebar);
+    _sidebarObserver.observe(document.body, { attributes: true, attributeFilter: ['class'] });
+
+    const shortcutInput = document.getElementById('qm-input-shortcut');
+    if (shortcutInput) shortcutInput.value = shortcutKey;
+    delegate('click', '#qm-btn-record-shortcut', onRecordShortcut);
+
+    // Sidebar Manual Override
+    delegate('click', '.button-menu-mobile, .open-left, #sidebar-menu', function () {
+      manualSidebarOverride = true;
+    });
+
+    // Make accordions keyboard accessible
+    document.querySelectorAll('.qm-accordion-header').forEach(el => {
+      if (!el.hasAttribute('tabindex')) el.setAttribute('tabindex', '0');
+    });
+  }
+
+
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', init);
   } else {
