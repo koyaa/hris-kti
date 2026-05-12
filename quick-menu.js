@@ -155,6 +155,7 @@
     INPUT_HADIR: 'qm_auto_input_hadir_data',
     HADIR_BATCH: 'qm_auto_hadir_batch_v1',
     HISTORY: 'qm_history',
+    AUTO_FLOW: 'qm_auto_flow_v1',
     RETURN_URL: 'qm_return_url',
     AUTO_FINISHED: 'qm_auto_finished',
     SPKL_FIX_PENDING: 'qm_auto_spkl_redirect_pending',
@@ -243,19 +244,19 @@
   }
 
 
-  /** 
+  /**
    * Enhanced logger that respects state.debug.
-   * @param {string} msg 
-   * @param {any} data 
+   * @param {string} msg
+   * @param {any} data
    */
   // log(msg, data) — removed, replaced by Logger
 
   /**
-   * Robust date parser for HRIS formats: 
+   * Robust date parser for HRIS formats:
    * - DD/MM/YYYY
    * - DD-MM-YYYY
    * - DD-MMM-YYYY (e.g. 21-Apr-2026)
-   * @param {string} str 
+   * @param {string} str
    * @returns {Date|null}
    */
   function parseHrisDate(str) {
@@ -354,6 +355,72 @@
 
   function isHrisSuccess(text) {
     return SUCCESS_KEYWORDS.some(kw => text.includes(kw));
+  }
+
+  function createAutomationFlowId(type) {
+    return `${type}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  }
+
+  function getAutomationFlow() {
+    const raw = sessionStorage.getItem(STORAGE.AUTO_FLOW);
+    if (!raw) return null;
+    try {
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== 'object' || !parsed.id || !parsed.type) {
+        sessionStorage.removeItem(STORAGE.AUTO_FLOW);
+        return null;
+      }
+      return parsed;
+    } catch (e) {
+      sessionStorage.removeItem(STORAGE.AUTO_FLOW);
+      Logger.warn('AUTO_FLOW payload tidak valid.', e);
+      return null;
+    }
+  }
+
+  function createAutomationFlow(type, returnUrl, meta = {}) {
+    const flow = {
+      id: createAutomationFlowId(type),
+      type,
+      returnUrl: returnUrl || window.location.href,
+      sourceUrl: window.location.href,
+      createdAt: Date.now(),
+      finished: false,
+      meta
+    };
+    sessionStorage.setItem(STORAGE.AUTO_FLOW, JSON.stringify(flow));
+    sessionStorage.setItem(STORAGE.RETURN_URL, flow.returnUrl);
+    sessionStorage.removeItem(STORAGE.AUTO_FINISHED);
+    return flow;
+  }
+
+  function markAutomationFlowFinished(flowId) {
+    const flow = getAutomationFlow();
+    if (!flow || flow.id !== flowId) return false;
+    flow.finished = true;
+    flow.finishedAt = Date.now();
+    sessionStorage.setItem(STORAGE.AUTO_FLOW, JSON.stringify(flow));
+    sessionStorage.setItem(STORAGE.AUTO_FINISHED, 'true');
+    return true;
+  }
+
+  function clearAutomationFlow(flowId) {
+    const flow = getAutomationFlow();
+    if (flow && flowId && flow.id !== flowId) return false;
+    sessionStorage.removeItem(STORAGE.AUTO_FLOW);
+    sessionStorage.removeItem(STORAGE.AUTO_FINISHED);
+    if (!flow || !flow.returnUrl || sessionStorage.getItem(STORAGE.RETURN_URL) === flow.returnUrl) {
+      sessionStorage.removeItem(STORAGE.RETURN_URL);
+    }
+    return !!flow;
+  }
+
+  function isActiveAutomationFlow(flowId, type) {
+    const flow = getAutomationFlow();
+    if (!flow) return false;
+    if (flowId && flow.id !== flowId) return false;
+    if (type && flow.type !== type) return false;
+    return true;
   }
 
   /** Parse CSS class/style/bgcolor attributes to detect Libur/HalfDay status.
@@ -549,6 +616,87 @@
     if (emp.group) sessionStorage.setItem('qm_grp_' + nrp, emp.group);
   }
 
+  function createEmptyKaryawanEditor() {
+    return {
+      key: '',
+      nrp: '',
+      loading: false,
+      saving: false,
+      error: '',
+      notice: '',
+      emp: null,
+      jkOptions: [],
+      kkOptions: []
+    };
+  }
+
+  function createEmptyKaryawanDetail() {
+    return {
+      key: '',
+      nrp: '',
+      loading: false,
+      error: '',
+      profile: null
+    };
+  }
+
+  function createEmptyAttendanceCheck() {
+    return {
+      loading: false,
+      error: '',
+      requestKey: '',
+      summary: null
+    };
+  }
+
+  function createEmptySpklCheck() {
+    return {
+      loading: false,
+      error: '',
+      requestKey: '',
+      summary: null
+    };
+  }
+
+  function resetKaryawanEditor() {
+    state.karyawanEditor = createEmptyKaryawanEditor();
+  }
+
+  function resetKaryawanDetail() {
+    state.karyawanDetail = createEmptyKaryawanDetail();
+  }
+
+  function resetKaryawanPanels() {
+    state.karyawanActivePanel = { key: '', mode: '' };
+    resetKaryawanEditor();
+    resetKaryawanDetail();
+  }
+
+  function resetSpklCheck() {
+    state.spklCheck = createEmptySpklCheck();
+  }
+
+  function clearEmployeeCache(nrp) {
+    if (!nrp) return;
+    [
+      'qm_id_' + nrp,
+      'qm_edit_url_' + nrp,
+      'qm_jk_' + nrp,
+      'qm_KK_' + nrp,
+      'qm_nama_' + nrp,
+      'qm_bag_' + nrp,
+      'qm_sek_' + nrp,
+      'qm_grp_' + nrp,
+      'qm_jk_options_' + nrp,
+      'qm_KK_options_' + nrp
+    ].forEach(key => sessionStorage.removeItem(key));
+
+    if (state._lastEditNrp === nrp) {
+      state._lastEditNrp = null;
+      cachedEditHtml = null;
+    }
+  }
+
   /**
    * Validates sessionStorage schema version. Clears all qm_* keys if
    * the version is missing or does not match the current STORAGE_SCHEMA_VERSION.
@@ -573,20 +721,30 @@
    * 4. ROUTE BUILDERS
    * ============================================================ */
 
-  function employeeRoutes(nrp) {
-    return isOutsourceNrp(nrp)
+  function employeeRoutesBySource(isOS) {
+    return isOS
       ? {
-        search: ROUTES.KARYAWANOS_SEARCH(nrp),
+        search: ROUTES.KARYAWANOS_SEARCH,
         general: ROUTES.KARYAWANOS_GENERAL,
         profile: ROUTES.KARYAWANOS_PROFILE,
         edit: ROUTES.KARYAWANOS_EDIT
       }
       : {
-        search: ROUTES.KARYAWAN_SEARCH(nrp),
+        search: ROUTES.KARYAWAN_SEARCH,
         general: ROUTES.KARYAWAN_GENERAL,
         profile: ROUTES.KARYAWAN_PROFILE,
         edit: ROUTES.KARYAWAN_EDIT
       };
+  }
+
+  function employeeRoutes(nrp) {
+    const routes = employeeRoutesBySource(isOutsourceNrp(nrp));
+    return {
+      search: routes.search(nrp),
+      general: routes.general,
+      profile: routes.profile,
+      edit: routes.edit
+    };
   }
 
 
@@ -638,8 +796,30 @@
     return employeeRoutes(nrp).edit(id);
   }
 
+  function employeeSearchUrl(query, isOS) {
+    return employeeRoutesBySource(isOS).search(encodeURIComponent(String(query || '').trim()));
+  }
+
+  function toAbsoluteHrisUrl(url) {
+    if (!url) return '';
+    if (/^https?:\/\//i.test(url)) return url;
+    return `${ROUTES.BASE}${url.startsWith('/') ? '' : '/'}${url}`;
+  }
+
+  function extractEmployeeIdFromUrl(url) {
+    const clean = String(url || '');
+    const routeMatch = clean.match(/\/(?:general|profile|editgeneral)\/([^/?#]+)/i);
+    if (routeMatch) return routeMatch[1];
+    return clean.split('?')[0].split('/').filter(Boolean).pop() || '';
+  }
+
   function spklBaseUrl(nrp) {
     return routeByNrp(nrp, ROUTES.SPKL_BASE, ROUTES.SPKL_OS_BASE);
+  }
+
+  function spklListUrl(nrp, bulan, tahun) {
+    const bulanStr = String(parseInt(bulan, 10)).padStart(2, '0');
+    return `${spklBaseUrl(nrp)}?tahun=${encodeURIComponent(tahun)}&bulan=${encodeURIComponent(bulanStr)}&kode_bagian=&kode_seksi=&kode_group=&nrp=${encodeURIComponent(nrp)}`;
   }
 
   function spklCreateUrl(nrp) {
@@ -866,6 +1046,106 @@
     return '';
   }
 
+  function normalizeProfileLookup(text) {
+    return String(text || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  }
+
+  function readProfileElementValue(el) {
+    if (!el) return '';
+    if (el.tagName === 'SELECT') {
+      const opt = el.querySelector('option[selected]') || el.options[el.selectedIndex];
+      return String(opt ? opt.textContent || opt.value : el.value).trim();
+    }
+    if (el.tagName === 'TEXTAREA') return String(el.value || el.textContent || '').trim();
+    return String(el.value || el.getAttribute('value') || el.textContent || '').trim();
+  }
+
+  function extractProfileFieldByNames(doc, names) {
+    for (const name of names) {
+      const selector = `[name="${name}"], [name*="${name}"], #${name}, [id*="${name}"]`;
+      const el = doc.querySelector(selector);
+      const value = readProfileElementValue(el);
+      if (value) return value;
+    }
+    return '';
+  }
+
+  function findProfileRowValue(doc, labels) {
+    const normalizedLabels = labels.map(normalizeProfileLookup);
+
+    const tableRows = Array.from(doc.querySelectorAll('tr'));
+    for (const row of tableRows) {
+      const cells = Array.from(row.querySelectorAll('th, td'));
+      if (cells.length < 2) continue;
+      const label = normalizeProfileLookup(cells[0].textContent);
+      if (!label) continue;
+      if (normalizedLabels.some(candidate => label.includes(candidate))) {
+        const value = cells.slice(1).map(cell => normalizeEmployeeCellText(cell)).join(' ').trim();
+        if (value) return value;
+      }
+    }
+
+    const labelNodes = Array.from(doc.querySelectorAll('label, .control-label, .col-form-label'));
+    for (const labelNode of labelNodes) {
+      const label = normalizeProfileLookup(labelNode.textContent);
+      if (!label) continue;
+      if (!normalizedLabels.some(candidate => label.includes(candidate))) continue;
+
+      const forId = labelNode.getAttribute('for');
+      if (forId) {
+        const value = readProfileElementValue(doc.getElementById(forId));
+        if (value) return value;
+      }
+
+      const parent = labelNode.closest('.form-group, .form-row, .row, .col, .form-line') || labelNode.parentElement;
+      if (parent) {
+        const valueNode = parent.querySelector('input, textarea, select, .form-control-plaintext, .form-control-static, p, span');
+        const value = readProfileElementValue(valueNode);
+        if (value && normalizeProfileLookup(value) !== label) return value;
+      }
+
+      const siblingValue = readProfileElementValue(labelNode.nextElementSibling);
+      if (siblingValue) return siblingValue;
+    }
+
+    const genericNodes = Array.from(doc.querySelectorAll('th, td, span'));
+    for (const node of genericNodes) {
+      const label = normalizeProfileLookup(node.textContent);
+      if (!label) continue;
+      if (!normalizedLabels.some(candidate => label === candidate || label.startsWith(candidate + ' '))) continue;
+      const siblingValue = readProfileElementValue(node.nextElementSibling);
+      if (siblingValue) return siblingValue;
+      const parentNext = readProfileElementValue(node.parentElement?.nextElementSibling);
+      if (parentNext) return parentNext;
+    }
+
+    return '';
+  }
+
+  function extractProfileField(doc, config) {
+    const byName = extractProfileFieldByNames(doc, config.names || []);
+    if (byName) return byName;
+    const byLabel = findProfileRowValue(doc, config.labels || []);
+    return byLabel || '';
+  }
+
+  function parseEmployeeProfile(doc) {
+    return {
+      telepon: extractProfileField(doc, { names: ['telepon', 'no_telp', 'nomor_telepon', 'hp', 'phone'], labels: ['telepon', 'nomor telepon', 'no telepon', 'hp', 'phone'] }),
+      tanggalLahir: extractProfileField(doc, { names: ['tanggal_lahir', 'tgl_lahir', 'birth_date'], labels: ['tanggal lahir', 'tgl lahir', 'birth date'] }),
+      nik: extractProfileField(doc, { names: ['nik', 'no_ktp', 'nomor_ktp'], labels: ['nik', 'no ktp', 'nomor ktp'] }),
+      noKk: extractProfileField(doc, { names: ['no_kk', 'nomor_kk', 'kartu_keluarga'], labels: ['no kk', 'nomor kk', 'kartu keluarga'] }),
+      alamatLengkap: extractProfileField(doc, { names: ['alamat', 'alamat_lengkap', 'address'], labels: ['alamat lengkap', 'alamat', 'address'] }),
+      rtRw: extractProfileField(doc, { names: ['rt_rw', 'rtrw', 'rt'], labels: ['rt rw', 'rt/rw'] }),
+      kelurahan: extractProfileField(doc, { names: ['kelurahan', 'desa'], labels: ['kelurahan', 'desa'] }),
+      kecamatan: extractProfileField(doc, { names: ['kecamatan'], labels: ['kecamatan'] }),
+      kotaTinggal: extractProfileField(doc, { names: ['kota_tinggal', 'kota', 'kabupaten'], labels: ['kota tinggal', 'kota', 'kabupaten'] }),
+      statusMarital: extractProfileField(doc, { names: ['status_marital', 'status_perkawinan', 'marital_status'], labels: ['status marital', 'status perkawinan', 'marital'] }),
+      agama: extractProfileField(doc, { names: ['agama', 'religion'], labels: ['agama', 'religion'] }),
+      pendidikan: extractProfileField(doc, { names: ['pendidikan', 'pendidikan_terakhir', 'education'], labels: ['pendidikan', 'pendidikan terakhir', 'education'] })
+    };
+  }
+
   /** Unified employee data fetcher with sessionStorage cache. */
   async function fetchEmployee(nrp) {
     const cached = readEmployeeCache(nrp);
@@ -918,6 +1198,438 @@
     return emp;
   }
 
+  function normalizeEmployeeHeader(text) {
+    return String(text || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  }
+
+  function normalizeEmployeeCellText(cell) {
+    return String(cell?.textContent || '').replace(/\s+/g, ' ').trim();
+  }
+
+  function firstMatchedHeaderIndex(headers, keywords) {
+    return headers.findIndex(header => keywords.some(keyword => header.includes(keyword)));
+  }
+
+  function getEmployeeCellValue(cells, headers, keywords) {
+    const index = firstMatchedHeaderIndex(headers, keywords);
+    if (index === -1 || !cells[index]) return '';
+    return normalizeEmployeeCellText(cells[index]);
+  }
+
+  function getFirstEmployeeNrp(text) {
+    const match = String(text || '').match(/\b\d{8}\b|\b\d{4}\b/);
+    return match ? match[0] : '';
+  }
+
+  function isValidNrp(value) {
+    return /^\d{4}$|^\d{8}$/.test(String(value || '').trim());
+  }
+
+  function updateKaryawanResultCache(key, emp) {
+    state.karyawanResults = state.karyawanResults.map(item => {
+      if (item.key !== key) return item;
+      return {
+        ...item,
+        nama: emp.nama || item.nama,
+        bagian: emp.bagian || item.bagian,
+        seksi: emp.seksi || item.seksi,
+        group: emp.group || item.group,
+        jk: emp.jk || item.jk,
+        KK: emp.KK || item.KK,
+        editUrl: emp.editUrl || item.editUrl
+      };
+    });
+  }
+
+  function findKaryawanResult(key) {
+    return state.karyawanResults.find(item => item.key === key) || null;
+  }
+
+  function buildKaryawanResultKey(source, id, nrp, fallbackName) {
+    if (id) return `${source}:${id}`;
+    if (nrp) return `${source}:${nrp}`;
+    return `${source}:${String(fallbackName || '').toLowerCase()}`;
+  }
+
+  function parseEmployeeSearchRow(row, headers, isOS) {
+    const cells = Array.from(row.querySelectorAll('td'));
+    if (cells.length === 0) return null;
+
+    const links = Array.from(row.querySelectorAll('a[href]'));
+    const detailLink = links.find(link => /\/(general|profile|editgeneral)\//i.test(link.getAttribute('href') || ''))
+      || links.find(link => /detail|profile|edit/i.test(normalizeEmployeeCellText(link)));
+    if (!detailLink) return null;
+
+    const href = toAbsoluteHrisUrl(detailLink.getAttribute('href') || '');
+    const id = extractEmployeeIdFromUrl(href);
+    if (!id) return null;
+
+    const nrpByHeader = getEmployeeCellValue(cells, headers, ['nrp']);
+    const nrp = nrpByHeader || getFirstEmployeeNrp(row.textContent);
+    const nama = getEmployeeCellValue(cells, headers, ['nama', 'name'])
+      || normalizeEmployeeCellText(cells[Math.max(0, firstMatchedHeaderIndex(headers, ['nrp']) + 1)]);
+    const bagian = getEmployeeCellValue(cells, headers, ['bagian', 'dept', 'departemen']);
+    const seksi = getEmployeeCellValue(cells, headers, ['seksi', 'section']);
+    const group = getEmployeeCellValue(cells, headers, ['group', 'grup']);
+    const routeSet = employeeRoutesBySource(isOS);
+    const source = isOS ? 'outsource' : 'internal';
+
+    return {
+      key: buildKaryawanResultKey(source, id, nrp, nama),
+      source,
+      sourceLabel: isOS ? 'Outsource' : 'Internal',
+      nrp,
+      nama,
+      bagian,
+      seksi,
+      group,
+      id,
+      generalUrl: routeSet.general(id),
+      profileUrl: routeSet.profile(id),
+      editUrl: routeSet.edit(id)
+    };
+  }
+
+  function parseEmployeeSearchResults(doc, isOS) {
+    const headerCells = Array.from(doc.querySelectorAll('table thead th'));
+    const headers = headerCells.map(cell => normalizeEmployeeHeader(cell.textContent));
+    const rows = Array.from(doc.querySelectorAll('table tbody tr'));
+    return rows.map(row => parseEmployeeSearchRow(row, headers, isOS)).filter(Boolean);
+  }
+
+  async function searchEmployees(query) {
+    const trimmed = String(query || '').trim();
+    const targets = /^\d{8}$/.test(trimmed) ? [true] : /^\d{4}$/.test(trimmed) ? [false] : [false, true];
+    const responses = await Promise.all(targets.map(async isOS => {
+      const html = await hrisFetch(employeeSearchUrl(trimmed, isOS));
+      return parseEmployeeSearchResults(parseHTML(html), isOS);
+    }));
+
+    const map = new Map();
+    responses.flat().forEach(item => {
+      if (!map.has(item.key)) map.set(item.key, item);
+    });
+    return Array.from(map.values());
+  }
+
+  function getKaryawanPanelMode(key) {
+    return state.karyawanActivePanel?.key === key ? state.karyawanActivePanel.mode : '';
+  }
+
+  function renderKaryawanDetail(result) {
+    const detail = state.karyawanDetail;
+    if (!detail || detail.key !== result.key || getKaryawanPanelMode(result.key) !== 'detail') return '';
+    if (detail.loading) {
+      return '<div class="qm-karyawan-panel"><div class="qm-flex qm-items-center qm-gap-s"><span class="qm-spinner"></span><span>Memuat data profil karyawan...</span></div></div>';
+    }
+    if (detail.error) {
+      return `<div class="qm-karyawan-panel"><div class="qm-text-danger">${escapeHtml(detail.error)}</div></div>`;
+    }
+
+    const profile = detail.profile || {};
+    const fields = [
+      ['Telepon', profile.telepon],
+      ['Tanggal Lahir', profile.tanggalLahir],
+      ['NIK', profile.nik],
+      ['No. KK', profile.noKk],
+      ['Alamat Lengkap', profile.alamatLengkap],
+      ['RT/RW', profile.rtRw],
+      ['Kelurahan', profile.kelurahan],
+      ['Kecamatan', profile.kecamatan],
+      ['Kota Tinggal', profile.kotaTinggal],
+      ['Status Marital', profile.statusMarital],
+      ['Agama', profile.agama],
+      ['Pendidikan', profile.pendidikan]
+    ];
+
+    return `
+      <div class="qm-karyawan-panel">
+        <div class="qm-karyawan-panel-title">Data Profil</div>
+        <div class="qm-karyawan-detail-grid">
+          ${fields.map(([label, value]) => `
+            <div class="qm-karyawan-detail-item">
+              <span>${escapeHtml(label)}</span>
+              <strong>${escapeHtml(value || '-')}</strong>
+            </div>
+          `).join('')}
+        </div>
+      </div>
+    `;
+  }
+
+  function renderKaryawanEditor(result) {
+    const editor = state.karyawanEditor;
+    if (!editor || editor.key !== result.key || getKaryawanPanelMode(result.key) !== 'edit') return '';
+    if (editor.loading) {
+      return '<div class="qm-karyawan-panel"><div class="qm-flex qm-items-center qm-gap-s"><span class="qm-spinner"></span><span>Memuat opsi edit data...</span></div></div>';
+    }
+    if (editor.error) {
+      return `<div class="qm-karyawan-panel"><div class="qm-text-danger">${escapeHtml(editor.error)}</div></div>`;
+    }
+
+    const jkOptions = editor.jkOptions.map(opt => `<option value="${escapeHtml(opt.val)}" ${opt.selected ? 'selected' : ''}>${escapeHtml(opt.txt)}</option>`).join('');
+    const kkOptions = editor.kkOptions.map(opt => `<option value="${escapeHtml(opt.val)}" ${opt.selected ? 'selected' : ''}>${escapeHtml(opt.txt)}</option>`).join('');
+    const saveDisabled = editor.saving || (editor.jkOptions.length === 0 && editor.kkOptions.length === 0) ? 'disabled' : '';
+
+    return `
+      <div class="qm-karyawan-panel" data-key="${escapeHtml(result.key)}">
+        <div class="qm-karyawan-editor-summary">
+          <div class="qm-karyawan-summary-pill"><span>JK Saat Ini</span><strong>${escapeHtml(editor.emp?.jk || '-')}</strong></div>
+          <div class="qm-karyawan-summary-pill"><span>KK Saat Ini</span><strong>${escapeHtml(editor.emp?.KK || '-')}</strong></div>
+        </div>
+        ${editor.notice ? `<div class="qm-karyawan-editor-note qm-text-warning">${escapeHtml(editor.notice)}</div>` : ''}
+        <div class="qm-karyawan-editor-grid">
+          <div class="qm-karyawan-editor-field">
+            <label class="qm-field-label">Jam Kerja</label>
+            <select class="qm-select qm-karyawan-jk-select" data-key="${escapeHtml(result.key)}" ${editor.jkOptions.length === 0 ? 'disabled' : ''}>
+              ${jkOptions || '<option value="">Tidak ada opsi JK</option>'}
+            </select>
+          </div>
+          <div class="qm-karyawan-editor-field">
+            <label class="qm-field-label">Kalender Kerja</label>
+            <select class="qm-select qm-karyawan-kk-select" data-key="${escapeHtml(result.key)}" ${editor.kkOptions.length === 0 ? 'disabled' : ''}>
+              ${kkOptions || '<option value="">Tidak ada opsi KK</option>'}
+            </select>
+          </div>
+        </div>
+        <button type="button" class="qm-btn qm-btn-primary qm-karyawan-save-btn" data-key="${escapeHtml(result.key)}" ${saveDisabled}>${editor.saving ? 'Menyimpan...' : 'Simpan JK & KK'}</button>
+      </div>
+    `;
+  }
+
+  function renderKaryawanExpandedPanel(result) {
+    const mode = getKaryawanPanelMode(result.key);
+    if (mode === 'detail') return renderKaryawanDetail(result);
+    if (mode === 'edit') return renderKaryawanEditor(result);
+    return '';
+  }
+
+  function renderKaryawanResults() {
+    const wrap = document.getElementById('qm-karyawan-results');
+    const btn = document.getElementById('qm-btn-karyawan-search');
+    if (!wrap) return;
+
+    if (btn) {
+      btn.disabled = state.karyawanLoading;
+      btn.textContent = state.karyawanLoading ? 'Mencari...' : 'Cari Karyawan';
+    }
+
+    if (state.karyawanLoading) {
+      renderSafe(wrap, '<div class="qm-card qm-karyawan-empty"><div class="qm-flex qm-items-center qm-gap-s"><span class="qm-spinner"></span><span>Mencari data karyawan...</span></div></div>');
+      return;
+    }
+
+    if (state.karyawanError) {
+      renderSafe(wrap, `<div class="qm-card qm-karyawan-empty qm-text-danger">${escapeHtml(state.karyawanError)}</div>`);
+      return;
+    }
+
+    if (!state.karyawanQuery) {
+      renderSafe(wrap, '<div class="qm-card qm-karyawan-empty">Masukkan NRP 4 atau 8 digit, atau nama karyawan untuk mencari data personal dan menampilkan profil atau quick edit JK/KK.</div>');
+      return;
+    }
+
+    if (state.karyawanResults.length === 0) {
+      renderSafe(wrap, `<div class="qm-card qm-karyawan-empty">Tidak ada data karyawan yang cocok untuk <strong>${escapeHtml(state.karyawanQuery)}</strong>.</div>`);
+      return;
+    }
+
+    const html = `
+      <div class="qm-karyawan-results-summary">Ditemukan ${state.karyawanResults.length} data untuk <strong>${escapeHtml(state.karyawanQuery)}</strong>.</div>
+      <div class="qm-karyawan-results-list">
+        ${state.karyawanResults.map(result => {
+      const activeMode = getKaryawanPanelMode(result.key);
+      return `
+            <div class="qm-card qm-karyawan-result-card">
+              <div class="qm-karyawan-result-head">
+                <div class="qm-karyawan-identity-card">
+                  <div class="qm-karyawan-result-top">
+                    <span class="qm-karyawan-result-nrp">${escapeHtml(result.nrp || '-')}</span>
+                    <span class="qm-karyawan-source-badge ${result.source === 'outsource' ? 'outsource' : 'internal'}">${escapeHtml(result.sourceLabel)}</span>
+                  </div>
+                  <div class="qm-karyawan-result-name">${escapeHtml(result.nama || 'Nama belum terdeteksi')}</div>
+                  <div class="qm-karyawan-identity-grid">
+                    <div class="qm-karyawan-identity-item"><span>Divisi</span><strong>${escapeHtml(result.bagian || '-')}</strong></div>
+                    <div class="qm-karyawan-identity-item"><span>Seksi</span><strong>${escapeHtml(result.seksi || '-')}</strong></div>
+                    <div class="qm-karyawan-identity-item"><span>Grup</span><strong>${escapeHtml(result.group || '-')}</strong></div>
+                  </div>
+                </div>
+                <div class="qm-karyawan-result-actions">
+                  <button type="button" class="qm-btn qm-btn-primary qm-btn-inline ${activeMode === 'detail' ? 'qm-karyawan-action-active' : ''} qm-karyawan-detail-btn" data-key="${escapeHtml(result.key)}">Detail</button>
+                  <button type="button" class="qm-btn qm-btn-primary qm-btn-inline ${activeMode === 'edit' ? 'qm-karyawan-action-active' : ''} qm-karyawan-edit-btn" data-key="${escapeHtml(result.key)}">Edit HRIS</button>
+                </div>
+              </div>
+              ${renderKaryawanExpandedPanel(result)}
+            </div>
+          `;
+    }).join('')}
+      </div>
+    `;
+    renderSafe(wrap, html);
+  }
+
+  async function loadKaryawanDetail(key, nrp, profileUrl) {
+    state.karyawanActivePanel = { key, mode: 'detail' };
+    resetKaryawanEditor();
+    state.karyawanDetail = {
+      ...createEmptyKaryawanDetail(),
+      key,
+      nrp,
+      loading: true
+    };
+    renderKaryawanResults();
+
+    try {
+      if (!profileUrl) throw new Error('Link profile tidak tersedia.');
+      const html = await hrisFetch(profileUrl);
+      const profile = parseEmployeeProfile(parseHTML(html));
+      state.karyawanDetail = {
+        ...createEmptyKaryawanDetail(),
+        key,
+        nrp,
+        profile
+      };
+    } catch (e) {
+      state.karyawanDetail = {
+        ...createEmptyKaryawanDetail(),
+        key,
+        nrp,
+        error: e.message || 'Gagal memuat data profil.'
+      };
+    }
+
+    renderKaryawanResults();
+  }
+
+  async function loadKaryawanEditor(key, nrp) {
+    state.karyawanActivePanel = { key, mode: 'edit' };
+    resetKaryawanDetail();
+    state.karyawanEditor = {
+      ...createEmptyKaryawanEditor(),
+      key,
+      nrp,
+      loading: true
+    };
+    renderKaryawanResults();
+
+    try {
+      const emp = await fetchEmployee(nrp);
+      if (!emp.found) throw new Error('Data karyawan tidak ditemukan.');
+
+      const [jkResult, kkResult] = await Promise.allSettled([
+        fetchJkOptions(nrp),
+        fetchKKOptions(nrp)
+      ]);
+
+      const notices = [];
+      const jkOptions = jkResult.status === 'fulfilled' ? jkResult.value : [];
+      const kkOptions = kkResult.status === 'fulfilled' ? kkResult.value : [];
+
+      if (jkResult.status === 'rejected') notices.push(`JK: ${jkResult.reason?.message || 'gagal memuat opsi.'}`);
+      if (kkResult.status === 'rejected') notices.push(`KK: ${kkResult.reason?.message || 'gagal memuat opsi.'}`);
+
+      updateKaryawanResultCache(key, emp);
+      state.karyawanEditor = {
+        ...createEmptyKaryawanEditor(),
+        key,
+        nrp,
+        emp,
+        jkOptions,
+        kkOptions,
+        notice: notices.join(' ')
+      };
+    } catch (e) {
+      state.karyawanEditor = {
+        ...createEmptyKaryawanEditor(),
+        key,
+        nrp,
+        error: e.message || 'Gagal memuat data edit.'
+      };
+    }
+
+    renderKaryawanResults();
+  }
+
+  function toggleKaryawanDetail(key) {
+    const result = findKaryawanResult(key);
+    if (!result || !result.nrp) {
+      UI.showResult('warning', 'NRP Tidak Ditemukan', 'Data NRP tidak tersedia untuk melihat detail.');
+      return;
+    }
+
+    if (getKaryawanPanelMode(key) === 'detail') {
+      resetKaryawanPanels();
+      renderKaryawanResults();
+      return;
+    }
+
+    loadKaryawanDetail(key, result.nrp, result.profileUrl);
+  }
+
+  function toggleKaryawanEditor(key) {
+    const result = findKaryawanResult(key);
+    if (!result || !result.nrp) {
+      UI.showResult('warning', 'NRP Tidak Ditemukan', 'Data NRP tidak tersedia untuk quick edit.');
+      return;
+    }
+
+    if (getKaryawanPanelMode(key) === 'edit') {
+      resetKaryawanPanels();
+      renderKaryawanResults();
+      return;
+    }
+
+    loadKaryawanEditor(key, result.nrp);
+  }
+
+  async function refreshKaryawanEditorAfterSave(key, nrp) {
+    clearEmployeeCache(nrp);
+    await loadKaryawanEditor(key, nrp);
+  }
+
+  async function handleKaryawanSaveEdit() {
+    const key = this.dataset.key || '';
+    const editor = state.karyawanEditor;
+    if (!editor || editor.key !== key) return;
+
+    const jkSelect = Array.from(document.querySelectorAll('.qm-karyawan-jk-select')).find(el => el.dataset.key === key);
+    const kkSelect = Array.from(document.querySelectorAll('.qm-karyawan-kk-select')).find(el => el.dataset.key === key);
+    const nextJk = jkSelect ? jkSelect.value : '';
+    const nextKk = kkSelect ? kkSelect.value : '';
+
+    if (!nextJk && !nextKk) {
+      UI.showResult('warning', 'Data Belum Lengkap', 'Pilih JK atau KK yang ingin disimpan.');
+      return;
+    }
+
+    const currentJk = String(editor.emp?.jk || '').trim();
+    const currentKk = String(editor.emp?.KK || '').trim();
+    const jkChanged = !!nextJk && nextJk !== currentJk;
+    const kkChanged = !!nextKk && nextKk !== currentKk;
+
+    if (!jkChanged && !kkChanged) {
+      UI.showResult('warning', 'Tidak Ada Perubahan', 'JK dan KK masih sama dengan data saat ini.');
+      return;
+    }
+
+    state.karyawanEditor = { ...editor, saving: true };
+    renderKaryawanResults();
+
+    try {
+      if (jkChanged) await saveJkMaster(editor.nrp, nextJk);
+      if (kkChanged) await saveKKMaster(editor.nrp, nextKk);
+      await refreshKaryawanEditorAfterSave(key, editor.nrp);
+      const parts = [];
+      if (jkChanged) parts.push('JK');
+      if (kkChanged) parts.push('KK');
+      UI.showResult('success', 'Data Diperbarui', `${parts.join(' & ')} NRP ${editor.nrp} berhasil diperbarui.`);
+    } catch (e) {
+      state.karyawanEditor = { ...editor, saving: false };
+      renderKaryawanResults();
+      UI.showResult('danger', 'Gagal Menyimpan', e.message || 'Perubahan JK/KK gagal disimpan.');
+    }
+  }
+
 
   /** Fetch attendance table and return anomalies array. */
   async function fetchAttendance(nrp, bulan, tahun, bagian, seksi) {
@@ -940,6 +1652,7 @@
     loading: false,
     history: [],
     maxHistory: 8,
+    anomalyRunId: 0,
     anomalies: [],
     pendingChecks: 0,
     shortcut: GM_getValue('qm_shortcut', 'Ctrl+Shift+Q'),
@@ -951,6 +1664,7 @@
     batchLogs: [],
     batchBulan: 0,
     batchTahun: 0,
+    batchRunId: 0,
     batchActiveWorkers: 0,
     batchTotal: 0,
     batchAborted: false,
@@ -962,6 +1676,17 @@
     activeCancelableFlow: false,
     cancelRequested: false,
     backgroundHeartbeatTimer: null,
+    karyawanQuery: '',
+    karyawanResults: [],
+    karyawanLoading: false,
+    karyawanError: '',
+    refreshRunId: 0,
+    karyawanActivePanel: { key: '', mode: '' },
+    karyawanEditor: null,
+    karyawanDetail: null,
+    attendanceCheck: createEmptyAttendanceCheck(),
+    spklCheck: createEmptySpklCheck(),
+    spklEditCurrentIndex: -1,
     panelPos: JSON.parse(GM_getValue('qm_panel_pos', 'null')), // {top, left}
   };
   let shortcutKey = GM_getValue('qm_shortcut', 'Ctrl+Q');
@@ -1209,7 +1934,7 @@
           if (a.msg === 'Buka Halaman Kehadiran') titleStr = 'Buka Halaman Kehadiran';
           else if (a.msg && (a.msg.includes('Duplikasi') || a.msg.includes('Double entry'))) titleStr = 'Lihat Duplikasi Shift';
           else if (a.msg && a.msg.includes('Pulang awal')) titleStr = 'Cek Kehadiran (Pulang Awal)';
-          else if (a.msg === 'Cek Distribusi' || a.msg === 'Shift kosong' || a.msg === 'Shift muncul') titleStr = 'Perbaiki Distribusi Jam Kerja';
+          else if (a.msg === 'Cek Distribusi' || (a.msg && a.msg.startsWith('Shift Kosong')) || a.msg === 'Shift muncul') titleStr = 'Perbaiki Distribusi Jam Kerja';
           else if (a.msg === 'Cek SPKL') titleStr = 'Cek SPKL Online';
           else if (!a.link) titleStr = 'Perbaiki Anomali (Segera Hadir)';
 
@@ -1224,7 +1949,7 @@
           if (a.msg === 'Buka Halaman Kehadiran') titleStr = 'Buka Halaman Kehadiran';
           else if (a.msg && (a.msg.includes('Duplikasi') || a.msg.includes('Double entry'))) titleStr = 'Lihat Duplikasi Shift';
           else if (a.msg && a.msg.includes('Pulang awal')) titleStr = 'Cek Kehadiran';
-          else if (a.msg === 'Cek Distribusi' || a.msg === 'Shift kosong' || a.msg === 'Shift muncul') titleStr = 'Perbaiki Distribusi Jam Kerja';
+          else if (a.msg === 'Cek Distribusi' || (a.msg && a.msg.startsWith('Shift Kosong')) || a.msg === 'Shift muncul') titleStr = 'Perbaiki Distribusi Jam Kerja';
           else if (a.msg === 'Cek SPKL') titleStr = 'Cek SPKL Online';
 
           btn.setAttribute('title', titleStr);
@@ -1244,7 +1969,7 @@
     if (!shift1 && !shift2 && !shift3 && (mskText || klrText || ketText === 'A')) {
       const guessed = guessActualShift(parseTimeToDecimal(mskText), rules);
       const link = buildDistribusiLink(ctx, tglText, guessed);
-      const msg = 'Shift kosong';
+      const msg = 'Shift Kosong | Keterangan Kosong';
       flagCell(anomalies, tglText, COL.SHIFT1, msg, link, cekSpklCells, fullDate);
       flagCell(anomalies, tglText, COL.SHIFT2, msg, link, cekSpklCells, fullDate);
       flagCell(anomalies, tglText, COL.SHIFT3, msg, link, cekSpklCells, fullDate);
@@ -1514,6 +2239,7 @@
     if (!isAttendancePagePath()) return;
 
     const prof = startProfile('detectAnomalies');
+    const runId = ++state.anomalyRunId;
 
     try {
       state.anomalies = [];
@@ -1529,8 +2255,8 @@
       applyMark(document, result.anomalies);
       renderAnomalies();
 
-      if (result.absentDates.length > 0) { state.pendingChecks++; checkBarcodeMangkir(result.absentDates); }
-      if (result.cekSpklCells.length > 0) { state.pendingChecks++; checkSPKLOnline(result.cekSpklCells); }
+      if (result.absentDates.length > 0) { state.pendingChecks++; checkBarcodeMangkir(result.absentDates, runId); }
+      if (result.cekSpklCells.length > 0) { state.pendingChecks++; checkSPKLOnline(result.cekSpklCells, runId); }
       if (state.pendingChecks > 0 && anomaliTab) anomaliTab.classList.add('qm-tab-loading');
     } finally {
       finishProfile(prof, { anomalyCount: state.anomalies.length });
@@ -1564,6 +2290,8 @@
     state.batchTahun = Math.min(2035, Math.max(2020, localTahun));
     state.batchTotal = nrps.length;
     state.batchAborted = false;
+    state.batchRunId++;
+    const batchRunId = state.batchRunId;
     const prof = startProfile('startBatchAnomalyCheck:init');
 
     state.batchQueue = nrps.map(nrp => ({ nrp, status: 'pending', msg: '' }));
@@ -1581,25 +2309,32 @@
 
     const poolSize = Math.min(APP_CONFIG.BATCH_POOL_SIZE, state.batchQueue.length);
     const workers = [];
-    for (let i = 0; i < poolSize; i++) workers.push(processBatchWorker());
-    Promise.all(workers).then(finishBatch);
+    for (let i = 0; i < poolSize; i++) workers.push(processBatchWorker(batchRunId));
+    Promise.all(workers).then(() => finishBatch(batchRunId));
     finishProfile(prof, { totalNrp: nrps.length, poolSize });
   }
 
   function handleBatchCancel() {
     state.batchAborted = true;
+    state.batchRunId++;
     state.batchQueue = [];
     const btnCheck = document.getElementById('qm-btn-batch-check');
     if (btnCheck) btnCheck.textContent = 'Membatalkan...';
+    finishBatch(state.batchRunId);
   }
 
-  async function processBatchWorker() {
-    while (state.batchQueue.length > 0 && !state.batchAborted) {
+  async function processBatchWorker(batchRunId) {
+    while (state.batchQueue.length > 0 && !state.batchAborted && batchRunId === state.batchRunId) {
       const item = state.batchQueue.shift();
+      if (!item) return;
       const prof = startProfile('processBatchWorker:item', { nrp: item?.nrp });
       try {
         pushLog(`Memproses NRP ${item.nrp}...`);
         const emp = await fetchEmployee(item.nrp);
+        if (batchRunId !== state.batchRunId || state.batchAborted) {
+          finishProfile(prof, { nrp: item.nrp, stale: true });
+          return;
+        }
         item.found = emp.found;
         item.jk = emp.jk || '-';
         item.nama = emp.nama || '-';
@@ -1612,6 +2347,10 @@
         } else {
           try {
             const scanRes = await fetchAttendance(item.nrp, state.batchBulan, state.batchTahun, item.bagian, item.seksi);
+            if (batchRunId !== state.batchRunId || state.batchAborted) {
+              finishProfile(prof, { nrp: item.nrp, stale: true });
+              return;
+            }
             item.anomalies = scanRes.anomalies || [];
             item.rekaps = scanRes.rekaps || null;
             item.msg = item.anomalies.length + ' anomali ditemukan';
@@ -1621,10 +2360,18 @@
           }
         }
       } catch (e) {
+        if (batchRunId !== state.batchRunId || state.batchAborted) {
+          finishProfile(prof, { nrp: item.nrp, stale: true });
+          return;
+        }
         item.found = false;
         item.msg = 'Gagal akses HRIS';
         item.anomalies = [];
         pushLog(`Gagal memproses NRP ${item.nrp}: ${e.message}`, 'error');
+      }
+      if (batchRunId !== state.batchRunId || state.batchAborted) {
+        finishProfile(prof, { nrp: item.nrp, stale: true });
+        return;
       }
       pushBatchResult(item);
       if (item.found) pushLog(`Selesai memproses ${item.nama} (${item.nrp}).`, 'success');
@@ -1643,7 +2390,8 @@
     }
   }
 
-  function finishBatch() {
+  function finishBatch(batchRunId) {
+    if (batchRunId !== state.batchRunId) return;
     const btnCheck = document.getElementById('qm-btn-batch-check');
     const btnExport = document.getElementById('qm-btn-export-batch');
     const progress = document.getElementById('qm-batch-progress');
@@ -1944,7 +2692,7 @@
         if (itemWithLink) {
           if (itemWithLink.msg === 'Buka Halaman Kehadiran') btnText = 'Buka Halaman Kehadiran';
           else if (itemWithLink.msg && itemWithLink.msg.includes('Pulang awal')) btnText = 'Cek Kehadiran';
-          else if (itemWithLink.msg === 'Cek Distribusi' || itemWithLink.msg === 'Shift kosong' || itemWithLink.msg === 'Shift muncul') btnText = 'Fix Distribusi';
+          else if (itemWithLink.msg === 'Cek Distribusi' || (itemWithLink.msg && itemWithLink.msg.startsWith('Shift Kosong')) || itemWithLink.msg === 'Shift muncul') btnText = 'Fix Distribusi';
           else if (itemWithLink.msg === 'SPKL Disetujui (Cek Jenis OT)') btnText = 'Cek Halaman SPKL';
           else if (itemWithLink.msg === 'SPKL Belum Disetujui') btnText = 'Cek SPKL Online';
           else if (itemWithLink.msg === 'SPKL Ditolak') btnText = 'Cek SPKL (Ditolak)';
@@ -1994,7 +2742,425 @@
    * 9. SPKL & BARCODE CHECKS
    * ============================================================ */
 
-  async function checkSPKLOnline(cells) {
+  function isSameCalendarDay(a, b) {
+    return !!a && !!b
+      && a.getFullYear() === b.getFullYear()
+      && a.getMonth() === b.getMonth()
+      && a.getDate() === b.getDate();
+  }
+
+  function formatDisplayDate(dateStr) {
+    const parsed = parseHrisDate(dateStr);
+    if (!parsed) return dateStr;
+    return parsed.toLocaleDateString('id-ID', {
+      day: '2-digit',
+      month: 'long',
+      year: 'numeric'
+    });
+  }
+
+  function extractDateTextCandidate(text) {
+    const clean = String(text || '').trim();
+    if (!clean) return '';
+
+    const matchers = [
+      /\b\d{4}[-/]\d{1,2}[-/]\d{1,2}\b/,
+      /\b\d{1,2}[-/]\d{1,2}[-/]\d{2,4}\b/,
+      /\b\d{1,2}-[A-Za-z]{3}-\d{4}\b/
+    ];
+
+    for (const matcher of matchers) {
+      const match = clean.match(matcher);
+      if (match) return match[0];
+    }
+    return '';
+  }
+
+  function parseBarcodeRowDate(cellTexts, dateColIdx, fallbackDate) {
+    const candidates = [];
+    if (dateColIdx !== -1 && cellTexts[dateColIdx]) candidates.push(cellTexts[dateColIdx]);
+    cellTexts.forEach(text => {
+      if (text && !candidates.includes(text)) candidates.push(text);
+    });
+
+    for (const candidate of candidates) {
+      const extracted = extractDateTextCandidate(candidate);
+      if (extracted) {
+        const parsed = parseHrisDate(extracted);
+        if (parsed) return { date: parsed, raw: extracted };
+      }
+
+      if (/^\d{1,2}$/.test(candidate) && fallbackDate) {
+        const day = parseInt(candidate, 10);
+        if (day >= 1 && day <= 31) {
+          return {
+            date: new Date(fallbackDate.getFullYear(), fallbackDate.getMonth(), day),
+            raw: candidate.padStart(2, '0')
+          };
+        }
+      }
+    }
+
+    return null;
+  }
+
+  function normalizeBarcodeStatusText(text) {
+    const clean = String(text || '').trim();
+    const lower = clean.toLowerCase();
+    if (lower.includes('masuk')) return 'Masuk';
+    if (lower.includes('keluar')) return 'Keluar';
+    return clean || '-';
+  }
+
+  function extractBarcodeRowStatus(cellTexts, statusColIdx) {
+    const candidates = [];
+    if (statusColIdx !== -1 && cellTexts[statusColIdx]) candidates.push(cellTexts[statusColIdx]);
+    cellTexts.forEach(text => {
+      if (text && !candidates.includes(text)) candidates.push(text);
+    });
+
+    const matched = candidates.find(text => /masuk|keluar/i.test(text));
+    return normalizeBarcodeStatusText(matched || candidates[0] || '');
+  }
+
+  function extractBarcodeRowTime(cellTexts, timeColIdx) {
+    const candidates = [];
+    if (timeColIdx !== -1 && cellTexts[timeColIdx]) candidates.push(cellTexts[timeColIdx]);
+    cellTexts.forEach(text => {
+      if (text && !candidates.includes(text)) candidates.push(text);
+    });
+
+    for (const candidate of candidates) {
+      const match = String(candidate).match(/\b\d{1,2}[:.]\d{2}(?::\d{2})?\b/);
+      if (match) return match[0];
+    }
+    return '-';
+  }
+
+  function parseBarcodeAttendanceSummary(doc, nrp, startDateStr, endDateStr) {
+    const start = parseHrisDate(startDateStr);
+    const end = parseHrisDate(endDateStr || startDateStr);
+    if (!start || !end) throw new Error('Tanggal tidak valid.');
+
+    const headerCells = Array.from(doc.querySelectorAll('table thead th'));
+    const headers = headerCells.map(cell => normalizeEmployeeHeader(cell.textContent));
+    const dateColIdx = firstMatchedHeaderIndex(headers, ['tanggal', 'tgl', 'date']);
+    const statusColIdx = firstMatchedHeaderIndex(headers, ['status']);
+    const timeColIdx = firstMatchedHeaderIndex(headers, ['jam', 'waktu', 'time', 'scan']);
+
+    const rows = Array.from(doc.querySelectorAll('table tbody tr'));
+    const entries = [];
+
+    rows.forEach((row, index) => {
+      const cells = Array.from(row.querySelectorAll('td'));
+      if (cells.length === 0) return;
+
+      const cellTexts = cells.map(cell => normalizeEmployeeCellText(cell)).filter(Boolean);
+      if (cellTexts.length === 0) return;
+
+      // Use start date as fallback for year/month if missing in row
+      const parsedDate = parseBarcodeRowDate(cellTexts, dateColIdx, start);
+      if (!parsedDate) return;
+
+      const d = parsedDate.date;
+      // Filter by range
+      if (d.getTime() < start.getTime() || d.getTime() > end.getTime()) return;
+
+      const status = extractBarcodeRowStatus(cellTexts, statusColIdx);
+      const time = extractBarcodeRowTime(cellTexts, timeColIdx);
+      const rawSummary = cellTexts.join(' | ');
+
+      const actions = [];
+      row.querySelectorAll('a, button').forEach(el => {
+        const text = el.textContent.trim();
+        if (/edit|ubah|hapus|delete/i.test(text)) {
+          actions.push({
+            text: text,
+            href: el.getAttribute('href'),
+            onclick: el.getAttribute('onclick'),
+            className: el.className
+          });
+        }
+      });
+
+      entries.push({
+        key: `${nrp}-${parsedDate.raw || index}-${index}`,
+        date: d,
+        dateText: parsedDate.raw || formatDisplayDate(d),
+        status,
+        time,
+        rawSummary,
+        actions
+      });
+    });
+
+    // Sort by date then time
+    entries.sort((a, b) => a.date - b.date || (a.time || '').localeCompare(b.time || ''));
+
+    const masukEntries = entries.filter(entry => entry.status === 'Masuk');
+    const keluarEntries = entries.filter(entry => entry.status === 'Keluar');
+
+    let dateLabel = formatDisplayDate(startDateStr);
+    if (endDateStr && endDateStr !== startDateStr) {
+      dateLabel += ` - ${formatDisplayDate(endDateStr)}`;
+    }
+
+    return {
+      nrp,
+      dateLabel,
+      entries,
+      hasMasuk: masukEntries.length > 0,
+      hasKeluar: keluarEntries.length > 0
+    };
+  }
+
+  async function fetchBarcodeAttendanceSummary(nrp, startDate, endDate) {
+    const start = parseHrisDate(startDate);
+    if (!start) throw new Error('Tanggal tidak valid.');
+
+    // Fetch month of start date. Range across months is not supported yet for simplicity.
+    const bulan = String(start.getMonth() + 1).padStart(2, '0');
+    const tahun = start.getFullYear();
+    const url = routeByNrp(nrp, ROUTES.ABSEN_BARCODE, ROUTES.ABSEN_BARCODE_OS)(tahun, bulan, nrp);
+    const html = await hrisFetch(url);
+    return parseBarcodeAttendanceSummary(parseHTML(html), nrp, startDate, endDate);
+  }
+
+  async function fetchSpklSummary(nrp, bulan, tahun) {
+    const url = spklListUrl(nrp, bulan, tahun);
+    const html = await hrisFetch(url);
+    return parseSpklSummary(parseHTML(html), nrp);
+  }
+
+  function parseSpklSummary(doc, nrp) {
+    const entries = [];
+    const rows = doc.querySelectorAll('table tbody tr');
+
+    // Detect header index
+    let tglIdx = -1, otIdx = -1, statusIdx = -1, shiftIdx = -1, mskIdx = -1, klrIdx = -1, jamOtIdx = -1;
+    doc.querySelectorAll('table th').forEach((th, i) => {
+      const txt = th.textContent.trim().toLowerCase();
+      if (txt.includes('tanggal') || txt === 'tgl') tglIdx = i;
+      if (txt.includes('kode') || txt.includes('jenis') || txt.includes('ot')) otIdx = i;
+      if (txt.includes('status')) statusIdx = i;
+      if (txt.includes('shift')) shiftIdx = i;
+      if (txt.includes('jam masuk') || txt.includes('jam awal') || txt.includes('mulai')) mskIdx = i;
+      if (txt.includes('jam pulang') || txt.includes('jam akhir') || txt.includes('selesai')) klrIdx = i;
+      if (txt.includes('jam ot') || txt.includes('jam lembur') || txt.includes('tambahan')) jamOtIdx = i;
+    });
+
+    rows.forEach(tr => {
+      const tds = tr.querySelectorAll('td');
+      if (tds.length < 3) return;
+
+      const dateText = tglIdx !== -1 ? tds[tglIdx].textContent.trim() : '';
+      if (!dateText) return;
+
+      const actions = [];
+      tr.querySelectorAll('a, button').forEach(el => {
+        const text = el.textContent.trim();
+        if (text) {
+          actions.push({
+            text,
+            href: el.getAttribute('href'),
+            onclick: el.getAttribute('onclick')
+          });
+        }
+      });
+
+      entries.push({
+        dateText,
+        otCode: otIdx !== -1 ? tds[otIdx].textContent.trim() : '-',
+        status: statusIdx !== -1 ? tds[statusIdx].textContent.trim() : '-',
+        shift: shiftIdx !== -1 ? tds[shiftIdx].textContent.trim() : '-',
+        jamAwal: mskIdx !== -1 ? tds[mskIdx].textContent.trim() : '-',
+        jamAkhir: klrIdx !== -1 ? tds[klrIdx].textContent.trim() : '-',
+        jamOt: jamOtIdx !== -1 ? tds[jamOtIdx].textContent.trim() : '-',
+        actions
+      });
+    });
+
+    return { nrp, entries };
+  }
+
+  function renderAttendanceCheckResult() {
+    const wrap = document.getElementById('qm-hadir-check-result');
+    const btn = document.getElementById('qm-btn-hadir-check');
+    if (!wrap) return;
+
+    const current = state.attendanceCheck || createEmptyAttendanceCheck();
+    if (btn) {
+      btn.disabled = current.loading;
+      btn.textContent = current.loading ? 'Checking...' : 'Check';
+    }
+
+    if (current.loading) {
+      renderSafe(wrap, '<div class="qm-hadir-check-card"><div class="qm-flex qm-items-center qm-gap-s"><span class="qm-spinner"></span><span>Memuat ringkasan kehadiran...</span></div></div>');
+      return;
+    }
+
+    if (current.error) {
+      renderSafe(wrap, `<div class="qm-hadir-check-card qm-hadir-check-error">${escapeHtml(current.error)}</div>`);
+      return;
+    }
+
+    if (!current.summary) {
+      renderSafe(wrap, '<div class="qm-hadir-check-card qm-hadir-check-empty">Pilih NRP dan tanggal untuk melihat ringkasan barcode harian.</div>');
+      return;
+    }
+
+    const summary = current.summary;
+    const emp = summary.employee || {};
+    const totalEntries = summary.entries.length;
+    const statusLabel = totalEntries === 0
+      ? 'Tidak ada data'
+      : (summary.hasMasuk && summary.hasKeluar ? 'LENGKAP' : 'PERLU CEK');
+    const statusClass = totalEntries === 0 || !summary.hasMasuk || !summary.hasKeluar ? 'err' : 'ok';
+
+    const detailHtml = totalEntries === 0
+      ? '<div class="qm-hadir-check-detail-empty">Tidak ada baris barcode pada rentang tanggal ini.</div>'
+      : summary.entries.map(entry => {
+        const actionsHtml = (entry.actions || []).map(act => {
+          const isDelete = /hapus|delete/i.test(act.text);
+          const cls = isDelete ? 'qm-text-danger' : 'qm-text-primary';
+          const href = act.href ? toAbsoluteHrisUrl(act.href) : '#';
+          const onclick = act.onclick ? `onclick="${act.onclick.replace(/"/g, '&quot;')}"` : '';
+
+          if (isDelete) {
+            return `<button type="button" class="qm-btn-text qm-font-xs qm-text-danger qm-btn-barcode-delete" data-url="${href}" style="margin-left: 8px;">${escapeHtml(act.text)}</button>`;
+          }
+          return `<a href="${href}" ${onclick} target="_blank" class="qm-btn-text qm-font-xs ${cls}" style="margin-left: 8px;">${escapeHtml(act.text)}</a>`;
+        }).join('');
+
+        return `
+          <div class="qm-hadir-check-detail-item">
+            <div class="qm-hadir-check-detail-top">
+              <span class="qm-hadir-check-detail-status qm-font-semibold" style="font-size: var(--qm-font-s);">${escapeHtml(entry.status)}</span>
+              <span class="qm-hadir-check-detail-time qm-font-mono" style="font-size: var(--qm-font-s);">${escapeHtml(entry.time || '-')}</span>
+              <div class="qm-flex-1 qm-ml-m qm-text-muted" style="font-size: var(--qm-font-xs); opacity: 0.8;">
+                ${escapeHtml(entry.dateText)} ${escapeHtml(entry.time || '')}
+              </div>
+              <div class="qm-hadir-check-actions">${actionsHtml}</div>
+            </div>
+          </div>
+        `;
+      }).join('');
+
+    renderSafe(wrap, `
+      <div class="qm-hadir-check-card">
+        <div class="qm-hadir-check-summary">
+          <div class="qm-hadir-check-head">
+            <div>
+              <div class="qm-hadir-check-title" style="font-size: var(--qm-font-m);">
+                ${escapeHtml(emp.nama || summary.nrp)}
+                <span class="qm-text-muted qm-ml-s qm-font-normal" style="font-size: var(--qm-font-s);">${escapeHtml(summary.nrp)}</span>
+                <span class="qm-text-muted qm-ml-m qm-font-normal" style="font-size: var(--qm-font-xs); border-left: 1px solid rgba(0,0,0,0.1); padding-left: 10px;">
+                  ${escapeHtml(emp.bagian || '-')} • ${escapeHtml(emp.seksi || '-')} • ${escapeHtml(emp.group || '-')}
+                </span>
+              </div>
+            </div>
+            <span class="qm-badge ${statusClass}">${escapeHtml(statusLabel)}</span>
+          </div>
+        </div>
+        <div class="qm-hadir-check-detail">
+          <div class="qm-hadir-check-detail-title">DETAIL BARCODE</div>
+          ${detailHtml}
+        </div>
+      </div>
+    `);
+  }
+
+  function renderSpklCheckResult() {
+    const wrap = document.getElementById('qm-spkl-result');
+    const btn = document.getElementById('qm-btn-spkl-page-cek');
+    if (!wrap) return;
+
+    const current = state.spklCheck || createEmptySpklCheck();
+    if (btn) {
+      btn.disabled = current.loading;
+      const originalText = btn.innerHTML;
+      if (current.loading) {
+        if (!btn.dataset.originalHtml) btn.dataset.originalHtml = originalText;
+        btn.innerHTML = '<span class="qm-spinner qm-spinner-xs"></span> Checking...';
+      } else if (btn.dataset.originalHtml) {
+        btn.innerHTML = btn.dataset.originalHtml;
+      }
+    }
+
+    if (current.loading) {
+      renderSafe(wrap, '<div class="qm-hadir-check-card"><div class="qm-flex qm-items-center qm-gap-s"><span class="qm-spinner"></span><span>Memuat data SPKL...</span></div></div>');
+      return;
+    }
+
+    if (current.error) {
+      renderSafe(wrap, `<div class="qm-hadir-check-card qm-hadir-check-error">${escapeHtml(current.error)}</div>`);
+      return;
+    }
+
+    if (!current.summary) {
+      renderSafe(wrap, '');
+      return;
+    }
+
+    const summary = current.summary;
+    const entries = summary.entries;
+    const total = entries.length;
+
+    const listHtml = total === 0
+      ? '<div class="qm-hadir-check-detail-empty">Tidak ada data SPKL untuk bulan ini.</div>'
+      : entries.map((entry, idx) => {
+        const actionsHtml = (entry.actions || []).map(act => {
+          const isEdit = /edit/i.test(act.text);
+          const isDelete = /hapus|delete/i.test(act.text);
+          const href = act.href ? toAbsoluteHrisUrl(act.href) : '#';
+
+          if (isEdit) {
+            return `<button type="button" class="qm-btn-text qm-font-xs qm-text-primary qm-spkl-inline-edit-btn" data-index="${idx}" style="margin-left: 8px;">Edit</button>`;
+          }
+          if (isDelete) {
+            return `<button type="button" class="qm-btn-text qm-font-xs qm-text-danger qm-spkl-inline-delete-btn" data-url="${href}" style="margin-left: 8px;">Delete</button>`;
+          }
+          return `<a href="${href}" target="_blank" class="qm-btn-text qm-font-xs qm-text-primary" style="margin-left: 8px;">${escapeHtml(act.text)}</a>`;
+        }).join('');
+
+        const day = entry.dateText.split(/[-/]/)[0];
+
+        return `
+          <div class="qm-hadir-check-detail-item">
+            <div class="qm-hadir-check-detail-top">
+              <div class="qm-flex qm-items-center" style="min-width: 30px;">
+                <span class="qm-font-semibold" style="font-size: var(--qm-font-s);">${escapeHtml(day)}</span>
+              </div>
+              <div class="qm-flex qm-flex-col qm-ml-s" style="min-width: 90px;">
+                <span class="qm-font-mono" style="font-size: var(--qm-font-s); font-weight: 600;">${escapeHtml(entry.jamAwal)} - ${escapeHtml(entry.jamAkhir)}</span>
+                <span class="qm-text-muted" style="font-size: 10px;">Jenis: ${escapeHtml(entry.otCode)}</span>
+              </div>
+              <div class="qm-flex qm-items-center qm-ml-m">
+                <span class="qm-badge qm-badge-outline" style="font-size: 11px; padding: 1px 6px;">+${escapeHtml(entry.jamOt)} jam</span>
+              </div>
+              <div class="qm-flex-1 qm-ml-m">
+                <span class="qm-badge ${entry.status.toLowerCase().includes('acc') || entry.status.toLowerCase().includes('ok') || entry.status.toLowerCase().includes('finish') ? 'ok' : 'err'}" style="font-size: 10px; padding: 1px 4px;">${escapeHtml(entry.status)}</span>
+              </div>
+              <div class="qm-hadir-check-actions">${actionsHtml}</div>
+            </div>
+          </div>
+        `;
+      }).join('');
+
+    renderSafe(wrap, `
+      <div class="qm-hadir-check-card" style="margin-top: 8px; padding: 10px 14px;">
+        <div class="qm-hadir-check-detail">
+          <div class="qm-flex qm-justify-between qm-items-center qm-mb-s" style="padding-bottom: 4px; border-bottom: 1px solid var(--qm-border-warm);">
+            <div class="qm-hadir-check-detail-title" style="font-size: 11px; letter-spacing: 0.05em;">DAFTAR SPKL BULAN INI</div>
+            <a href="${spklListUrl(summary.nrp, document.getElementById('qm-spkl-page-bulan')?.value, new Date().getFullYear())}" target="_blank" class="qm-text-primary qm-font-xs" style="text-decoration: underline;">Buka Halaman Penuh</a>
+          </div>
+          ${listHtml}
+        </div>
+      </div>
+    `);
+  }
+
+  async function checkSPKLOnline(cells, runId) {
     const prof = startProfile('checkSPKLOnline', { cellCount: cells.length });
     const ctx = getPageContext();
     const bulan = String(ctx.bulan).padStart(2, '0');
@@ -2015,6 +3181,7 @@
 
     try {
       const data = await hrisFetch(spklUrl);
+      if (runId !== state.anomalyRunId) return;
       const doc = parseHTML(data);
 
       // Deteksi data nyata: ada tidaknya baris dengan minimal 3 kolom di tbody
@@ -2175,16 +3342,16 @@
           }
         });
       });
-      renderAnomalies();
+      if (runId === state.anomalyRunId) renderAnomalies();
     } catch (e) {
       Logger.warn('Gagal mengambil data SPKL Online.', e);
     } finally {
       finishProfile(prof, { cellCount: cells.length, anomalyCount: state.anomalies.length });
-      decrementPendingChecks();
+      decrementPendingChecks(runId);
     }
   }
 
-  async function checkBarcodeMangkir(absentDates) {
+  async function checkBarcodeMangkir(absentDates, runId) {
     const prof = startProfile('checkBarcodeMangkir', { absentCount: absentDates.length });
     const ctx = getPageContext();
     if (!ctx.nrp) {
@@ -2196,6 +3363,7 @@
 
     try {
       const data = await hrisFetch(barcodeUrl);
+      if (runId !== state.anomalyRunId) return;
       const doc = parseHTML(data);
       let dateColIdx = -1, statusColIdx = -1;
 
@@ -2261,13 +3429,15 @@
           state.anomalies.push({ tgl: item.date, colIndex: 3, msg: 'Validasi Barcode: ' + errMessage, link: barcodeUrl });
         }
       });
-      applyMark(document, state.anomalies);
-      renderAnomalies();
+      if (runId === state.anomalyRunId) {
+        applyMark(document, state.anomalies);
+        renderAnomalies();
+      }
     } catch (e) {
       Logger.warn('Gagal mengambil data barcode.');
     } finally {
       finishProfile(prof, { absentCount: absentDates.length, anomalyCount: state.anomalies.length });
-      decrementPendingChecks();
+      decrementPendingChecks(runId);
     }
   }
 
@@ -2350,7 +3520,7 @@
         const seenDates = new Set();
 
         spklFixAnomalies.forEach(a => {
-          // Extract full_date from link to ensure uniqueness across month/year if possible, 
+          // Extract full_date from link to ensure uniqueness across month/year if possible,
           // but usually tgl (day) is enough within a month
           const fullDateMatch = a.link.match(/full_date=([^&]+)/);
           const dateKey = fullDateMatch ? fullDateMatch[1] : a.tgl;
@@ -2381,7 +3551,8 @@
 
 
   /** Unified finally-block helper for pending checks state. */
-  function decrementPendingChecks() {
+  function decrementPendingChecks(runId) {
+    if (runId !== state.anomalyRunId) return;
     state.pendingChecks--;
     if (state.pendingChecks <= 0) {
       const tab = document.querySelector('[data-pane="anomali"]');
@@ -2520,7 +3691,12 @@
             }
 
             UI.setGlobalProgress(95, 'Mengirim permintaan...');
-            sessionStorage.setItem(STORAGE.AUTO_FINISHED, 'true');
+            const activeFlow = getAutomationFlow();
+            if (activeFlow && (activeFlow.type === 'distribusi-jk' || activeFlow.type === 'distribusi-subsi')) {
+              markAutomationFlowFinished(activeFlow.id);
+            } else {
+              sessionStorage.setItem(STORAGE.AUTO_FINISHED, 'true');
+            }
             const buttons = document.querySelectorAll('button, input[type="submit"], .btn-primary');
             let submitBtn = null;
             for (const btn of buttons) {
@@ -2539,17 +3715,18 @@
   async function autoDistribusi() {
     const urlParams = getCurrentQueryParams();
     if (!urlParams.get('qm_auto_distribusi')) {
+      const activeFlow = getAutomationFlow();
+      const scopedDistribusiFlow = activeFlow && (activeFlow.type === 'distribusi-jk' || activeFlow.type === 'distribusi-subsi') ? activeFlow : null;
       // Check if we are on the result page of a distribution (no qm_auto param but AUTO_FINISHED is true)
-      if (sessionStorage.getItem(STORAGE.AUTO_FINISHED) === 'true') {
+      if ((scopedDistribusiFlow && scopedDistribusiFlow.finished) || (!activeFlow && sessionStorage.getItem(STORAGE.AUTO_FINISHED) === 'true')) {
         const pageText = document.body.textContent;
         const successAlert = document.querySelector('.alert-success, .alert-info');
 
         if (successAlert || pageText.includes('Distribution Process Completed')) {
           UI.showResult('success', 'Distribusi Selesai', 'Distribution Process Completed');
-          const returnUrl = sessionStorage.getItem(STORAGE.RETURN_URL);
+          const returnUrl = scopedDistribusiFlow?.returnUrl || sessionStorage.getItem(STORAGE.RETURN_URL);
           if (returnUrl) {
             setTimeout(() => {
-              sessionStorage.removeItem(STORAGE.RETURN_URL);
               window.location.href = returnUrl;
             }, 1500);
           }
@@ -2631,6 +3808,41 @@
         sessionStorage.removeItem(STORAGE.AUTO_NRP);
         sessionStorage.removeItem(STORAGE.AUTO_BULAN);
       }, TIMING.AUTO_FILL_DELAY);
+    }
+  }
+
+  function autoFillSpklEdit() {
+    if (!isActiveAutomationFlow(null, 'spkl-edit')) return;
+    const data = JSON.parse(sessionStorage.getItem('qm_spkl_edit_pending'));
+    if (!data) return;
+
+    Logger.info('autoFillSpklEdit: Filling form', data);
+
+    // Find fields using SELECTORS
+    const selOt = document.querySelector(SELECTORS.SPKL_MODAL_OT_TYPE);
+    const inMsk = document.querySelector(SELECTORS.SPKL_MODAL_MSK);
+    const inKlr = document.querySelector(SELECTORS.SPKL_MODAL_KLR);
+    const btnSave = document.querySelector(SELECTORS.SPKL_MODAL_SUBMIT);
+
+    if (selOt && inMsk && inKlr) {
+      // Small delay to ensure any internal scripts are ready
+      setTimeout(() => {
+        setField(selOt, data.ot);
+        setField(inMsk, data.jamAwal);
+        setField(inKlr, data.jamAkhir);
+
+        setTimeout(() => {
+          if (btnSave) {
+            Logger.info('autoFillSpklEdit: Clicking Save');
+            markAutomationFlowFinished(getAutomationFlow().id);
+            sessionStorage.removeItem('qm_spkl_edit_pending');
+            btnSave.click();
+          }
+        }, 1000);
+      }, 500);
+    } else {
+      Logger.warn('autoFillSpklEdit: Fields not found, retrying...');
+      setTimeout(autoFillSpklEdit, 1000);
     }
   }
 
@@ -2785,7 +3997,12 @@
 
         await new Promise(r => setTimeout(r, 800));
         if (btnSubmit) {
-          sessionStorage.setItem(STORAGE.AUTO_FINISHED, 'true');
+          const activeFlow = getAutomationFlow();
+          if (activeFlow && activeFlow.type === 'hadir-single') {
+            markAutomationFlowFinished(activeFlow.id);
+          } else {
+            sessionStorage.setItem(STORAGE.AUTO_FINISHED, 'true');
+          }
           btnSubmit.click();
         }
 
@@ -2980,7 +4197,7 @@
       return;
     }
 
-    sessionStorage.setItem(STORAGE.RETURN_URL, window.location.href);
+    createAutomationFlow('spkl-batch-single', window.location.href, { nrp, bulan, tahun });
 
     if (!/^\d{4}$|^\d{8}$/.test(nrp)) {
       UI.showResult('warning', 'NRP Tidak Valid', 'Gunakan 4 digit (Reguler) atau 8 digit (OS).');
@@ -3069,7 +4286,12 @@
     UI.setGlobalProgress(95, 'Menyimpan...');
     const btnSubmit = document.getElementById("submit");
     if (btnSubmit) {
-      sessionStorage.setItem(STORAGE.AUTO_FINISHED, 'true');
+      const activeFlow = getAutomationFlow();
+      if (activeFlow && activeFlow.type === 'spkl-batch-single') {
+        markAutomationFlowFinished(activeFlow.id);
+      } else {
+        sessionStorage.setItem(STORAGE.AUTO_FINISHED, 'true');
+      }
       await new Promise(r => setTimeout(r, TIMING.SPKL_SUBMIT_DELAY));
       btnSubmit.click();
       UI.setGlobalProgress(100, 'Selesai, Master!');
@@ -3180,7 +4402,7 @@
       return;
     }
 
-    sessionStorage.setItem(STORAGE.RETURN_URL, window.location.href);
+    createAutomationFlow('spkl-batch-many', window.location.href, { date: dateVal, jenisOt: jO });
 
     let jamAwal = "", jamAkhir = "", shiftVal = "";
     if (jO === "7") {
@@ -3280,7 +4502,12 @@
     if (!nextR) {
       sessionStorage.removeItem(STORAGE_KEY);
       UI.setGlobalProgress(100, 'Selesai!');
-      sessionStorage.setItem(STORAGE.AUTO_FINISHED, 'true');
+      const activeFlow = getAutomationFlow();
+      if (activeFlow && activeFlow.type === 'spkl-batch-many') {
+        markAutomationFlowFinished(activeFlow.id);
+      } else {
+        sessionStorage.setItem(STORAGE.AUTO_FINISHED, 'true');
+      }
     } else {
       sessionStorage.setItem(STORAGE_KEY, JSON.stringify(s));
     }
@@ -3303,7 +4530,7 @@
       return;
     }
 
-    sessionStorage.setItem(STORAGE.RETURN_URL, window.location.href);
+    createAutomationFlow('hadir-batch-many', window.location.href, { date: dateVal, status: statusVal });
 
     const nrps = raw.split(/[,\n\s]+/).map(v => v.trim()).filter(Boolean);
     const int = [], out = [], inv = [];
@@ -3385,7 +4612,12 @@
     if (!nextR) {
       sessionStorage.removeItem(STORAGE.HADIR_BATCH);
       UI.setGlobalProgress(100, 'Selesai!');
-      sessionStorage.setItem(STORAGE.AUTO_FINISHED, 'true');
+      const activeFlow = getAutomationFlow();
+      if (activeFlow && activeFlow.type === 'hadir-batch-many') {
+        markAutomationFlowFinished(activeFlow.id);
+      } else {
+        sessionStorage.setItem(STORAGE.AUTO_FINISHED, 'true');
+      }
     } else {
       sessionStorage.setItem(STORAGE.HADIR_BATCH, JSON.stringify(s));
       const targetUrl = getAbsenCreateUrlByKind(nextR);
@@ -3478,7 +4710,7 @@
     sessionStorage.setItem('qm_auto_hadir_bulan_active', 'true');
     sessionStorage.setItem('qm_auto_hadir_bulan_nrp', NRP);
     sessionStorage.setItem('qm_auto_hadir_bulan_antrean', JSON.stringify(antrean));
-    sessionStorage.setItem(STORAGE.RETURN_URL, window.location.href);
+    createAutomationFlow('hadir-bulan', window.location.href, { nrp: NRP, bulan: BULAN, tahun: TAHUN });
 
     const targetURL = absenAddUrl(NRP);
 
@@ -3540,7 +4772,12 @@
     UI.setGlobalProgress(100, 'Selesai! Menyimpan...');
     const btnSubmit = document.getElementById('submit');
     if (btnSubmit) {
-      sessionStorage.setItem(STORAGE.AUTO_FINISHED, 'true');
+      const activeFlow = getAutomationFlow();
+      if (activeFlow && activeFlow.type === 'hadir-bulan') {
+        markAutomationFlowFinished(activeFlow.id);
+      } else {
+        sessionStorage.setItem(STORAGE.AUTO_FINISHED, 'true');
+      }
       setTimeout(() => btnSubmit.click(), 500);
     } else {
       UI.hideGlobalLoader(1500);
@@ -3555,13 +4792,13 @@
   GM_addStyle(`
     :root {
       /* --- Design Tokens --- */
-      
+
       /* Colors: Primary (p), Success, Danger, Warning */
       /* Prefix p = Anthropic/Claude brand colors */
       --qm-p-500: #cc785c; /* Coral Brand */
       --qm-p-600: #a9583e; /* Coral Active */
       --qm-p-100: #faf9f5; /* Cream Canvas */
-      
+
       --qm-success: #5db872;
       --qm-success-bg: #e8f5e9;
       --qm-danger: #c64545; /* Error Crimson */
@@ -3628,8 +4865,8 @@
       --qm-shadow-panel: rgba(20,20,19,0.15);
       --qm-overlay: rgba(20,20,19,0.3);
       --qm-input-border: var(--qm-sand);
-      --qm-btn-bg: var(--qm-sand);
-      --qm-btn-text: var(--qm-charcoal);
+      --qm-btn-bg: var(--qm-white);
+      --qm-btn-text: var(--qm-near-black);
     }
 
     /* --- Dark Mode Semantic Overrides (Near Black) --- */
@@ -3650,9 +4887,9 @@
       --qm-danger-bg: #4a1414;
       --qm-input-border: #30302e;
       --qm-input-bg: #141413;
-      --qm-btn-bg: #1c1c1b;
-      --qm-btn-text: #ffffff;
-      
+      --qm-btn-bg: var(--qm-white);
+      --qm-btn-text: var(--qm-near-black);
+
       /* Force remap for all legacy/utility uses */
       --qm-ivory: #0a0a0a;
       --qm-parchment: #0a0a0a;
@@ -3667,15 +4904,15 @@
 
     #qm-panel.qm-dark {
       color: #ffffff;
-      
+
       .qm-pane, .qm-card, .qm-input, .qm-select, .qm-textarea, .qm-section-title, .qm-field-label {
         color: #ffffff !important;
       }
-      
+
       .qm-input::placeholder, .qm-textarea::placeholder {
         color: rgba(255, 255, 255, 0.4) !important;
       }
-      
+
       .qm-select option {
         background: #141413;
         color: #ffffff;
@@ -3725,10 +4962,10 @@
     #qm-panel, #qm-fab, #qm-global-loader {
       font-family: var(--qm-font-sans);
       -webkit-font-smoothing: antialiased;
-      
-      h1, h2, h3, h4, h5, h6, .qm-section-title { 
-        font-family: var(--qm-font-serif); 
-        font-weight: 500; 
+
+      h1, h2, h3, h4, h5, h6, .qm-section-title {
+        font-family: var(--qm-font-serif);
+        font-weight: 500;
         letter-spacing: -0.01em;
         line-height: 1.2;
       }
@@ -3789,13 +5026,13 @@
       white-space: nowrap;
       text-transform: uppercase;
       letter-spacing: 0.05em;
-      
+
       &.ok { background: var(--qm-success-bg); color: var(--qm-success); }
       &.err { background: var(--qm-danger-bg); color: var(--qm-danger); }
       &#qm-badge-anomali {
-        display: inline-flex; align-items:center; justify-content:center; 
-        min-width:16px; height:16px; background:var(--qm-danger); 
-        color:#fff; padding:2px; border-radius:50%; 
+        display: inline-flex; align-items:center; justify-content:center;
+        min-width:16px; height:16px; background:var(--qm-danger);
+        color:#fff; padding:2px; border-radius:50%;
         font-size:9px; font-weight:bold; line-height:1;
         position: absolute; top: 2px; right: 2px;
       }
@@ -3812,7 +5049,7 @@
       letter-spacing: 0.05em;
       &.qm-field-label-normal { font-weight: 500; text-transform: none; letter-spacing: normal; font-size: var(--qm-font-m); }
     }
-    
+
     .qm-input, .qm-select, .qm-textarea {
       font-size: var(--qm-font-m);
       border: 1px solid var(--qm-input-border);
@@ -3858,8 +5095,8 @@
       box-sizing: border-box;
       box-shadow: 0px 0px 0px 1px var(--qm-ring);
 
-      &:hover:not(:disabled) { 
-        background: var(--qm-white); 
+      &:hover:not(:disabled) {
+        background: var(--qm-sand);
         box-shadow: 0px 0px 0px 1px var(--qm-ring-subtle), 0px 4px 12px var(--qm-shadow);
       }
       &:focus-visible {
@@ -3867,49 +5104,35 @@
         box-shadow: 0 0 0 3px rgba(201, 100, 66, 0.4);
       }
       &:disabled { opacity: 0.5; cursor: not-allowed; }
-      
-      &.qm-btn-primary { 
-        background: var(--qm-p-500); 
-        color: #ffffff !important; 
+
+      &.qm-btn-primary {
+        background: var(--qm-p-500);
+        color: #ffffff !important;
         box-shadow: 0px 1px 2px rgba(201, 100, 66, 0.2);
-        &:hover { 
-          background: var(--qm-p-600); 
+        &:hover {
+          background: var(--qm-p-600);
           box-shadow: 0px 4px 12px rgba(201, 100, 66, 0.2);
         }
       }
-      &.qm-btn-dark { 
-        background: var(--qm-dark-surface); 
-        color: var(--qm-warm-silver); 
-        box-shadow: 0px 0px 0px 1px var(--qm-dark-surface);
-      }
-      &.qm-btn-secondary { 
-        background: var(--qm-white); 
-        color: var(--qm-near-black); 
-        box-shadow: 0px 0px 0px 1px var(--qm-ring); 
-        &:hover:not(:disabled) { background: var(--qm-sand); } 
-      }
-      &.qm-btn-outline { 
-        background: transparent; 
-        color: var(--qm-charcoal); 
-        box-shadow: 0px 0px 0px 1px var(--qm-ring); 
-        &:hover:not(:disabled) { background: var(--qm-sand); } 
-      }
-      &.qm-btn-success { background: var(--qm-success); color: #fff; box-shadow: 0px 0px 0px 1px var(--qm-success); }
-      &.qm-btn-record { width: auto; min-width: 80px; }
-      &.qm-btn-mini {
-        height: 24px; width: 24px; padding: 0;
-        background: var(--qm-bg-alt);
-        color: var(--qm-stone);
-        border-radius: 50%;
-        box-shadow: 0px 0px 0px 1px var(--qm-border-warm);
-        display: inline-flex; align-items: center; justify-content: center;
-        &:hover {
-          background: var(--qm-sand);
-          color: var(--qm-near-black);
-          box-shadow: 0px 0px 0px 1px var(--qm-ring);
+      &.qm-btn-success {
+        background: var(--qm-success);
+        color: #fff;
+        box-shadow: 0px 0px 0px 1px var(--qm-success);
+        &:hover:not(:disabled) {
+          background: #4da263;
+          box-shadow: 0px 4px 12px rgba(93, 184, 114, 0.22);
         }
-        svg { width: 12px; height: 12px; }
       }
+      &.qm-btn-danger {
+        background: var(--qm-danger);
+        color: #fff;
+        box-shadow: 0px 0px 0px 1px var(--qm-danger);
+        &:hover:not(:disabled) {
+          background: #b53333;
+          box-shadow: 0px 4px 12px rgba(198, 69, 69, 0.22);
+        }
+      }
+      &.qm-btn-record { width: auto; min-width: 80px; }
     }
 
     /* --- FAB & Backdrop --- */
@@ -3955,7 +5178,7 @@
       transform: translateX(-50%) translateY(10px); opacity: 0; pointer-events: none;
       transition: transform var(--qm-t-panel), opacity var(--qm-t-panel);
       will-change: transform, opacity;
-      
+
       &.qm-open { transform: translateX(-50%) translateY(0); opacity: 1; pointer-events: auto; }
 
       @media (min-width: 1200px) {
@@ -4076,7 +5299,7 @@
     .qm-accordion-header {
       transition: background 0.2s;
       outline: none;
-      
+
       &:focus-visible { background: var(--qm-sand); box-shadow: inset 0 0 0 2px var(--qm-p-500); }
       &:hover { background: var(--qm-sand); }
       &.expanded { border-bottom-color: transparent; }
@@ -4084,9 +5307,9 @@
     }
 
     .qm-accordion-chevron {
-      transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1); 
-      display: flex; align-items: center; justify-content: center; 
-      width: 28px; height: 28px; background: var(--qm-white); 
+      transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+      display: flex; align-items: center; justify-content: center;
+      width: 28px; height: 28px; background: var(--qm-white);
       border-radius: 50%; color: var(--qm-stone); transform: rotate(0deg);
       box-shadow: 0px 0px 0px 1px var(--qm-cream);
       &.qm-chevron { width: 18px; height: 18px; background: none !important; box-shadow: none !important; }
@@ -4105,7 +5328,7 @@
     /* --- Global Loader Toast --- */
     #qm-global-loader {
       position: fixed; bottom: 40px; left: 50%; transform: translateX(-50%); z-index: 99999;
-      background: var(--qm-surface); border-radius: var(--qm-r-xl); 
+      background: var(--qm-surface); border-radius: var(--qm-r-xl);
       padding: var(--qm-s-l) var(--qm-s-xl);
       box-shadow: 0 20px 80px rgba(0,0,0,0.3);
       display: flex; flex-direction: column; gap: var(--qm-s-m);
@@ -4113,15 +5336,15 @@
       width: 90%; max-width: 500px;
       animation: qm-toast-in-bottom 0.5s cubic-bezier(0.175, 0.885, 0.32, 1.1);
       transition: opacity 0.3s, transform 0.3s;
-      
+
       &.qm-loader-hiding { opacity: 0; transform: translateX(-50%) translateY(20px) scale(0.95); }
-      
+
       .qm-loader-header { display: flex; align-items: center; gap: var(--qm-s-xl); }
       .qm-loader-body { display: flex; flex-direction: column; flex: 1; }
       .qm-loader-title { font-weight: 700; font-size: 16px; color: var(--qm-near-black); line-height: 1.2; margin-bottom: 4px; font-family: var(--qm-font-serif); }
       .qm-loader-text { font-size: 11px; font-weight: 600; color: var(--qm-stone); line-height: 1.2; text-transform: uppercase; letter-spacing: 0.08em; }
-      
-      .qm-loader-footer { 
+
+      .qm-loader-footer {
         display: flex; justify-content: center; margin-top: var(--qm-s-xs);
         border-top: 1px solid var(--qm-border); padding-top: var(--qm-s-s);
       }
@@ -4131,8 +5354,8 @@
       position: relative; height: 12px; background: var(--qm-sand); overflow: hidden;
       border-radius: var(--qm-r-full); margin: 12px 0; cursor: pointer;
       box-shadow: inset 0 1px 2px rgba(0,0,0,0.1);
-      .qm-progress-bar { 
-        height: 100%; width: 0%; background: linear-gradient(90deg, var(--qm-p-500), var(--qm-p-600)); 
+      .qm-progress-bar {
+        height: 100%; width: 0%; background: linear-gradient(90deg, var(--qm-p-500), var(--qm-p-600));
         transition: width 0.4s cubic-bezier(0.4, 0, 0.2, 1);
         box-shadow: 0 0 10px rgba(201, 100, 66, 0.3);
       }
@@ -4166,7 +5389,7 @@
     /* --- History --- */
     #qm-history {
       max-height: 180px; overflow-y: auto; margin-top: 24px; font-size: var(--qm-font-s);
-      .qm-history-item { 
+      .qm-history-item {
         display: flex; align-items: center; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--qm-cream);
         &:last-child { border-bottom: none; }
         &:hover .qm-history-label { color: var(--qm-near-black); }
@@ -4179,7 +5402,7 @@
     .qm-fix-dot { position: absolute; top: 2px; right: 2px; width: 8px; height: 12px; background-color: var(--qm-p-500); border-radius: 100%; cursor: pointer; box-shadow: 0 0 4px var(--qm-shadow); }
     .qm-info-box { font-size: 11px; line-height: 1.6; padding: 16px; background: var(--qm-white); border: 1px solid var(--qm-cream); border-radius: var(--qm-r-m); color: var(--qm-stone); }
     .qm-ot7-box { padding: 20px; background: var(--qm-white); border-radius: var(--qm-r-l); border: 1px solid var(--qm-cream); box-shadow: 0px 0px 0px 1px var(--qm-ring); margin: 12px 0; animation: qm-fadein 0.3s ease; }
-    
+
     #qm-modal-jk {
       position: absolute; top: 100%; left: 0; z-index: 1000;
       width: 400px; background: var(--qm-white); border: 1px solid var(--qm-cream);
@@ -4262,7 +5485,7 @@
     }
     .qm-log-body-inline::-webkit-scrollbar { width: 6px; }
     .qm-log-body-inline::-webkit-scrollbar-thumb { background: #3d3d3a; border-radius: 3px; }
-    
+
     .qm-log-item {
       margin-bottom: 8px;
       padding-bottom: 8px;
@@ -4298,6 +5521,384 @@
     }
     .qm-btn-text:hover { background: var(--qm-cream); color: var(--qm-near-black); }
     .qm-btn-text.qm-text-danger:hover { background: #fdf2f2; color: #b53333; }
+    .qm-btn-inline { width: auto; min-width: 104px; padding: 0 14px; flex: 0 0 auto; }
+
+    /* --- Modal --- */
+    .qm-modal-overlay {
+      position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(0,0,0,0.5); z-index: 1100;
+      display: flex; align-items: center; justify-content: center;
+      backdrop-filter: blur(2px); animation: qm-fadein 0.2s ease;
+    }
+    .qm-modal-content {
+      width: 100%; max-width: 360px;
+      background: var(--qm-white); border-radius: var(--qm-r-l);
+      box-shadow: 0 20px 60px rgba(0,0,0,0.25);
+      overflow: hidden; animation: qm-modal-pop 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+    }
+    @keyframes qm-modal-pop { from { opacity: 0; transform: scale(0.9); } to { opacity: 1; transform: scale(1); } }
+    .qm-modal-header {
+      padding: 16px 20px; border-bottom: 1px solid var(--qm-border-warm);
+      display: flex; justify-content: space-between; align-items: center;
+      background: var(--qm-bg-alt);
+    }
+    .qm-modal-header h6 { margin: 0; font-size: 16px; color: var(--qm-near-black); }
+    .qm-modal-close-btn {
+      background: none; border: none; font-size: 24px; color: var(--qm-stone);
+      cursor: pointer; line-height: 1; padding: 4px;
+    }
+    .qm-modal-body { padding: 20px; }
+    .qm-modal-footer {
+      padding: 14px 20px; border-top: 1px solid var(--qm-border-warm);
+      display: flex; justify-content: flex-end; gap: 12px;
+      background: var(--qm-bg-alt);
+    }
+
+    .qm-karyawan-search-row {
+      display: flex;
+      align-items: end;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    .qm-karyawan-search-field {
+      flex: 1 1 240px;
+      min-width: 0;
+    }
+    .qm-karyawan-search-action {
+      width: 180px;
+      max-width: 100%;
+      flex: 0 0 auto;
+    }
+    .qm-karyawan-helper {
+      font-size: var(--qm-font-s);
+      color: var(--qm-stone);
+      line-height: 1.5;
+    }
+    .qm-karyawan-results-summary {
+      font-size: var(--qm-font-s);
+      color: var(--qm-stone);
+      margin: 0 0 12px 0;
+    }
+    .qm-karyawan-results-list {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .qm-karyawan-empty {
+      font-size: var(--qm-font-s);
+      color: var(--qm-stone);
+      line-height: 1.6;
+    }
+    .qm-karyawan-result-card {
+      padding: 16px 18px;
+    }
+    .qm-karyawan-result-head {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 16px;
+    }
+    .qm-karyawan-identity-card {
+      min-width: 0;
+      padding: 12px 14px;
+      border: 1px solid var(--qm-border-warm);
+      border-radius: var(--qm-r-m);
+      background: var(--qm-white);
+      box-shadow: inset 0 0 0 1px rgba(201, 100, 66, 0.04);
+    }
+    .qm-karyawan-result-top {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-bottom: 6px;
+    }
+    .qm-karyawan-result-nrp {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 26px;
+      padding: 0 10px;
+      border-radius: var(--qm-r-full);
+      background: var(--qm-sand);
+      color: var(--qm-charcoal);
+      font-family: var(--qm-font-mono);
+      font-size: var(--qm-font-s);
+      font-weight: 700;
+    }
+    .qm-karyawan-source-badge {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 24px;
+      padding: 0 10px;
+      border-radius: var(--qm-r-full);
+      font-size: var(--qm-font-xs);
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .qm-karyawan-source-badge.internal {
+      background: var(--qm-bg-alt);
+      color: var(--qm-p-600);
+    }
+    .qm-karyawan-source-badge.outsource {
+      background: #eef5ee;
+      color: #44684f;
+    }
+    .qm-karyawan-result-name {
+      font-size: 16px;
+      font-weight: 700;
+      color: var(--qm-near-black);
+      line-height: 1.4;
+      margin-bottom: 12px;
+    }
+    .qm-karyawan-identity-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+      gap: 8px 12px;
+    }
+    .qm-karyawan-identity-item {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      min-width: 0;
+    }
+    .qm-karyawan-identity-item span {
+      font-size: var(--qm-font-s);
+      color: var(--qm-stone);
+    }
+    .qm-karyawan-identity-item strong {
+      color: var(--qm-near-black);
+      font-size: var(--qm-font-m);
+      line-height: 1.4;
+      word-break: break-word;
+    }
+    .qm-karyawan-result-actions {
+      display: flex;
+      gap: 8px;
+      align-items: stretch;
+      justify-content: flex-end;
+    }
+    .qm-karyawan-action-active {
+      box-shadow: 0 0 0 2px rgba(201, 100, 66, 0.18);
+    }
+    .qm-hadir-check-card {
+      margin-top: 14px;
+      padding: 14px;
+      border: 1px solid var(--qm-border-warm);
+      border-radius: var(--qm-r-m);
+      background: var(--qm-bg-alt);
+    }
+    .qm-hadir-check-empty {
+      font-size: var(--qm-font-s);
+      color: var(--qm-stone);
+      line-height: 1.6;
+    }
+    .qm-hadir-check-error {
+      color: var(--qm-danger);
+      background: var(--qm-danger-bg);
+      border-color: rgba(198, 69, 69, 0.2);
+      font-size: var(--qm-font-s);
+      line-height: 1.6;
+    }
+    .qm-hadir-check-summary {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .qm-hadir-check-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    .qm-hadir-check-title {
+      font-size: 16px;
+      font-weight: 700;
+      color: var(--qm-near-black);
+      line-height: 1.35;
+    }
+    .qm-hadir-check-meta {
+      margin-top: 4px;
+      font-size: var(--qm-font-s);
+      color: var(--qm-stone);
+      line-height: 1.5;
+    }
+    .qm-hadir-check-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+      gap: 10px;
+    }
+    .qm-hadir-check-stat {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      min-width: 0;
+      padding: 10px 12px;
+      border-radius: var(--qm-r-m);
+      background: var(--qm-white);
+      border: 1px solid var(--qm-border);
+    }
+    .qm-hadir-check-stat span {
+      font-size: var(--qm-font-xs);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--qm-stone);
+    }
+    .qm-hadir-check-stat strong {
+      font-size: var(--qm-font-s);
+      color: var(--qm-near-black);
+      line-height: 1.5;
+      word-break: break-word;
+      font-family: var(--qm-font-mono);
+    }
+    .qm-hadir-check-detail {
+      margin-top: 14px;
+      padding-top: 14px;
+      border-top: 1px solid var(--qm-border-warm);
+    }
+    .qm-hadir-check-detail-title {
+      margin-bottom: 10px;
+      font-size: var(--qm-font-s);
+      font-weight: 700;
+      color: var(--qm-stone);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .qm-hadir-check-detail-empty {
+      font-size: var(--qm-font-s);
+      color: var(--qm-stone);
+      line-height: 1.6;
+    }
+    .qm-hadir-check-detail-item {
+      padding: 10px 12px;
+      border-radius: var(--qm-r-m);
+      background: var(--qm-white);
+      border: 1px solid var(--qm-border);
+    }
+    .qm-hadir-check-detail-item + .qm-hadir-check-detail-item {
+      margin-top: 8px;
+    }
+    .qm-hadir-check-detail-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 6px;
+    }
+    .qm-hadir-check-detail-status {
+      font-size: var(--qm-font-s);
+      font-weight: 700;
+      color: var(--qm-near-black);
+    }
+    .qm-hadir-check-detail-time {
+      font-size: var(--qm-font-s);
+      font-weight: 700;
+      color: var(--qm-p-600);
+      font-family: var(--qm-font-mono);
+    }
+    .qm-hadir-check-detail-raw {
+      font-size: var(--qm-font-s);
+      color: var(--qm-stone);
+      line-height: 1.6;
+      word-break: break-word;
+    }
+    .qm-karyawan-panel {
+      margin-top: 16px;
+      padding-top: 16px;
+      border-top: 1px solid var(--qm-border-warm);
+    }
+    .qm-karyawan-panel-title {
+      font-size: var(--qm-font-s);
+      font-weight: 700;
+      color: var(--qm-stone);
+      text-transform: uppercase;
+      margin-bottom: 12px;
+    }
+    .qm-karyawan-detail-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 10px;
+    }
+    .qm-karyawan-detail-item {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      padding: 10px 12px;
+      border: 1px solid var(--qm-border-warm);
+      border-radius: var(--qm-r-m);
+      background: var(--qm-white);
+      min-width: 0;
+    }
+    .qm-karyawan-detail-item span {
+      font-size: var(--qm-font-xs);
+      font-weight: 700;
+      color: var(--qm-stone);
+      text-transform: uppercase;
+    }
+    .qm-karyawan-detail-item strong {
+      font-size: var(--qm-font-s);
+      color: var(--qm-near-black);
+      line-height: 1.5;
+      word-break: break-word;
+    }
+    .qm-karyawan-editor-summary {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+    .qm-karyawan-summary-pill {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      padding: 10px 12px;
+      border: 1px solid var(--qm-border-warm);
+      border-radius: var(--qm-r-m);
+      background: var(--qm-bg);
+      font-size: var(--qm-font-s);
+      color: var(--qm-stone);
+    }
+    .qm-karyawan-summary-pill strong {
+      color: var(--qm-near-black);
+      font-size: var(--qm-font-m);
+    }
+    .qm-karyawan-editor-note {
+      font-size: var(--qm-font-s);
+      margin-bottom: 12px;
+      line-height: 1.5;
+    }
+    .qm-karyawan-editor-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+    .qm-karyawan-editor-field {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      min-width: 0;
+    }
+    .qm-karyawan-save-btn {
+      width: 100%;
+    }
+    @media (max-width: 680px) {
+      .qm-karyawan-result-head {
+        grid-template-columns: 1fr;
+      }
+      .qm-karyawan-result-actions {
+        width: 100%;
+      }
+      .qm-karyawan-result-actions .qm-btn-inline {
+        flex: 1 1 0;
+        width: auto;
+      }
+      .qm-karyawan-search-action {
+        width: 100%;
+      }
+    }
 
     #qm-btn-show-logs.qm-active {
       background: #181715 !important;
@@ -4319,13 +5920,6 @@
       letter-spacing: -0.02em !important;
     }
 
-    .qm-btn-coral {
-      background: var(--qm-p-500);
-      color: #fff;
-      border: none;
-      transition: background var(--qm-t-fast);
-      &:hover { background: var(--qm-p-600); }
-    }
   `);
 
   /** Claude-style Spike Mark SVG (4-spoke radial). */
@@ -4364,6 +5958,9 @@
         <div id="qm-sidebar" role="tablist">
           <button class="qm-tab active" data-pane="check-nrp" role="tab" title="Cek NRP">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          </button>
+          <button class="qm-tab" data-pane="karyawan" role="tab" title="Karyawan">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M22 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a4 4 0 0 1 0 7.75"></path></svg>
           </button>
           <button class="qm-tab" data-pane="spkl" role="tab" title="SPKL">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
@@ -4406,7 +6003,7 @@
               <input id="qm-input-nrp" type="text" placeholder="NRP" maxlength="8" autocomplete="off" spellcheck="false" class="qm-input">
             </div>
             <div class="qm-flex-1">
-               <button id="qm-btn-check" type="button" class="qm-btn qm-btn-coral"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg> Cek NRP</button>
+               <button id="qm-btn-check" type="button" class="qm-btn qm-btn-primary"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg> Cek NRP</button>
             </div>
           </div>
           <div id="qm-result" class="qm-mt-s">
@@ -4422,7 +6019,7 @@
           <div class="qm-mb-s">
             <textarea id="qm-input-multi-nrp" placeholder="Daftar NRP (pisah dengan enter/koma)" rows="4" class="qm-textarea"></textarea>
           </div>
-          <button id="qm-btn-batch-check" type="button" class="qm-btn qm-btn-coral">Proses Batch</button>
+          <button id="qm-btn-batch-check" type="button" class="qm-btn qm-btn-primary">Proses Batch</button>
 
           <div id="qm-batch-progress" class="qm-mt-m qm-hidden">
             <div class="qm-batch-progress-container">
@@ -4436,12 +6033,52 @@
         </div>
       </div>
 
+      <div id="qm-pane-karyawan" class="qm-pane">
+        <div class="qm-pane-header">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M22 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a4 4 0 0 1 0 7.75"></path></svg>
+          <h6 class="qm-serif">Karyawan</h6>
+        </div>
+        <div class="qm-card qm-mb-m qm-card-bordered">
+          <h6 class="qm-section-title qm-mb-s qm-serif">${SPIKE_SVG} Cari Data Personal</h6>
+          <div class="qm-karyawan-search-row">
+            <div class="qm-karyawan-search-field">
+              <label class="qm-field-label">NRP atau Nama</label>
+              <input id="qm-input-karyawan-search" type="text" placeholder="NRP 4/8 digit atau nama karyawan" autocomplete="off" spellcheck="false" class="qm-input">
+            </div>
+            <div class="qm-karyawan-search-action">
+              <button id="qm-btn-karyawan-search" type="button" class="qm-btn qm-btn-primary">Cari Karyawan</button>
+            </div>
+          </div>
+          <div class="qm-karyawan-helper qm-mt-s">Pencarian NRP akan langsung memilih halaman internal atau outsource. Pencarian nama akan memeriksa keduanya, lalu menampilkan tombol Detail profil dan Edit HRIS untuk quick edit JK/KK.</div>
+        </div>
+        <div id="qm-karyawan-results"></div>
+      </div>
+
       <div id="qm-pane-spkl" class="qm-pane">
         <div class="qm-pane-header">
           ${SPIKE_SVG}
           <h6 class="qm-serif">SPKL</h6>
         </div>
         <div class="qm-w-full">
+          <div class="qm-card qm-mb-m">
+            <h6 class="qm-section-title qm-mb-m qm-text-s">${SPIKE_SVG} Cek SPKL</h6>
+            <div class="qm-flex qm-gap-m qm-mb-m">
+              <div class="qm-flex-1">
+                <label class="qm-field-label">NRP</label>
+                <input id="qm-spkl-page-nrp" type="text" placeholder="NRP" maxlength="8" autocomplete="off" class="qm-input">
+              </div>
+              <div class="qm-flex-1">
+                <label class="qm-field-label">Bulan</label>
+                <select id="qm-spkl-page-bulan" class="qm-select qm-font-semibold"></select>
+              </div>
+            </div>
+            <button id="qm-btn-spkl-page-cek" type="button" class="qm-btn qm-btn-primary">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+              Cek SPKL
+            </button>
+            <div id="qm-spkl-result"></div>
+          </div>
+
           <div class="qm-card qm-mb-m">
             <h6 class="qm-section-title qm-mb-m qm-text-s">${SPIKE_SVG} SPKL Online</h6>
             <div class="qm-flex qm-gap-m qm-mb-m">
@@ -4586,11 +6223,16 @@
                 <input id="qm-input-hadir-check-nrp" type="text" placeholder="NRP" maxlength="8" autocomplete="off" class="qm-input">
               </div>
               <div class="qm-flex-1">
-                <label class="qm-field-label">Date</label>
-                <input id="qm-input-hadir-check-date" type="date" class="qm-input">
+                <label class="qm-field-label">Start date</label>
+                <input id="qm-input-hadir-check-start-date" type="date" class="qm-input">
+              </div>
+              <div class="qm-flex-1">
+                <label class="qm-field-label">End date</label>
+                <input id="qm-input-hadir-check-end-date" type="date" class="qm-input">
               </div>
             </div>
             <button id="qm-btn-hadir-check" type="button" class="qm-btn qm-btn-primary">Check</button>
+            <div id="qm-hadir-check-result" class="qm-mt-m"></div>
           </div>
 
           <div class="qm-card qm-mb-m">
@@ -4698,7 +6340,7 @@
                 <option value="0">Keluar</option>
               </select>
             </div>
-            <button id="qm-btn-hadir-many-proses" type="button" class="qm-btn qm-btn-teal">Proses Banyak NRP</button>
+            <button id="qm-btn-hadir-many-proses" type="button" class="qm-btn qm-btn-primary">Proses Banyak NRP</button>
           </div>
         </div>
       </div>
@@ -4711,7 +6353,7 @@
         <div class="qm-w-full">
           <div class="qm-card qm-mb-m">
             <h6 class="qm-section-title qm-mb-m qm-text-s">🏢 Per Subsi</h6>
-            
+
             <div id="qm-dist-subsi-jk-container" class="qm-mb-m">
               <div class="qm-flex qm-items-center qm-gap-s qm-text-muted qm-text-xs">
                 <span class="qm-spinner qm-spinner-dark" style="width:12px;height:12px"></span>
@@ -4777,7 +6419,7 @@
                 <label class="qm-field-label">Jam Kerja</label>
                 <div id="qm-dist-jk-options-container">
                   <div class="qm-flex qm-items-center qm-gap-s qm-text-muted qm-text-xs">
-                    <span class="qm-spinner qm-spinner-dark" style="width:12px;height:12px"></span> 
+                    <span class="qm-spinner qm-spinner-dark" style="width:12px;height:12px"></span>
                     <span>Memuat opsi...</span>
                   </div>
                 </div>
@@ -4824,7 +6466,7 @@
                 <input id="qm-dist-KK-date" type="month" class="qm-input">
               </div>
             </div>
-            
+
             <div class="qm-flex qm-gap-m qm-mb-m">
               <div class="qm-flex-1">
                 <label class="qm-field-label">Bagian</label>
@@ -4851,7 +6493,7 @@
                 <label class="qm-field-label">Kode Kalender Kerja</label>
                 <div id="qm-dist-KK-options-container">
                   <div class="qm-flex qm-items-center qm-gap-s qm-text-muted qm-text-xs">
-                    <span class="qm-spinner qm-spinner-dark" style="width:12px;height:12px"></span> 
+                    <span class="qm-spinner qm-spinner-dark" style="width:12px;height:12px"></span>
                     <span>Memuat opsi...</span>
                   </div>
                 </div>
@@ -4900,7 +6542,7 @@
           <label for="qm-config-debug-mode" class="qm-field-label qm-m-0 qm-cursor-pointer qm-select-none">Debug Mode (Console Logs)</label>
         </div>
 
-        <button id="qm-btn-show-logs" class="qm-btn qm-btn-secondary qm-w-full">
+        <button id="qm-btn-show-logs" class="qm-btn qm-w-full">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right:8px"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
           <span>Lihat Log Aktivitas</span>
         </button>
@@ -4921,8 +6563,69 @@
       </div> <!-- End qm-panel-body -->
     </div>
 
+      <div id="qm-footer">
+        <div class="qm-footer-left">
+          <span class="qm-badge qm-badge-outline qm-font-mono" style="font-size: 9px; opacity: 0.6; border-color: rgba(0,0,0,0.1)">v1.3.0</span>
+        </div>
+        <div class="qm-footer-right">
+          <div class="qm-flex qm-items-center qm-gap-m">
+            <label class="qm-switch">
+              <input type="checkbox" id="qm-config-debug-mode-footer">
+              <span class="qm-slider"></span>
+            </label>
+            <span style="font-size: 11px; color: var(--qm-stone)">Debug</span>
+          </div>
+        </div>
+      </div>
     </div>
-    
+
+    <!-- SPKL Edit Modal -->
+    <div id="qm-modal-spkl-edit" class="qm-modal-overlay qm-hidden">
+      <div class="qm-modal-content">
+        <div class="qm-modal-header">
+          <h6 class="qm-serif">Edit SPKL</h6>
+          <button type="button" class="qm-modal-close-btn">&times;</button>
+        </div>
+        <div class="qm-modal-body">
+          <div class="qm-mb-m">
+            <label class="qm-field-label">Tanggal</label>
+            <input id="qm-edit-spkl-tgl" type="text" class="qm-input" readonly style="background: var(--qm-bg-alt);">
+          </div>
+          <div class="qm-mb-m">
+            <label class="qm-field-label">Jenis OT</label>
+            <select id="qm-edit-spkl-ot" class="qm-select">
+              <option value="1">OT BIASA</option>
+              <option value="2">LONG SHIFT</option>
+              <option value="3">NON STOP</option>
+              <option value="4">OT AWAL</option>
+              <option value="5A">NO REST (AWAL)</option>
+              <option value="5B">NO REST (TENGAH)</option>
+              <option value="5C">NO REST (AKHIR)</option>
+              <option value="6">STANDBY</option>
+              <option value="7">LAIN-LAIN</option>
+              <option value="OT">OVERTIME</option>
+            </select>
+          </div>
+          <div class="qm-flex qm-gap-m qm-mb-m">
+            <div class="qm-flex-1">
+              <label class="qm-field-label">Jam Awal</label>
+              <input id="qm-edit-spkl-jam-awal" type="time" class="qm-input">
+            </div>
+            <div class="qm-flex-1">
+              <label class="qm-field-label">Jam Akhir</label>
+              <input id="qm-edit-spkl-jam-akhir" type="time" class="qm-input">
+            </div>
+          </div>
+        </div>
+        <div class="qm-modal-footer">
+          <button type="button" class="qm-modal-cancel-btn qm-btn qm-btn-outline">Batal</button>
+          <button type="button" id="qm-btn-spkl-edit-save" class="qm-btn qm-btn-primary">Simpan</button>
+        </div>
+      </div>
+    </div>
+
+    </div>
+
   `;
 
   const UI = {
@@ -5001,7 +6704,7 @@
 
       const cancelBtnHtml = allowCancel
         ? `<div class="qm-loader-footer">
-             <button id="qm-global-cancel-btn" class="qm-btn qm-btn-secondary" style="width: 100%; padding: 6px 12px; font-size: 11px; height: auto;">Batalkan Proses</button>
+             <button id="qm-global-cancel-btn" class="qm-btn" style="width: 100%; padding: 6px 12px; font-size: 11px; height: auto;">Batalkan Proses</button>
            </div>`
         : '';
 
@@ -5182,6 +6885,7 @@
     }
 
     if (!nrp || nrp.length < 4) return;
+    const runId = ++state.refreshRunId;
 
     // 2. Sync all inputs across tabs
     syncGlobalInputs(nrp, bulan, tahun);
@@ -5195,6 +6899,7 @@
     try {
       // 4. Single fetchEmployee call (cached internally)
       const emp = await fetchEmployee(nrp);
+      if (runId !== state.refreshRunId) return;
       if (!emp.found) {
         if (resBody) renderSafe(resBody, '<div class="qm-text-danger qm-p-m">NRP tidak ditemukan.</div>');
         return;
@@ -5227,14 +6932,14 @@
       // 6. Refresh Active Pane Data
       const activePane = document.querySelector('.qm-pane.active')?.id;
       if (activePane === 'qm-pane-distribusi') {
-        await refreshDistribusiOptions(nrp, emp);
+        await refreshDistribusiOptions(nrp, emp, runId);
       } else if (activePane === 'qm-pane-spkl') {
         // Additional SPKL specific refresh if needed
       }
 
     } catch (e) {
       Logger.error('refreshGlobalData error', e);
-      if (resBody) renderSafe(resBody, `<div class="qm-text-danger qm-p-m">Error: ${e.message}</div>`);
+      if (runId === state.refreshRunId && resBody) renderSafe(resBody, `<div class="qm-text-danger qm-p-m">Error: ${e.message}</div>`);
     }
   }
 
@@ -5250,29 +6955,29 @@
     const activePane = activePaneId();
     let key = 'global';
 
-    if (sourceId === 'spkl' || sourceId.startsWith('qm-fix-spkl') || activePane === 'qm-pane-spkl') key = 'spkl';
+    if (sourceId === 'spkl' || sourceId.startsWith('qm-fix-spkl') || sourceId.startsWith('qm-spkl-page') || activePane === 'qm-pane-spkl') key = 'spkl';
     else if (sourceId === 'kehadiran' || sourceId.startsWith('qm-input-hadir')) key = 'kehadiran';
     else if (sourceId === 'check-nrp' || sourceId === 'qm-input-bulan' || sourceId === 'qm-input-tahun' || sourceId === 'qm-input-nrp' || activePane === 'qm-pane-check-nrp') key = 'check-nrp';
 
     const contextMap = {
       'check-nrp': {
-        nrpIds: ['qm-input-nrp', 'qm-fix-spkl-nrp', 'qm-spkl-online-nrp', 'qm-input-hadir-check-nrp', 'qm-input-hadir-nrp', 'qm-input-hadir-bulan-nrp', 'qm-input-distribusi-nrp', 'qm-dist-KK-nrp'],
-        bulanIds: ['qm-input-bulan', 'qm-fix-spkl-bulan', 'qm-input-hadir-bulan-bln'],
+        nrpIds: ['qm-input-nrp', 'qm-fix-spkl-nrp', 'qm-spkl-page-nrp', 'qm-spkl-online-nrp', 'qm-input-hadir-check-nrp', 'qm-input-hadir-nrp', 'qm-input-hadir-bulan-nrp', 'qm-input-distribusi-nrp', 'qm-dist-KK-nrp'],
+        bulanIds: ['qm-input-bulan', 'qm-fix-spkl-bulan', 'qm-spkl-page-bulan', 'qm-input-hadir-bulan-bln'],
         tahunIds: ['qm-input-tahun', 'qm-fix-spkl-tahun', 'qm-input-hadir-bulan-thn']
       },
       spkl: {
-        nrpIds: ['qm-fix-spkl-nrp', 'qm-spkl-online-nrp', 'qm-input-nrp', 'qm-input-hadir-check-nrp', 'qm-input-hadir-nrp', 'qm-input-hadir-bulan-nrp', 'qm-input-distribusi-nrp', 'qm-dist-KK-nrp'],
-        bulanIds: ['qm-fix-spkl-bulan', 'qm-input-bulan', 'qm-input-hadir-bulan-bln'],
+        nrpIds: ['qm-fix-spkl-nrp', 'qm-spkl-page-nrp', 'qm-spkl-online-nrp', 'qm-input-nrp', 'qm-input-hadir-check-nrp', 'qm-input-hadir-nrp', 'qm-input-hadir-bulan-nrp', 'qm-input-distribusi-nrp', 'qm-dist-KK-nrp'],
+        bulanIds: ['qm-fix-spkl-bulan', 'qm-spkl-page-bulan', 'qm-input-bulan', 'qm-input-hadir-bulan-bln'],
         tahunIds: ['qm-fix-spkl-tahun', 'qm-input-tahun', 'qm-input-hadir-bulan-thn']
       },
       kehadiran: {
-        nrpIds: ['qm-input-hadir-check-nrp', 'qm-input-hadir-bulan-nrp', 'qm-input-hadir-nrp', 'qm-input-nrp', 'qm-fix-spkl-nrp', 'qm-spkl-online-nrp', 'qm-input-distribusi-nrp', 'qm-dist-KK-nrp'],
-        bulanIds: ['qm-input-hadir-bulan-bln', 'qm-input-bulan', 'qm-fix-spkl-bulan'],
+        nrpIds: ['qm-input-hadir-check-nrp', 'qm-input-hadir-bulan-nrp', 'qm-input-hadir-nrp', 'qm-input-nrp', 'qm-fix-spkl-nrp', 'qm-spkl-page-nrp', 'qm-spkl-online-nrp', 'qm-input-distribusi-nrp', 'qm-dist-KK-nrp'],
+        bulanIds: ['qm-input-hadir-bulan-bln', 'qm-input-bulan', 'qm-fix-spkl-bulan', 'qm-spkl-page-bulan'],
         tahunIds: ['qm-input-hadir-bulan-thn', 'qm-input-tahun', 'qm-fix-spkl-tahun']
       },
       global: {
-        nrpIds: ['qm-input-nrp', 'qm-fix-spkl-nrp', 'qm-spkl-online-nrp', 'qm-input-hadir-check-nrp', 'qm-input-hadir-nrp', 'qm-input-hadir-bulan-nrp', 'qm-input-distribusi-nrp', 'qm-dist-KK-nrp'],
-        bulanIds: ['qm-input-bulan', 'qm-fix-spkl-bulan', 'qm-input-hadir-bulan-bln'],
+        nrpIds: ['qm-input-nrp', 'qm-fix-spkl-nrp', 'qm-spkl-page-nrp', 'qm-spkl-online-nrp', 'qm-input-hadir-check-nrp', 'qm-input-hadir-nrp', 'qm-input-hadir-bulan-nrp', 'qm-input-distribusi-nrp', 'qm-dist-KK-nrp'],
+        bulanIds: ['qm-input-bulan', 'qm-fix-spkl-bulan', 'qm-spkl-page-bulan', 'qm-input-hadir-bulan-bln'],
         tahunIds: ['qm-input-tahun', 'qm-fix-spkl-tahun', 'qm-input-hadir-bulan-thn']
       }
     };
@@ -5297,14 +7002,14 @@
 
   function syncGlobalInputs(nrp, bulan, tahun) {
     // NRP inputs
-    const nrpIds = ['qm-input-nrp', 'qm-spkl-online-nrp', 'qm-fix-spkl-nrp', 'qm-input-hadir-check-nrp', 'qm-input-hadir-nrp', 'qm-input-hadir-bulan-nrp', 'qm-input-distribusi-nrp', 'qm-dist-KK-nrp'];
+    const nrpIds = ['qm-input-nrp', 'qm-spkl-page-nrp', 'qm-spkl-online-nrp', 'qm-fix-spkl-nrp', 'qm-input-hadir-check-nrp', 'qm-input-hadir-nrp', 'qm-input-hadir-bulan-nrp', 'qm-input-distribusi-nrp', 'qm-dist-KK-nrp'];
     nrpIds.forEach(id => {
       const el = document.getElementById(id);
       if (el && el.value !== nrp) el.value = nrp;
     });
 
     // Month selects
-    const bulanIds = ['qm-input-bulan', 'qm-fix-spkl-bulan', 'qm-input-hadir-bulan-bln'];
+    const bulanIds = ['qm-input-bulan', 'qm-fix-spkl-bulan', 'qm-spkl-page-bulan', 'qm-input-hadir-bulan-bln'];
     bulanIds.forEach(id => {
       const el = document.getElementById(id);
       if (el && el.value != bulan) el.value = bulan;
@@ -5325,7 +7030,7 @@
     }
   }
 
-  async function refreshDistribusiOptions(nrp, emp) {
+  async function refreshDistribusiOptions(nrp, emp, refreshRunId) {
     const jkContainers = [
       document.getElementById('qm-dist-jk-options-container'),
       document.getElementById('qm-dist-subsi-jk-container')
@@ -5341,6 +7046,7 @@
         fetchJkOptions(nrp),
         fetchKKOptions(nrp)
       ]);
+      if (refreshRunId !== state.refreshRunId) return;
 
       jkContainers.forEach(c => {
         if (c && jkOptions.length) {
@@ -5356,7 +7062,8 @@
       // 2. Fetch and populate Bagian/Seksi/Grup/Shift
       // We don't await this fully for the first render if we want it "instant"
       // but we need the options to be there. updateDistribusiDropdowns now handles its own internal cache.
-      await updateDistribusiDropdowns(nrp);
+      await updateDistribusiDropdowns(nrp, '', '', refreshRunId);
+      if (refreshRunId !== state.refreshRunId) return;
 
       // 3. Set values from emp data
       const setVal = (id, val) => {
@@ -5383,7 +7090,7 @@
 
       attachDistribusiListeners(nrp);
     } catch (e) {
-      Logger.error('refreshDistribusiOptions error', e);
+      if (refreshRunId === state.refreshRunId) Logger.error('refreshDistribusiOptions error', e);
     }
   }
 
@@ -5396,14 +7103,16 @@
     pairs.forEach(p => {
       const elBag = document.getElementById(p.bag);
       const elSek = document.getElementById(p.sek);
+      if (elBag) elBag.dataset.nrp = nrp;
+      if (elSek) elSek.dataset.nrp = nrp;
 
       if (elBag && !elBag.dataset.hasListener) {
         elBag.dataset.hasListener = 'true';
-        elBag.addEventListener('change', () => updateDistribusiDropdowns(nrp, elBag.value, ''));
+        elBag.addEventListener('change', () => updateDistribusiDropdowns(elBag.dataset.nrp || nrp, elBag.value, '', state.refreshRunId));
       }
       if (elSek && !elSek.dataset.hasListener) {
         elSek.dataset.hasListener = 'true';
-        elSek.addEventListener('change', () => updateDistribusiDropdowns(nrp, elBag?.value || '', elSek.value));
+        elSek.addEventListener('change', () => updateDistribusiDropdowns(elSek.dataset.nrp || nrp, elBag?.value || '', elSek.value, state.refreshRunId));
       }
     });
   }
@@ -5412,14 +7121,14 @@
   /**
    * Fetches the distribution page and synchronizes all dropdowns (Per Subsi & Kalender Kerja).
    */
-  async function updateDistribusiDropdowns(nrp, bag = '', sek = '') {
+  async function updateDistribusiDropdowns(nrp, bag = '', sek = '', refreshRunId = state.refreshRunId) {
     const isOS = nrp.length === 8;
     const cacheKey = `qm_dist_html_${isOS ? 'os' : 'reg'}_${bag}_${sek}`;
 
     // Attempt to use cache for immediate UI update
     const cachedHtml = sessionStorage.getItem(cacheKey);
     if (cachedHtml) {
-      applyDistDropdowns(cachedHtml);
+      applyDistDropdowns(cachedHtml, refreshRunId);
     }
 
     let url = distribusiUrl(nrp);
@@ -5429,19 +7138,22 @@
 
     try {
       const html = await hrisFetch(url);
+      if (refreshRunId !== state.refreshRunId) return;
       sessionStorage.setItem(cacheKey, html);
-      applyDistDropdowns(html);
+      applyDistDropdowns(html, refreshRunId);
     } catch (e) {
-      Logger.error('updateDistribusiDropdowns fetch error', e);
+      if (refreshRunId === state.refreshRunId) Logger.error('updateDistribusiDropdowns fetch error', e);
     }
   }
 
-  function applyDistDropdowns(html) {
+  function applyDistDropdowns(html, refreshRunId = state.refreshRunId) {
+    if (refreshRunId !== state.refreshRunId) return;
     const doc = parseHTML(html);
     const sync = (targetIds, selector) => {
       const source = doc.querySelector(selector);
       if (!source) return;
       targetIds.forEach(id => {
+        if (refreshRunId !== state.refreshRunId) return;
         const el = document.getElementById(id);
         if (el) {
           const currentVal = el.value;
@@ -5464,7 +7176,7 @@
 
     // Fallback if Shift dropdown is still empty (only has "Pilih Shift")
     const shiftEl = document.getElementById('qm-input-distribusi-subsi-shift');
-    if (shiftEl && shiftEl.options.length <= 1) {
+    if (refreshRunId === state.refreshRunId && shiftEl && shiftEl.options.length <= 1) {
       shiftEl.innerHTML += `
         <option value="1">Shift 1 (Pagi)</option>
         <option value="2">Shift 2 (Siang)</option>
@@ -5613,7 +7325,7 @@
         UI.setGlobalProgress(80, 'Master terupdate. Mengalihkan ke halaman Distribusi...');
 
         // Store return URL for auto-return after redirect completion
-        sessionStorage.setItem(STORAGE.RETURN_URL, window.location.href);
+        createAutomationFlow('distribusi-jk', window.location.href, { nrp, date, dateEnd, shift });
         const redirectUrl = buildDistribusiLink(ctx, date, shift, dateEnd);
 
         // Small delay to ensure sessionStorage/Master Update is committed
@@ -5845,7 +7557,7 @@
       const url = `${base}?qm_auto_distribusi_subsi=1&jk=${encodeURIComponent(jk)}&tglAwal=${encodeURIComponent(tglAwal)}&tglAkhir=${encodeURIComponent(tglAkhir)}&bagian=${encodeURIComponent(bagian)}&seksi=${encodeURIComponent(seksi)}&grup=${encodeURIComponent(grup)}&shift=${encodeURIComponent(shift)}&nrp=${encodeURIComponent(nrp)}`;
 
       // Store return URL for auto-return after redirect completion
-      sessionStorage.setItem(STORAGE.RETURN_URL, window.location.href);
+      createAutomationFlow('distribusi-subsi', window.location.href, { nrp, tglAwal, tglAkhir, shift });
       window.location.href = url;
     }
   }
@@ -5976,15 +7688,15 @@
     if (!nrp) return;
 
     const oldJk = sessionStorage.getItem('qm_jk_to_restore_' + nrp);
-    const finished = sessionStorage.getItem(STORAGE.AUTO_FINISHED);
+    const activeFlow = getAutomationFlow();
+    const isScopedRestoreFlow = activeFlow && activeFlow.type === 'distribusi-jk' && activeFlow.meta?.nrp === nrp;
+    const finished = isScopedRestoreFlow ? activeFlow.finished : sessionStorage.getItem(STORAGE.AUTO_FINISHED) === 'true';
 
-    if (oldJk && finished === 'true') {
-      sessionStorage.removeItem('qm_jk_to_restore_' + nrp);
-      sessionStorage.removeItem(STORAGE.AUTO_FINISHED);
-
+    if (oldJk && finished) {
       UI.showGlobalLoader('Cleaning up', 'Restoring Master JK...');
       try {
         await saveJkMaster(nrp, oldJk);
+        sessionStorage.removeItem('qm_jk_to_restore_' + nrp);
         sessionStorage.setItem('qm_jk_' + nrp, oldJk);
         UI.showResult('success', 'Selesai', 'Kode Jam Kerja master telah dikembalikan.');
         setTimeout(() => window.location.reload(), 1500);
@@ -6204,16 +7916,16 @@
   async function autoDistKK() {
     const urlParams = getCurrentQueryParams();
     if (!urlParams.get('qm_auto_dist_KK')) {
+      const activeFlow = getAutomationFlow();
+      const scopedKkFlow = activeFlow && activeFlow.type === 'dist-kk' ? activeFlow : null;
       // Result page check
-      if (sessionStorage.getItem(STORAGE.AUTO_FINISHED) === 'true' && isDistribusiKalenderPagePath()) {
+      if (((scopedKkFlow && scopedKkFlow.finished) || (!activeFlow && sessionStorage.getItem(STORAGE.AUTO_FINISHED) === 'true')) && isDistribusiKalenderPagePath()) {
         const pageText = document.body.textContent;
         if (pageText.includes('Distribution Process Completed') || document.querySelector('.alert-success')) {
           UI.showResult('success', 'Selesai', 'Distribusi Kalender Kerja Selesai.');
-          const returnUrl = sessionStorage.getItem(STORAGE.RETURN_URL);
+          const returnUrl = scopedKkFlow?.returnUrl || sessionStorage.getItem(STORAGE.RETURN_URL);
           if (returnUrl) {
             setTimeout(() => {
-              sessionStorage.removeItem(STORAGE.RETURN_URL);
-              sessionStorage.removeItem(STORAGE.AUTO_FINISHED);
               window.location.href = returnUrl;
             }, 1500);
           }
@@ -6258,7 +7970,12 @@
           const btnSubmit = document.getElementById('btnSubmit');
           if (btnSubmit) {
             UI.setGlobalProgress(95, 'Submitting...');
-            sessionStorage.setItem(STORAGE.AUTO_FINISHED, 'true');
+            const activeFlow = getAutomationFlow();
+            if (activeFlow && activeFlow.type === 'dist-kk') {
+              markAutomationFlowFinished(activeFlow.id);
+            } else {
+              sessionStorage.setItem(STORAGE.AUTO_FINISHED, 'true');
+            }
             setTimeout(() => btnSubmit.click(), 1000);
           }
         });
@@ -6278,7 +7995,7 @@
     document.body.classList.add('qm-no-scroll');
     document.querySelectorAll('#qm-panel, #qm-fab, #qm-backdrop').forEach(el => el.classList.add('qm-open'));
     setTimeout(() => {
-      const input = document.querySelector('#qm-input-nrp');
+      const input = document.querySelector('.qm-pane.active #qm-input-karyawan-search, .qm-pane.active #qm-input-nrp, #qm-input-nrp');
       if (input) input.focus();
     }, 250);
   }
@@ -6291,6 +8008,54 @@
 
   function togglePanel() {
     state.isOpen ? closePanel() : openPanel();
+  }
+
+  function getKaryawanSearchInput() {
+    return document.getElementById('qm-input-karyawan-search');
+  }
+
+  function prefillKaryawanSearch(autoSearch = false) {
+    const input = getKaryawanSearchInput();
+    if (!input) return;
+
+    const ctxNrp = getPageContext().nrp || document.getElementById('qm-input-nrp')?.value.trim() || '';
+    if (!ctxNrp) return;
+
+    if (!input.value.trim()) input.value = ctxNrp;
+    if (autoSearch && !state.karyawanLoading && !state.karyawanQuery && isValidNrp(input.value.trim())) {
+      handleKaryawanSearch();
+    }
+  }
+
+  async function handleKaryawanSearch() {
+    const input = getKaryawanSearchInput();
+    const query = input ? input.value.trim() : '';
+    if (!query) {
+      UI.showResult('warning', 'Data Tidak Lengkap', 'Masukkan NRP atau nama karyawan terlebih dahulu.');
+      return;
+    }
+
+    state.karyawanQuery = query;
+    state.karyawanLoading = true;
+    state.karyawanError = '';
+    state.karyawanResults = [];
+    resetKaryawanPanels();
+    renderKaryawanResults();
+
+    if (isValidNrp(query)) {
+      const bulan = document.getElementById('qm-input-bulan')?.value || (new Date().getMonth() + 1);
+      const tahun = document.getElementById('qm-input-tahun')?.value || new Date().getFullYear();
+      syncGlobalInputs(query, bulan, tahun);
+    }
+
+    try {
+      state.karyawanResults = await searchEmployees(query);
+    } catch (e) {
+      state.karyawanError = e.message || 'Gagal mencari data karyawan.';
+    } finally {
+      state.karyawanLoading = false;
+      renderKaryawanResults();
+    }
   }
 
   function handleNrpLookup() {
@@ -6365,21 +8130,197 @@
     window.open(url, '_blank');
   }
 
-  function handleAttendanceCheckNrp() {
-    const nrp = document.getElementById('qm-input-hadir-check-nrp')?.value.trim();
-    const date = document.getElementById('qm-input-hadir-check-date')?.value;
+  function handleSpklPageCheck() {
+    const nrp = document.getElementById('qm-spkl-page-nrp')?.value.trim();
+    const bulan = document.getElementById('qm-spkl-page-bulan')?.value;
 
-    if (!nrp || !date) {
-      alert('Harap isi NRP dan Tanggal.');
+    if (!nrp || !bulan) {
+      UI.showResult('warning', 'Data Belum Lengkap', 'Silakan isi NRP dan Bulan terlebih dahulu.');
+      return;
+    }
+    if (!isValidNrp(nrp)) {
+      UI.showResult('warning', 'NRP Tidak Valid', 'Gunakan 4 digit (Reguler) atau 8 digit (OS).');
+      return;
+    }
+
+    const bulanInt = parseInt(bulan, 10);
+    if (isNaN(bulanInt) || bulanInt < 1 || bulanInt > 12) {
+      UI.showResult('warning', 'Bulan Tidak Valid', 'Silakan pilih bulan.');
+      return;
+    }
+
+    const tahun = new Date().getFullYear();
+    window.open(spklListUrl(nrp, bulanInt, tahun), '_blank');
+  }
+
+  async function handleAttendanceCheckNrp() {
+    const nrp = document.getElementById('qm-input-hadir-check-nrp')?.value.trim();
+    const startDate = document.getElementById('qm-input-hadir-check-start-date')?.value;
+    const endDate = document.getElementById('qm-input-hadir-check-end-date')?.value;
+
+    if (!nrp || !startDate || !endDate) {
+      alert('Harap isi NRP, Start date, dan End date.');
       return;
     }
     if (!/^\d+$/.test(nrp) || (nrp.length !== 4 && nrp.length !== 8)) {
       alert('NRP harus 4 atau 8 digit angka.');
       return;
     }
+    if (parseHrisDate(startDate)?.getTime() > parseHrisDate(endDate)?.getTime()) {
+      alert('Start date tidak boleh lebih besar dari End date.');
+      return;
+    }
 
-    sessionStorage.setItem(STORAGE.AUTO_BARCODE_SEARCH, JSON.stringify({ nrp, date }));
-    window.location.href = barcodePageUrl(nrp);
+    const requestKey = `${nrp}|${startDate}|${endDate}|${Date.now()}`;
+    state.attendanceCheck = {
+      ...createEmptyAttendanceCheck(),
+      loading: true,
+      requestKey
+    };
+    renderAttendanceCheckResult();
+
+    try {
+      const [summary, emp] = await Promise.all([
+        fetchBarcodeAttendanceSummary(nrp, startDate, endDate),
+        fetchEmployee(nrp).catch(() => ({ found: false }))
+      ]);
+
+      if (state.attendanceCheck.requestKey !== requestKey) return;
+
+      state.attendanceCheck = {
+        ...createEmptyAttendanceCheck(),
+        summary: {
+          ...summary,
+          employee: emp?.found ? emp : null
+        }
+      };
+    } catch (e) {
+      if (state.attendanceCheck.requestKey !== requestKey) return;
+      state.attendanceCheck = {
+        ...createEmptyAttendanceCheck(),
+        error: e.message || 'Gagal memuat ringkasan kehadiran.'
+      };
+    }
+
+    renderAttendanceCheckResult();
+  }
+
+  async function handleSpklCheckNrp() {
+    const nrp = document.getElementById('qm-spkl-page-nrp')?.value.trim();
+    const bulan = document.getElementById('qm-spkl-page-bulan')?.value;
+    const tahun = new Date().getFullYear();
+
+    if (!nrp || !bulan) {
+      UI.showResult('warning', 'Data Belum Lengkap', 'Silakan isi NRP dan Bulan terlebih dahulu.');
+      return;
+    }
+    if (!isValidNrp(nrp)) {
+      UI.showResult('warning', 'NRP Tidak Valid', 'Gunakan 4 digit (Reguler) atau 8 digit (OS).');
+      return;
+    }
+
+    const requestKey = `${nrp}|${bulan}|${tahun}|${Date.now()}`;
+    state.spklCheck = {
+      ...createEmptySpklCheck(),
+      loading: true,
+      requestKey
+    };
+    renderSpklCheckResult();
+
+    try {
+      const summary = await fetchSpklSummary(nrp, bulan, tahun);
+      if (state.spklCheck.requestKey !== requestKey) return;
+
+      state.spklCheck = {
+        ...createEmptySpklCheck(),
+        summary
+      };
+    } catch (e) {
+      if (state.spklCheck.requestKey !== requestKey) return;
+      state.spklCheck = {
+        ...createEmptySpklCheck(),
+        error: e.message || 'Gagal memuat data SPKL.'
+      };
+    }
+
+    renderSpklCheckResult();
+  }
+
+  function handleSpklInlineEdit(idx) {
+    const entry = state.spklCheck?.summary?.entries?.[idx];
+    if (!entry) return;
+
+    state.spklEditCurrentIndex = idx;
+    
+    // Fill modal fields
+    document.getElementById('qm-edit-spkl-tgl').value = entry.dateText;
+    
+    // Try to match OT Code with select options
+    const selOt = document.getElementById('qm-edit-spkl-ot');
+    const otMap = {
+      'biasa': '1', 'long': '2', 'non': '3', 'awal': '4', 
+      'nrest awal': '5A', 'nrest tengah': '5B', 'nrest akhir': '5C',
+      'standby': '6', 'lain': '7', 'ot': 'OT'
+    };
+    
+    const cleanOt = entry.otCode.toLowerCase();
+    let val = '1';
+    for (const [k, v] of Object.entries(otMap)) {
+      if (cleanOt.includes(k)) { val = v; break; }
+    }
+    selOt.value = val;
+    
+    document.getElementById('qm-edit-spkl-jam-awal').value = entry.jamAwal || '';
+    document.getElementById('qm-edit-spkl-jam-akhir').value = entry.jamAkhir || '';
+    
+    // Show modal
+    document.getElementById('qm-modal-spkl-edit').classList.remove('qm-hidden');
+  }
+
+  function closeSpklEditPopup() {
+    document.getElementById('qm-modal-spkl-edit').classList.add('qm-hidden');
+    state.spklEditCurrentIndex = -1;
+  }
+
+  function handleSpklEditSave() {
+    const idx = state.spklEditCurrentIndex;
+    const entry = state.spklCheck?.summary?.entries?.[idx];
+    if (!entry) return;
+
+    const editAction = entry.actions.find(act => /edit/i.test(act.text));
+    if (!editAction || !editAction.href) {
+      UI.showResult('danger', 'Error', 'Gagal menemukan URL Edit untuk record ini.');
+      return;
+    }
+
+    const data = {
+      ot: document.getElementById('qm-edit-spkl-ot').value,
+      jamAwal: document.getElementById('qm-edit-spkl-jam-awal').value,
+      jamAkhir: document.getElementById('qm-edit-spkl-jam-akhir').value
+    };
+
+    if (!data.jamAwal || !data.jamAkhir) {
+      UI.showResult('warning', 'Data Kurang', 'Harap isi Jam Awal dan Jam Akhir.');
+      return;
+    }
+
+    Logger.info('handleSpklEditSave: Saving SPKL inline', data);
+    
+    // Create automation flow
+    createAutomationFlow('spkl-edit', {
+      nrp: state.spklCheck.summary.nrp,
+      date: entry.dateText
+    });
+    
+    // Store data for filling
+    sessionStorage.setItem('qm_spkl_edit_pending', JSON.stringify(data));
+    
+    // Close modal and redirect
+    closeSpklEditPopup();
+    UI.showResult('success', 'Processing', 'Mengarahkan ke halaman Edit SPKL...');
+    setTimeout(() => {
+      window.location.href = toAbsoluteHrisUrl(editAction.href);
+    }, 1000);
   }
 
   function handleInputHadir() {
@@ -6393,7 +8334,7 @@
       return;
     }
 
-    sessionStorage.setItem(STORAGE.RETURN_URL, window.location.href);
+    createAutomationFlow('hadir-single', window.location.href, { nrp, tgl, status });
 
     const data = { nrp, tgl, jam, status };
     sessionStorage.setItem(STORAGE.INPUT_HADIR, JSON.stringify(data));
@@ -6428,6 +8369,11 @@
     const targetPane = document.getElementById(`qm-pane-${pane}`);
     if (targetPane) targetPane.classList.add('active');
     localStorage.setItem('qm_last_tab', pane);
+
+    if (pane === 'karyawan') {
+      prefillKaryawanSearch(true);
+      renderKaryawanResults();
+    }
 
     if (pane === 'distribusi' || pane === 'check-nrp' || pane === 'spkl' || pane === 'kehadiran') {
       refreshGlobalData('', '', '', pane);
@@ -6564,20 +8510,26 @@
     Logger.info('Log diekspor ke format Markdown (.md).');
   }
 
+  function getPrimaryCardButton(card) {
+    const buttons = Array.from(card.querySelectorAll('button.qm-btn'))
+      .filter(btn => !btn.disabled && !btn.classList.contains('qm-hidden'));
+    if (buttons.length === 0) return null;
+
+    return buttons.find(btn => btn.classList.contains('qm-btn-primary') || btn.classList.contains('qm-btn-success')) || buttons[0];
+  }
+
   function initKeyboardNavigation() {
     // Enter key logic for various inputs
     on('keydown', '.qm-input, .qm-select, .qm-textarea', function (e) {
       if (e.key !== 'Enter') return;
       if (this.tagName === 'TEXTAREA' && !e.ctrlKey) return; // Allow newlines in textarea unless Ctrl+Enter
 
-      const pane = this.closest('.qm-pane');
-      if (!pane) return;
-
+      if (!this.closest('.qm-pane')) return;
       const card = this.closest('.qm-card');
       if (!card) return;
 
-      // Find the primary button in the same card
-      const primaryBtn = card.querySelector('.qm-btn-primary') || card.querySelector('.qm-btn');
+      // Prefer semantic action buttons, then fall back to the first visible button in the card.
+      const primaryBtn = getPrimaryCardButton(card);
       if (!primaryBtn || primaryBtn.disabled) return;
 
       // Validate required fields in this card
@@ -6655,6 +8607,8 @@
   }
 
   function init() {
+    if (!state.karyawanEditor) resetKaryawanEditor();
+    if (!state.karyawanDetail) resetKaryawanDetail();
 
     const schemaValid = validateStorageSchema();
 
@@ -6671,10 +8625,12 @@
     checkHadirBulanResume();
     initJkChangeEvents();
     checkJkRestoration();
+    autoFillSpklEdit();
 
     // Return to source page after process finish (autoDistribusi result page)
-    const returnUrl = sessionStorage.getItem(STORAGE.RETURN_URL);
-    const isFinished = sessionStorage.getItem(STORAGE.AUTO_FINISHED) === 'true';
+    const activeFlow = getAutomationFlow();
+    const returnUrl = activeFlow?.returnUrl || sessionStorage.getItem(STORAGE.RETURN_URL);
+    const isFinished = activeFlow ? !!activeFlow.finished : sessionStorage.getItem(STORAGE.AUTO_FINISHED) === 'true';
     const hasRestorationPending = sessionStorage.getItem('qm_jk_to_restore_' + getPageContext().nrp);
 
     if (isFinished && returnUrl) {
@@ -6685,8 +8641,11 @@
       if (isReturnPage) {
         // We are back at the start page. Cleanup if no restoration is pending.
         if (!hasRestorationPending) {
-          sessionStorage.removeItem(STORAGE.AUTO_FINISHED);
-          sessionStorage.removeItem(STORAGE.RETURN_URL);
+          if (activeFlow) clearAutomationFlow(activeFlow.id);
+          else {
+            sessionStorage.removeItem(STORAGE.AUTO_FINISHED);
+            sessionStorage.removeItem(STORAGE.RETURN_URL);
+          }
           UI.showResult('success', 'Selesai', 'Tugas latar belakang telah diselesaikan.');
 
           // If on attendance table, trigger anomaly refresh to show the fix
@@ -6726,6 +8685,10 @@
       const elDistKKNrp = document.getElementById('qm-dist-KK-nrp');
       if (elDistKKNrp && ctx.nrp) elDistKKNrp.value = ctx.nrp;
 
+      renderKaryawanResults();
+      renderAttendanceCheckResult();
+      renderSpklCheckResult();
+
       const now = new Date();
       const currentMonth = now.getMonth() + 1;
       const currentYear = now.getFullYear();
@@ -6739,6 +8702,9 @@
 
       const fixBulan = document.getElementById('qm-fix-spkl-bulan');
       if (fixBulan) renderSafe(fixBulan, monthOptions);
+
+      const spklPageBulan = document.getElementById('qm-spkl-page-bulan');
+      if (spklPageBulan) renderSafe(spklPageBulan, monthOptions);
 
       const bulanBulan = document.getElementById('qm-input-hadir-bulan-bln');
       if (bulanBulan) renderSafe(bulanBulan, monthOptions);
@@ -6761,10 +8727,11 @@
         elManyDate.value = `${currentYear}-${String(currentMonth).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
       }
 
-      const elHadirCheckDate = document.getElementById('qm-input-hadir-check-date');
-      if (elHadirCheckDate) {
-        elHadirCheckDate.value = `${currentYear}-${String(currentMonth).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
-      }
+      const defaultCheckDate = `${currentYear}-${String(currentMonth).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+      const elHadirCheckStartDate = document.getElementById('qm-input-hadir-check-start-date');
+      const elHadirCheckEndDate = document.getElementById('qm-input-hadir-check-end-date');
+      if (elHadirCheckStartDate) elHadirCheckStartDate.value = defaultCheckDate;
+      if (elHadirCheckEndDate) elHadirCheckEndDate.value = defaultCheckDate;
 
       const elDistKKDate = document.getElementById('qm-dist-KK-date');
       if (elDistKKDate) {
@@ -6818,8 +8785,10 @@
     on('click', '#qm-backdrop', closePanel);
     on('click', '#qm-btn-close-header', closePanel);
     on('click', '#qm-btn-check', handleNrpLookup);
+    on('click', '#qm-btn-karyawan-search', handleKaryawanSearch);
     on('click', '#qm-btn-spkl-batch', runSpklBatchProcess);
     on('click', '#qm-btn-spkl-many-nrp', runSpklManyNrpBatch);
+    on('click', '#qm-btn-spkl-page-cek', handleSpklCheckNrp);
     on('click', '#qm-btn-spkl-online-cek', handleSpklOnlineCheck);
     on('click', '#qm-btn-hadir-check', handleAttendanceCheckNrp);
     on('click', '#qm-btn-hadir-proses', handleInputHadir);
@@ -6833,7 +8802,9 @@
       sessionStorage.removeItem(STORAGE.SPKL_QUEUE);
       sessionStorage.removeItem(STORAGE.SPKL_CURRENT_INDEX);
       sessionStorage.removeItem(STORAGE.SPKL_FIX_PENDING);
-      sessionStorage.removeItem(STORAGE.AUTO_FINISHED);
+      const activeFlow = getAutomationFlow();
+      if (activeFlow) clearAutomationFlow(activeFlow.id);
+      else sessionStorage.removeItem(STORAGE.AUTO_FINISHED);
       if (state.activeCancelableFlow) {
         UI.setGlobalProgress(5, 'Membatalkan proses...', true);
         if (state.activeAbortController) state.activeAbortController.abort();
@@ -6857,6 +8828,10 @@
 
     on('keydown', '#qm-spkl-online-nrp', function (e) {
       if (e.key === 'Enter') { e.preventDefault(); document.getElementById('qm-btn-spkl-online-cek')?.click(); }
+    });
+
+    on('keydown', '#qm-spkl-page-nrp', function (e) {
+      if (e.key === 'Enter') { e.preventDefault(); document.getElementById('qm-btn-spkl-page-cek')?.click(); }
     });
 
     on('change', '#qm-fix-many-ot', function () {
@@ -6890,16 +8865,57 @@
     });
 
     // Sync other NRP inputs too
-    on('input', '#qm-spkl-online-nrp, #qm-fix-spkl-nrp, #qm-input-hadir-check-nrp, #qm-input-hadir-nrp, #qm-input-hadir-bulan-nrp', function () {
+    on('input', '#qm-spkl-page-nrp, #qm-spkl-online-nrp, #qm-fix-spkl-nrp, #qm-input-hadir-check-nrp, #qm-input-hadir-nrp, #qm-input-hadir-bulan-nrp', function () {
       const nrp = this.value.trim();
       if (nrp.length >= 4) {
         refreshGlobalData(nrp);
       }
     });
 
+    on('input', '#qm-input-hadir-check-nrp', function () {
+      state.attendanceCheck = createEmptyAttendanceCheck();
+      renderAttendanceCheckResult();
+    });
+
+    on('input', '#qm-spkl-page-nrp', function () {
+      state.spklCheck = createEmptySpklCheck();
+      renderSpklCheckResult();
+    });
+
+    on('change', '#qm-spkl-page-bulan', function () {
+      state.spklCheck = createEmptySpklCheck();
+      renderSpklCheckResult();
+    });
+
+    on('click', '.qm-spkl-inline-edit-btn', function () {
+      const idx = parseInt(this.dataset.index, 10);
+      handleSpklInlineEdit(idx);
+    });
+
+    on('click', '.qm-modal-close-btn, .qm-modal-cancel-btn', function () {
+      closeSpklEditPopup();
+    });
+
+    on('click', '#qm-btn-spkl-edit-save', function () {
+      handleSpklEditSave();
+    });
+
+    on('change', '#qm-input-hadir-check-start-date, #qm-input-hadir-check-end-date', function () {
+      state.attendanceCheck = createEmptyAttendanceCheck();
+      renderAttendanceCheckResult();
+    });
+
+    on('input', '#qm-input-karyawan-search', function () {
+      const value = this.value.trim();
+      if (!isValidNrp(value)) return;
+      const bulan = document.getElementById('qm-input-bulan')?.value || (new Date().getMonth() + 1);
+      const tahun = document.getElementById('qm-input-tahun')?.value || new Date().getFullYear();
+      syncGlobalInputs(value, bulan, tahun);
+    });
+
     // Sync Month/Year changes
-    on('change', '#qm-input-bulan, #qm-input-tahun, #qm-fix-spkl-bulan, #qm-fix-spkl-tahun, #qm-input-hadir-bulan-bln', function () {
-      const isMonthField = this.id === 'qm-input-bulan' || this.id === 'qm-fix-spkl-bulan' || this.id === 'qm-input-hadir-bulan-bln';
+    on('change', '#qm-input-bulan, #qm-input-tahun, #qm-fix-spkl-bulan, #qm-fix-spkl-tahun, #qm-spkl-page-bulan, #qm-input-hadir-bulan-bln', function () {
+      const isMonthField = this.id === 'qm-input-bulan' || this.id === 'qm-fix-spkl-bulan' || this.id === 'qm-spkl-page-bulan' || this.id === 'qm-input-hadir-bulan-bln';
       const isYearField = this.id === 'qm-input-tahun' || this.id === 'qm-fix-spkl-tahun';
       refreshGlobalData('', isMonthField ? this.value : '', isYearField ? this.value : '', this.id);
     });
@@ -6908,6 +8924,9 @@
     initKeyboardNavigation();
 
     on('click', '.qm-tab', handleTabClick);
+    on('click', '.qm-karyawan-detail-btn', function () { toggleKaryawanDetail(this.dataset.key || ''); });
+    on('click', '.qm-karyawan-edit-btn', function () { toggleKaryawanEditor(this.dataset.key || ''); });
+    on('click', '.qm-karyawan-save-btn', handleKaryawanSaveEdit);
     on('click', '.qm-fix-dot', handleFixDotClick);
     on('click', '.qm-btn-fix-pill', handleFixDotClick);
 
@@ -6933,6 +8952,25 @@
     on('click', '#qm-btn-export-batch', exportBatchResults);
     on('click', '.qm-batch-nrp-link', handleBatchNrpClick);
     on('click', '.qm-batch-fix-btn', handleBatchFixClick);
+
+    on('click', '.qm-btn-barcode-delete', async function (e) {
+      const url = this.dataset.url;
+      if (!url || !confirm('Hapus data barcode ini?')) return;
+
+      const btn = this;
+      const originalText = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = '...';
+
+      try {
+        await hrisFetch(url);
+        handleAttendanceCheckNrp(); // Refresh results
+      } catch (e) {
+        alert('Gagal menghapus data: ' + e.message);
+        btn.disabled = false;
+        btn.textContent = originalText;
+      }
+    });
 
     // Batch Grouping (Bagian)
     on('click', '.qm-batch-group-header', function () {
