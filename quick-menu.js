@@ -170,6 +170,7 @@
     SPKL_MODAL_MSK: 'input[name*="jam_masuk"], input[name*="msk"], #jam_masuk_edit, #msk_edit',
     SPKL_MODAL_KLR: 'input[name*="jam_keluar"], input[name*="klr"], #jam_keluar_edit, #klr_edit',
     SPKL_MODAL_OT_TYPE: 'select[name*="jenis_ot"], select[name*="jenis_lembur"], select[name*="ot_type"], select[name*="kode_lembur"], #jenis_ot_edit, #type_ot_edit, #ot_type_edit',
+    SPKL_MODAL_JAM_OT: 'input[name*="jam_lembur"], input[name*="jam_ot"], #jam_ot_edit',
     SPKL_MODAL_SUBMIT: 'button[type="submit"], .btn-primary, #btn-save'
   });
 
@@ -2926,15 +2927,24 @@
     return parseBarcodeAttendanceSummary(parseHTML(html), nrp, startDate, endDate);
   }
 
-  async function fetchSpklSummary(nrp, bulan, tahun) {
+  async function fetchSpklSummary(nrp, startDate, endDate) {
+    const start = parseHrisDate(startDate);
+    if (!start) throw new Error('Start Date tidak valid.');
+
+    const bulan = String(start.getMonth() + 1).padStart(2, '0');
+    const tahun = start.getFullYear();
     const url = spklListUrl(nrp, bulan, tahun);
     const html = await hrisFetch(url);
-    return parseSpklSummary(parseHTML(html), nrp);
+    return parseSpklSummary(parseHTML(html), nrp, startDate, endDate);
   }
 
-  function parseSpklSummary(doc, nrp) {
+  function parseSpklSummary(doc, nrp, startDate, endDate) {
     const entries = [];
     const rows = doc.querySelectorAll('table tbody tr');
+
+    // Parse range for filtering
+    const startObj = startDate ? parseHrisDate(startDate) : null;
+    const endObj = endDate ? parseHrisDate(endDate) : null;
 
     // Detect header index
     let tglIdx = -1, otIdx = -1, statusIdx = -1, shiftIdx = -1, mskIdx = -1, klrIdx = -1, jamOtIdx = -1;
@@ -2955,6 +2965,14 @@
 
       const dateText = tglIdx !== -1 ? tds[tglIdx].textContent.trim() : '';
       if (!dateText) return;
+
+      // Filter by date range if provided
+      if (startObj && endObj) {
+        const entryDate = parseHrisDate(dateText);
+        if (entryDate) {
+          if (entryDate < startObj || entryDate > endObj) return;
+        }
+      }
 
       const actions = [];
       tr.querySelectorAll('a, button').forEach(el => {
@@ -3830,6 +3848,9 @@
         setField(selOt, data.ot);
         setField(inMsk, data.jamAwal);
         setField(inKlr, data.jamAkhir);
+        
+        const inJamOt = document.querySelector(SELECTORS.SPKL_MODAL_JAM_OT);
+        if (inJamOt && data.jamOt) setField(inJamOt, data.jamOt);
 
         setTimeout(() => {
           if (btnSave) {
@@ -6068,8 +6089,12 @@
                 <input id="qm-spkl-page-nrp" type="text" placeholder="NRP" maxlength="8" autocomplete="off" class="qm-input">
               </div>
               <div class="qm-flex-1">
-                <label class="qm-field-label">Bulan</label>
-                <select id="qm-spkl-page-bulan" class="qm-select qm-font-semibold"></select>
+                <label class="qm-field-label">Start Date</label>
+                <input id="qm-spkl-page-start-date" type="date" class="qm-input">
+              </div>
+              <div class="qm-flex-1">
+                <label class="qm-field-label">End Date</label>
+                <input id="qm-spkl-page-end-date" type="date" class="qm-input">
               </div>
             </div>
             <button id="qm-btn-spkl-page-cek" type="button" class="qm-btn qm-btn-primary">
@@ -6615,6 +6640,10 @@
               <label class="qm-field-label">Jam Akhir</label>
               <input id="qm-edit-spkl-jam-akhir" type="time" class="qm-input">
             </div>
+          </div>
+          <div class="qm-mb-m">
+            <label class="qm-field-label">Tambahan Jam OT (Koreksi)</label>
+            <input id="qm-edit-spkl-jam-ot" type="number" step="0.5" class="qm-input" placeholder="Contoh: 1.5">
           </div>
         </div>
         <div class="qm-modal-footer">
@@ -8207,11 +8236,11 @@
 
   async function handleSpklCheckNrp() {
     const nrp = document.getElementById('qm-spkl-page-nrp')?.value.trim();
-    const bulan = document.getElementById('qm-spkl-page-bulan')?.value;
-    const tahun = new Date().getFullYear();
+    const startDate = document.getElementById('qm-spkl-page-start-date')?.value;
+    const endDate = document.getElementById('qm-spkl-page-end-date')?.value;
 
-    if (!nrp || !bulan) {
-      UI.showResult('warning', 'Data Belum Lengkap', 'Silakan isi NRP dan Bulan terlebih dahulu.');
+    if (!nrp || !startDate || !endDate) {
+      UI.showResult('warning', 'Data Belum Lengkap', 'Silakan isi NRP dan Rentang Tanggal.');
       return;
     }
     if (!isValidNrp(nrp)) {
@@ -8219,7 +8248,7 @@
       return;
     }
 
-    const requestKey = `${nrp}|${bulan}|${tahun}|${Date.now()}`;
+    const requestKey = `${nrp}|${startDate}|${endDate}|${Date.now()}`;
     state.spklCheck = {
       ...createEmptySpklCheck(),
       loading: true,
@@ -8228,7 +8257,7 @@
     renderSpklCheckResult();
 
     try {
-      const summary = await fetchSpklSummary(nrp, bulan, tahun);
+      const summary = await fetchSpklSummary(nrp, startDate, endDate);
       if (state.spklCheck.requestKey !== requestKey) return;
 
       state.spklCheck = {
@@ -8272,9 +8301,13 @@
     
     document.getElementById('qm-edit-spkl-jam-awal').value = entry.jamAwal || '';
     document.getElementById('qm-edit-spkl-jam-akhir').value = entry.jamAkhir || '';
+    document.getElementById('qm-edit-spkl-jam-ot').value = entry.jamOt || '';
     
-    // Show modal
+    // Show modal and focus
     document.getElementById('qm-modal-spkl-edit').classList.remove('qm-hidden');
+    setTimeout(() => {
+      document.getElementById('qm-edit-spkl-ot').focus();
+    }, 100);
   }
 
   function closeSpklEditPopup() {
@@ -8296,7 +8329,8 @@
     const data = {
       ot: document.getElementById('qm-edit-spkl-ot').value,
       jamAwal: document.getElementById('qm-edit-spkl-jam-awal').value,
-      jamAkhir: document.getElementById('qm-edit-spkl-jam-akhir').value
+      jamAkhir: document.getElementById('qm-edit-spkl-jam-akhir').value,
+      jamOt: document.getElementById('qm-edit-spkl-jam-ot').value
     };
 
     if (!data.jamAwal || !data.jamAkhir) {
@@ -8733,6 +8767,11 @@
       if (elHadirCheckStartDate) elHadirCheckStartDate.value = defaultCheckDate;
       if (elHadirCheckEndDate) elHadirCheckEndDate.value = defaultCheckDate;
 
+      const elSpklStartDate = document.getElementById('qm-spkl-page-start-date');
+      const elSpklEndDate = document.getElementById('qm-spkl-page-end-date');
+      if (elSpklStartDate) elSpklStartDate.value = defaultCheckDate;
+      if (elSpklEndDate) elSpklEndDate.value = defaultCheckDate;
+
       const elDistKKDate = document.getElementById('qm-dist-KK-date');
       if (elDistKKDate) {
         elDistKKDate.value = `${currentYear}-${String(currentMonth).padStart(2, '0')}`;
@@ -8882,7 +8921,7 @@
       renderSpklCheckResult();
     });
 
-    on('change', '#qm-spkl-page-bulan', function () {
+    on('change', '#qm-spkl-page-start-date, #qm-spkl-page-end-date', function () {
       state.spklCheck = createEmptySpklCheck();
       renderSpklCheckResult();
     });
@@ -8914,8 +8953,8 @@
     });
 
     // Sync Month/Year changes
-    on('change', '#qm-input-bulan, #qm-input-tahun, #qm-fix-spkl-bulan, #qm-fix-spkl-tahun, #qm-spkl-page-bulan, #qm-input-hadir-bulan-bln', function () {
-      const isMonthField = this.id === 'qm-input-bulan' || this.id === 'qm-fix-spkl-bulan' || this.id === 'qm-spkl-page-bulan' || this.id === 'qm-input-hadir-bulan-bln';
+    on('change', '#qm-input-bulan, #qm-input-tahun, #qm-fix-spkl-bulan, #qm-fix-spkl-tahun, #qm-input-hadir-bulan-bln', function () {
+      const isMonthField = this.id === 'qm-input-bulan' || this.id === 'qm-fix-spkl-bulan' || this.id === 'qm-input-hadir-bulan-bln';
       const isYearField = this.id === 'qm-input-tahun' || this.id === 'qm-fix-spkl-tahun';
       refreshGlobalData('', isMonthField ? this.value : '', isYearField ? this.value : '', this.id);
     });
