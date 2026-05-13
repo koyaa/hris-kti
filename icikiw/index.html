@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Quick Action Menu</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="page-shell">
+      <main class="command-menu" aria-label="Quick actions">
+        <header class="search-bar">
+          <div class="search-input-wrap">
+            <span class="search-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="11" cy="11" r="6.5"></circle>
+                <path d="M16 16L21 21"></path>
+              </svg>
+            </span>
+            <input
+              id="command-search"
+              class="search-input"
+              type="search"
+              placeholder="Search..."
+              autocomplete="off"
+              spellcheck="false"
+              aria-label="Search quick actions"
+            />
+          </div>
+          <button class="icon-button search-clear is-hidden" type="button" aria-label="Clear search">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+              <path d="M6 6L18 18"></path>
+              <path d="M18 6L6 18"></path>
+            </svg>
+          </button>
+        </header>
+
+        <section class="menu-body">
+          <div id="empty-state" class="panel-state"></div>
+          <div id="results-state" class="panel-state is-hidden"></div>
+        </section>
+
+        <footer class="menu-footer">
+          <button class="footer-button footer-button-secondary" type="button">Close</button>
+          <div class="footer-actions">
+            <span class="navigate-label">Navigate</span>
+            <div class="nav-button-group" aria-label="Result navigation">
+              <button class="icon-button nav-button" type="button" aria-label="Navigate up">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M6 14L12 8L18 14"></path>
+                </svg>
+              </button>
+              <button class="icon-button nav-button" type="button" aria-label="Navigate down">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M6 10L12 16L18 10"></path>
+                </svg>
+              </button>
+            </div>
+            <span class="footer-divider" aria-hidden="true"></span>
+            <button class="footer-button footer-button-primary" type="button">
+              <span>Open</span>
+              <span class="open-shortcut" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M6 12H18"></path>
+                  <path d="M12 6L18 12L12 18"></path>
+                </svg>
+              </span>
+            </button>
+          </div>
+        </footer>
+      </main>
+    </div>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
