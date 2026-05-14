@@ -5941,6 +5941,41 @@
       letter-spacing: -0.02em !important;
     }
 
+    /* --- Footer --- */
+    #qm-footer {
+      padding: 10px 24px;
+      background: var(--qm-bg-alt);
+      border-top: 1px solid var(--qm-border-warm);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-shrink: 0;
+    }
+
+    .qm-footer-left, .qm-footer-right {
+      display: flex;
+      align-items: center;
+    }
+
+    /* --- Switch Component --- */
+    .qm-switch {
+      position: relative;
+      display: inline-block;
+      width: 28px;
+      height: 16px;
+    }
+    .qm-switch input { opacity: 0; width: 0; height: 0; }
+    .qm-slider {
+      position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0;
+      background-color: var(--qm-sand); transition: .3s; border-radius: 20px;
+    }
+    .qm-slider:before {
+      position: absolute; content: ""; height: 10px; width: 10px; left: 3px; bottom: 3px;
+      background-color: white; transition: .3s; border-radius: 50%;
+    }
+    input:checked + .qm-slider { background-color: var(--qm-p-500); }
+    input:checked + .qm-slider:before { transform: translateX(12px); }
+
   `);
 
   /** Claude-style Spike Mark SVG (4-spoke radial). */
@@ -8052,7 +8087,7 @@
 
     if (!input.value.trim()) input.value = ctxNrp;
     if (autoSearch && !state.karyawanLoading && !state.karyawanQuery && isValidNrp(input.value.trim())) {
-      handleKaryawanSearch();
+      CEK_NRP.search();
     }
   }
 
@@ -8404,9 +8439,9 @@
     if (targetPane) targetPane.classList.add('active');
     localStorage.setItem('qm_last_tab', pane);
 
-    if (pane === 'karyawan') {
-      prefillKaryawanSearch(true);
-      renderKaryawanResults();
+    if (pane === 'karyawan' || pane === 'check-nrp') {
+      CEK_NRP.prefillSearch(true);
+      CEK_NRP.renderResults();
     }
 
     if (pane === 'distribusi' || pane === 'check-nrp' || pane === 'spkl' || pane === 'kehadiran') {
@@ -8591,7 +8626,115 @@
   }
 
   /* ============================================================
-   * 14. INITIALIZATION
+   * 14. DOMAIN MODULES
+   * ============================================================ */
+
+  const CEK_NRP = Object.freeze({
+    lookup: handleNrpLookup,
+    search: handleKaryawanSearch,
+    prefillSearch: prefillKaryawanSearch,
+    renderResults: renderKaryawanResults,
+    renderDetail: renderKaryawanDetail,
+    renderEditor: renderKaryawanEditor,
+    renderExpandedPanel: renderKaryawanExpandedPanel,
+    toggleDetail: toggleKaryawanDetail,
+    toggleEditor: toggleKaryawanEditor,
+    saveEditor: handleKaryawanSaveEdit,
+    loadDetail: loadKaryawanDetail,
+    loadEditor: loadKaryawanEditor,
+    searchEmployees,
+  });
+
+  const SPKL = Object.freeze({
+    highlightPendingDate: spklHighlight,
+    autoFillTargetPage,
+    autoFillEditPage: autoFillSpklEdit,
+    renderCheckResult: renderSpklCheckResult,
+    fetchSummary: fetchSpklSummary,
+    parseSummary: parseSpklSummary,
+    openOnlineCheck: handleSpklOnlineCheck,
+    openPageCheck: handleSpklPageCheck,
+    checkByNrp: handleSpklCheckNrp,
+    openInlineEdit: handleSpklInlineEdit,
+    closeInlineEdit: closeSpklEditPopup,
+    saveInlineEdit: handleSpklEditSave,
+    startBatchProcess: runSpklBatchProcess,
+    resumeBatch: checkSpklBatchResume,
+    startManyNrpBatch: runSpklManyNrpBatch,
+    processBackgroundSingle: processSpklBackgroundSingle,
+    continueBatch: _continueSpklBatch,
+    processManyNrpPage: _processManyNrpPage,
+    checkOnlineStatuses: checkSPKLOnline,
+    runBackgroundQueue: runSpklBackgroundQueue,
+  });
+
+  const KEHADIRAN = Object.freeze({
+    autoSearchPage: autoBarcodeSearchPage,
+    autoClickAddData,
+    autoInput: autoInputHadir,
+    renderCheckResult: renderAttendanceCheckResult,
+    checkByNrp: handleAttendanceCheckNrp,
+    handleInput: handleInputHadir,
+    fetchSpklSummary,
+    startManyNrpBatch: runHadirManyNrpBatch,
+    resumeManyNrpBatch: checkHadirBatchResume,
+    processManyNrpPage: _processHadirManyNrpPage,
+    startBulanBatch: runHadirBulanBatch,
+    resumeBulanBatch: checkHadirBulanResume,
+    fetchBarcodeSummary: fetchBarcodeAttendanceSummary,
+    parseBarcodeSummary: parseBarcodeAttendanceSummary,
+  });
+
+  const DISTRIBUSI = Object.freeze({
+    initChangeEvents: initJkChangeEvents,
+    resolveSyncContext,
+    syncGlobalInputs,
+    refreshGlobalData,
+    refreshOptions: refreshDistribusiOptions,
+    handleDistribusi,
+    handleDistribusiSubsi,
+    saveJkChange: handleSaveJkChange,
+    executeBackground: executeBackgroundDistribusi,
+    autoDistribusi,
+    autoDistribusiSubsi,
+    attachListeners: attachDistribusiListeners,
+    updateDropdowns: updateDistribusiDropdowns,
+    applyDropdowns: applyDistDropdowns,
+    checkJkRestoration,
+    fetchJkOptions,
+    saveJkMaster,
+    handleUpdateKKMaster,
+    fetchKKOptions,
+    saveKKMaster,
+    distributeKkBackground,
+    autoDistKK,
+  });
+
+  const ANOMALI = Object.freeze({
+    detect: detectAnomalies,
+    scanAttendance,
+    validateShiftRow,
+    validateOvertime,
+    applyMark,
+    render: renderAnomalies,
+    exportCurrent: handleExportAnomali,
+    startBatchCheck: startBatchAnomalyCheck,
+    cancelBatchCheck: handleBatchCancel,
+    processBatchWorker,
+    finishBatch,
+    pushBatchResult,
+    updateBatchProgress,
+    renderBatchResults,
+    exportBatchResults,
+    handleBatchNrpClick,
+    handleBatchFixClick,
+    handleFixClick,
+    toggleGroup: handleToggleAnomalyGroup,
+    checkBarcodeMangkir,
+  });
+
+  /* ============================================================
+   * 15. INITIALIZATION
    * ============================================================ */
 
   function validateDomStructure(options) {
@@ -8646,20 +8789,20 @@
 
     const schemaValid = validateStorageSchema();
 
-    spklHighlight();
-    autoFillTargetPage();
-    autoBarcodeSearchPage();
-    autoClickAddData();
-    autoInputHadir();
-    autoDistribusi();
-    autoDistribusiSubsi();
-    autoDistKK();
-    checkSpklBatchResume();
-    checkHadirBatchResume();
-    checkHadirBulanResume();
-    initJkChangeEvents();
-    checkJkRestoration();
-    autoFillSpklEdit();
+    SPKL.highlightPendingDate();
+    SPKL.autoFillTargetPage();
+    KEHADIRAN.autoSearchPage();
+    KEHADIRAN.autoClickAddData();
+    KEHADIRAN.autoInput();
+    DISTRIBUSI.autoDistribusi();
+    DISTRIBUSI.autoDistribusiSubsi();
+    DISTRIBUSI.autoDistKK();
+    SPKL.resumeBatch();
+    KEHADIRAN.resumeManyNrpBatch();
+    KEHADIRAN.resumeBulanBatch();
+    DISTRIBUSI.initChangeEvents();
+    DISTRIBUSI.checkJkRestoration();
+    SPKL.autoFillEditPage();
 
     // Return to source page after process finish (autoDistribusi result page)
     const activeFlow = getAutomationFlow();
@@ -8719,9 +8862,9 @@
       const elDistKKNrp = document.getElementById('qm-dist-KK-nrp');
       if (elDistKKNrp && ctx.nrp) elDistKKNrp.value = ctx.nrp;
 
-      renderKaryawanResults();
-      renderAttendanceCheckResult();
-      renderSpklCheckResult();
+      CEK_NRP.renderResults();
+      KEHADIRAN.renderCheckResult();
+      SPKL.renderCheckResult();
 
       const now = new Date();
       const currentMonth = now.getMonth() + 1;
@@ -8797,7 +8940,7 @@
       on('click', '#qm-btn-clear-logs', handleClearLogs);
       on('click', '#qm-btn-export-logs', handleExportLogs);
     }
-    detectAnomalies();
+    ANOMALI.detect();
 
     if (!schemaValid) {
       UI.showResult('warning', 'Data Direset', 'Versi data sesi tidak cocok. Data lama telah dibersihkan.');
@@ -8823,18 +8966,18 @@
     on('click', '#qm-fab', togglePanel);
     on('click', '#qm-backdrop', closePanel);
     on('click', '#qm-btn-close-header', closePanel);
-    on('click', '#qm-btn-check', handleNrpLookup);
-    on('click', '#qm-btn-karyawan-search', handleKaryawanSearch);
-    on('click', '#qm-btn-spkl-batch', runSpklBatchProcess);
-    on('click', '#qm-btn-spkl-many-nrp', runSpklManyNrpBatch);
-    on('click', '#qm-btn-spkl-page-cek', handleSpklCheckNrp);
-    on('click', '#qm-btn-spkl-online-cek', handleSpklOnlineCheck);
-    on('click', '#qm-btn-hadir-check', handleAttendanceCheckNrp);
-    on('click', '#qm-btn-hadir-proses', handleInputHadir);
-    on('click', '#qm-btn-hadir-bulan-proses', runHadirBulanBatch);
-    on('click', '#qm-btn-hadir-many-proses', runHadirManyNrpBatch);
-    on('click', '#qm-btn-distribusi-proses', handleDistribusi);
-    on('click', '#qm-btn-distribusi-subsi-proses', handleDistribusiSubsi);
+    on('click', '#qm-btn-check', CEK_NRP.lookup);
+    on('click', '#qm-btn-karyawan-search', CEK_NRP.search);
+    on('click', '#qm-btn-spkl-batch', SPKL.startBatchProcess);
+    on('click', '#qm-btn-spkl-many-nrp', SPKL.startManyNrpBatch);
+    on('click', '#qm-btn-spkl-page-cek', SPKL.checkByNrp);
+    on('click', '#qm-btn-spkl-online-cek', SPKL.openOnlineCheck);
+    on('click', '#qm-btn-hadir-check', KEHADIRAN.checkByNrp);
+    on('click', '#qm-btn-hadir-proses', KEHADIRAN.handleInput);
+    on('click', '#qm-btn-hadir-bulan-proses', KEHADIRAN.startBulanBatch);
+    on('click', '#qm-btn-hadir-many-proses', KEHADIRAN.startManyNrpBatch);
+    on('click', '#qm-btn-distribusi-proses', DISTRIBUSI.handleDistribusi);
+    on('click', '#qm-btn-distribusi-subsi-proses', DISTRIBUSI.handleDistribusiSubsi);
     on('click', '#qm-global-cancel-btn', function () {
       Logger.info('User cancelled automation');
       state.cancelRequested = true;
@@ -8913,35 +9056,35 @@
 
     on('input', '#qm-input-hadir-check-nrp', function () {
       state.attendanceCheck = createEmptyAttendanceCheck();
-      renderAttendanceCheckResult();
+      KEHADIRAN.renderCheckResult();
     });
 
     on('input', '#qm-spkl-page-nrp', function () {
       state.spklCheck = createEmptySpklCheck();
-      renderSpklCheckResult();
+      SPKL.renderCheckResult();
     });
 
     on('change', '#qm-spkl-page-start-date, #qm-spkl-page-end-date', function () {
       state.spklCheck = createEmptySpklCheck();
-      renderSpklCheckResult();
+      SPKL.renderCheckResult();
     });
 
     on('click', '.qm-spkl-inline-edit-btn', function () {
       const idx = parseInt(this.dataset.index, 10);
-      handleSpklInlineEdit(idx);
+      SPKL.openInlineEdit(idx);
     });
 
     on('click', '.qm-modal-close-btn, .qm-modal-cancel-btn', function () {
-      closeSpklEditPopup();
+      SPKL.closeInlineEdit();
     });
 
     on('click', '#qm-btn-spkl-edit-save', function () {
-      handleSpklEditSave();
+      SPKL.saveInlineEdit();
     });
 
     on('change', '#qm-input-hadir-check-start-date, #qm-input-hadir-check-end-date', function () {
       state.attendanceCheck = createEmptyAttendanceCheck();
-      renderAttendanceCheckResult();
+      KEHADIRAN.renderCheckResult();
     });
 
     on('input', '#qm-input-karyawan-search', function () {
@@ -8963,17 +9106,17 @@
     initKeyboardNavigation();
 
     on('click', '.qm-tab', handleTabClick);
-    on('click', '.qm-karyawan-detail-btn', function () { toggleKaryawanDetail(this.dataset.key || ''); });
-    on('click', '.qm-karyawan-edit-btn', function () { toggleKaryawanEditor(this.dataset.key || ''); });
-    on('click', '.qm-karyawan-save-btn', handleKaryawanSaveEdit);
+    on('click', '.qm-karyawan-detail-btn', function () { CEK_NRP.toggleDetail(this.dataset.key || ''); });
+    on('click', '.qm-karyawan-edit-btn', function () { CEK_NRP.toggleEditor(this.dataset.key || ''); });
+    on('click', '.qm-karyawan-save-btn', CEK_NRP.saveEditor);
     on('click', '.qm-fix-dot', handleFixDotClick);
     on('click', '.qm-btn-fix-pill', handleFixDotClick);
 
     on('click', '#qm-btn-batch-check', function (e) {
       if (this.dataset.running) {
-        handleBatchCancel();
+        ANOMALI.cancelBatchCheck();
       } else {
-        startBatchAnomalyCheck();
+        ANOMALI.startBatchCheck();
       }
     });
     on('mouseover', '#qm-btn-batch-check', function (e) {
@@ -8988,9 +9131,9 @@
         this.textContent = 'Memproses...';
       }
     });
-    on('click', '#qm-btn-export-batch', exportBatchResults);
-    on('click', '.qm-batch-nrp-link', handleBatchNrpClick);
-    on('click', '.qm-batch-fix-btn', handleBatchFixClick);
+    on('click', '#qm-btn-export-batch', ANOMALI.exportBatchResults);
+    on('click', '.qm-batch-nrp-link', ANOMALI.handleBatchNrpClick);
+    on('click', '.qm-batch-fix-btn', ANOMALI.handleBatchFixClick);
 
     on('click', '.qm-btn-barcode-delete', async function (e) {
       const url = this.dataset.url;
@@ -9003,7 +9146,7 @@
 
       try {
         await hrisFetch(url);
-        handleAttendanceCheckNrp(); // Refresh results
+        KEHADIRAN.checkByNrp(); // Refresh results
       } catch (e) {
         alert('Gagal menghapus data: ' + e.message);
         btn.disabled = false;
