@@ -1406,8 +1406,8 @@
   }
 
   function renderKaryawanResults() {
-    const wrap = document.getElementById('qm-karyawan-results');
-    const btn = document.getElementById('qm-btn-karyawan-search');
+    const wrap = uiAdapter.get('karyawanResults');
+    const btn = uiAdapter.get('karyawanSearchButton');
     if (!wrap) return;
 
     if (btn) {
@@ -1416,22 +1416,22 @@
     }
 
     if (state.karyawanLoading) {
-      renderSafe(wrap, '<div class="qm-card qm-karyawan-empty"><div class="qm-flex qm-items-center qm-gap-s"><span class="qm-spinner"></span><span>Mencari data karyawan...</span></div></div>');
+      uiAdapter.html('karyawanResults', '<div class="qm-card qm-karyawan-empty"><div class="qm-flex qm-items-center qm-gap-s"><span class="qm-spinner"></span><span>Mencari data karyawan...</span></div></div>');
       return;
     }
 
     if (state.karyawanError) {
-      renderSafe(wrap, `<div class="qm-card qm-karyawan-empty qm-text-danger">${escapeHtml(state.karyawanError)}</div>`);
+      uiAdapter.html('karyawanResults', `<div class="qm-card qm-karyawan-empty qm-text-danger">${escapeHtml(state.karyawanError)}</div>`);
       return;
     }
 
     if (!state.karyawanQuery) {
-      renderSafe(wrap, '<div class="qm-card qm-karyawan-empty">Masukkan NRP 4 atau 8 digit, atau nama karyawan untuk mencari data personal dan menampilkan profil atau quick edit JK/KK.</div>');
+      uiAdapter.html('karyawanResults', '<div class="qm-card qm-karyawan-empty">Masukkan NRP 4 atau 8 digit, atau nama karyawan untuk mencari data personal dan menampilkan profil atau quick edit JK/KK.</div>');
       return;
     }
 
     if (state.karyawanResults.length === 0) {
-      renderSafe(wrap, `<div class="qm-card qm-karyawan-empty">Tidak ada data karyawan yang cocok untuk <strong>${escapeHtml(state.karyawanQuery)}</strong>.</div>`);
+      uiAdapter.html('karyawanResults', `<div class="qm-card qm-karyawan-empty">Tidak ada data karyawan yang cocok untuk <strong>${escapeHtml(state.karyawanQuery)}</strong>.</div>`);
       return;
     }
 
@@ -1466,7 +1466,7 @@
     }).join('')}
       </div>
     `;
-    renderSafe(wrap, html);
+    uiAdapter.html('karyawanResults', html);
   }
 
   async function loadKaryawanDetail(key, nrp, profileUrl) {
@@ -1588,15 +1588,15 @@
     await loadKaryawanEditor(key, nrp);
   }
 
-  async function handleKaryawanSaveEdit() {
-    const key = this.dataset.key || '';
+  async function handleKaryawanSaveEdit(input) {
+    const payload = (input && input.target && input.currentTarget) ? null : input;
+    const key = payload?.key || this?.dataset?.key || '';
     const editor = state.karyawanEditor;
     if (!editor || editor.key !== key) return;
 
-    const jkSelect = Array.from(document.querySelectorAll('.qm-karyawan-jk-select')).find(el => el.dataset.key === key);
-    const kkSelect = Array.from(document.querySelectorAll('.qm-karyawan-kk-select')).find(el => el.dataset.key === key);
-    const nextJk = jkSelect ? jkSelect.value : '';
-    const nextKk = kkSelect ? kkSelect.value : '';
+    const selectValues = payload || panelReaders.karyawanSave(key);
+    const nextJk = selectValues.nextJk || '';
+    const nextKk = selectValues.nextKk || '';
 
     if (!nextJk && !nextKk) {
       UI.showResult('warning', 'Data Belum Lengkap', 'Pilih JK atau KK yang ingin disimpan.');
@@ -2273,13 +2273,13 @@
   }
 
   function startBatchAnomalyCheck() {
-    const inputMulti = document.getElementById('qm-input-multi-nrp');
-    const inputBulan = document.getElementById('qm-input-bulan');
-    const inputTahun = document.getElementById('qm-input-tahun');
-    const btnCheck = document.getElementById('qm-btn-batch-check');
-    const btnExport = document.getElementById('qm-btn-export-batch');
-    const progress = document.getElementById('qm-batch-progress');
-    const results = document.getElementById('qm-batch-results');
+    const inputMulti = uiAdapter.get('#qm-input-multi-nrp');
+    const inputBulan = uiAdapter.get('globalMonth');
+    const inputTahun = uiAdapter.get('globalYear');
+    const btnCheck = uiAdapter.get('batchCheckButton');
+    const btnExport = uiAdapter.get('batchExportButton');
+    const progress = uiAdapter.get('batchProgress');
+    const results = uiAdapter.get('batchResults');
 
     const nrps = parseNrpList(inputMulti ? inputMulti.value : '');
     if (nrps.length === 0) { UI.showResult('warning', 'Data Tidak Valid', 'Masukkan NRP yang valid (4 atau 8 digit).'); return; }
@@ -2299,7 +2299,7 @@
     state.batchResults = [];
     state.batchLogs = [];
     resetBatchProfile();
-    const logBody = document.getElementById('qm-log-body');
+    const logBody = uiAdapter.get('logBody');
     if (logBody) renderSafe(logBody, '');
     pushLog(`Memulai batch check untuk ${nrps.length} NRP...`);
 
@@ -2319,7 +2319,7 @@
     state.batchAborted = true;
     state.batchRunId++;
     state.batchQueue = [];
-    const btnCheck = document.getElementById('qm-btn-batch-check');
+    const btnCheck = uiAdapter.get('batchCheckButton');
     if (btnCheck) btnCheck.textContent = 'Membatalkan...';
     finishBatch(state.batchRunId);
   }
@@ -2393,11 +2393,11 @@
 
   function finishBatch(batchRunId) {
     if (batchRunId !== state.batchRunId) return;
-    const btnCheck = document.getElementById('qm-btn-batch-check');
-    const btnExport = document.getElementById('qm-btn-export-batch');
-    const progress = document.getElementById('qm-batch-progress');
-    const statusBar = document.getElementById('qm-batch-status');
-    const progressBar = document.getElementById('qm-batch-progress-bar');
+    const btnCheck = uiAdapter.get('batchCheckButton');
+    const btnExport = uiAdapter.get('batchExportButton');
+    const progress = uiAdapter.get('batchProgress');
+    const statusBar = uiAdapter.get('batchStatus');
+    const progressBar = uiAdapter.get('batchProgressBar');
 
     if (btnCheck) {
       btnCheck.textContent = 'Proses Batch';
@@ -2437,8 +2437,8 @@
 
   function updateBatchProgress() {
     const pct = state.batchTotal > 0 ? Math.round((state.batchResults.length / state.batchTotal) * 100) : 0;
-    const barEl = document.getElementById('qm-batch-progress-bar');
-    const statusEl = document.getElementById('qm-batch-status');
+    const barEl = uiAdapter.get('batchProgressBar');
+    const statusEl = uiAdapter.get('batchStatus');
     if (barEl) barEl.style.width = pct + '%';
     if (statusEl) statusEl.textContent = 'Memproses... ' + state.batchResults.length + '/' + state.batchTotal;
   }
@@ -2453,7 +2453,7 @@
 
   function _renderBatchResultsImmediate() {
     const prof = startProfile('renderBatchResults', { items: state.batchResults.length });
-    const container = document.getElementById('qm-batch-results');
+    const container = uiAdapter.get('batchResults');
     if (!container) {
       finishProfile(prof, { skipped: true });
       return;
@@ -2622,7 +2622,7 @@
   }
 
   function exportBatchResults() {
-    if (state.batchResults.length === 0) { alert('Tidak ada hasil untuk diekspor.'); return; }
+    if (state.batchResults.length === 0) { uiAdapter.alert('Tidak ada hasil untuk diekspor.'); return; }
     if (typeof XLSX !== 'undefined') {
       const ketHeaders = ['CT', 'CH', 'SD', 'I', 'IS', 'IA', 'A'];
       const headers = ['Bagian', 'Seksi', 'NRP', 'Nama', 'JK', 'OTB', 'OTL', 'OTA', 'OTP', 'Hari Kerja', ...ketHeaders, 'Jml Anomali', 'Detail Anomali'];
@@ -2657,14 +2657,14 @@
       XLSX.utils.book_append_sheet(wb, ws, 'Batch Check');
       XLSX.writeFile(wb, `Batch_Check_NRP_${new Date().toISOString().slice(0, 10)}.xlsx`);
     } else {
-      alert('Library XLSX gagal dimuat.');
+      uiAdapter.alert('Library XLSX gagal dimuat.');
     }
   }
 
   function renderAnomalies() {
     const prof = startProfile('renderAnomalies', { count: state.anomalies.length });
-    const badge = document.getElementById('qm-badge-anomali');
-    const list = document.getElementById('qm-anomali-list');
+    const badge = uiAdapter.get('anomalyBadge');
+    const list = uiAdapter.get('anomalyList');
     if (!badge || !list) {
       finishProfile(prof, { skipped: true });
       return;
@@ -3002,8 +3002,8 @@
   }
 
   function renderAttendanceCheckResult() {
-    const wrap = document.getElementById('qm-hadir-check-result');
-    const btn = document.getElementById('qm-btn-hadir-check');
+    const wrap = uiAdapter.get('attendanceCheckResult');
+    const btn = uiAdapter.get('attendanceCheckButton');
     if (!wrap) return;
 
     const current = state.attendanceCheck || createEmptyAttendanceCheck();
@@ -3013,17 +3013,17 @@
     }
 
     if (current.loading) {
-      renderSafe(wrap, '<div class="qm-hadir-check-card"><div class="qm-flex qm-items-center qm-gap-s"><span class="qm-spinner"></span><span>Memuat ringkasan kehadiran...</span></div></div>');
+      uiAdapter.html('attendanceCheckResult', '<div class="qm-hadir-check-card"><div class="qm-flex qm-items-center qm-gap-s"><span class="qm-spinner"></span><span>Memuat ringkasan kehadiran...</span></div></div>');
       return;
     }
 
     if (current.error) {
-      renderSafe(wrap, `<div class="qm-hadir-check-card qm-hadir-check-error">${escapeHtml(current.error)}</div>`);
+      uiAdapter.html('attendanceCheckResult', `<div class="qm-hadir-check-card qm-hadir-check-error">${escapeHtml(current.error)}</div>`);
       return;
     }
 
     if (!current.summary) {
-      renderSafe(wrap, '<div class="qm-hadir-check-card qm-hadir-check-empty">Pilih NRP dan tanggal untuk melihat ringkasan barcode harian.</div>');
+      uiAdapter.html('attendanceCheckResult', '<div class="qm-hadir-check-card qm-hadir-check-empty">Pilih NRP dan tanggal untuk melihat ringkasan barcode harian.</div>');
       return;
     }
 
@@ -3064,7 +3064,7 @@
         `;
       }).join('');
 
-    renderSafe(wrap, `
+    uiAdapter.html('attendanceCheckResult', `
       <div class="qm-hadir-check-card">
         <div class="qm-hadir-check-summary">
           <div class="qm-hadir-check-head">
@@ -3089,8 +3089,8 @@
   }
 
   function renderSpklCheckResult() {
-    const wrap = document.getElementById('qm-spkl-result');
-    const btn = document.getElementById('qm-btn-spkl-page-cek');
+    const wrap = uiAdapter.get('spklCheckResult');
+    const btn = uiAdapter.get('spklCheckButton');
     if (!wrap) return;
 
     const current = state.spklCheck || createEmptySpklCheck();
@@ -3106,17 +3106,17 @@
     }
 
     if (current.loading) {
-      renderSafe(wrap, '<div class="qm-hadir-check-card"><div class="qm-flex qm-items-center qm-gap-s"><span class="qm-spinner"></span><span>Memuat data SPKL...</span></div></div>');
+      uiAdapter.html('spklCheckResult', '<div class="qm-hadir-check-card"><div class="qm-flex qm-items-center qm-gap-s"><span class="qm-spinner"></span><span>Memuat data SPKL...</span></div></div>');
       return;
     }
 
     if (current.error) {
-      renderSafe(wrap, `<div class="qm-hadir-check-card qm-hadir-check-error">${escapeHtml(current.error)}</div>`);
+      uiAdapter.html('spklCheckResult', `<div class="qm-hadir-check-card qm-hadir-check-error">${escapeHtml(current.error)}</div>`);
       return;
     }
 
     if (!current.summary) {
-      renderSafe(wrap, '');
+      uiAdapter.html('spklCheckResult', '');
       return;
     }
 
@@ -3165,12 +3165,12 @@
         `;
       }).join('');
 
-    renderSafe(wrap, `
+    uiAdapter.html('spklCheckResult', `
       <div class="qm-hadir-check-card" style="margin-top: 8px; padding: 10px 14px;">
         <div class="qm-hadir-check-detail">
           <div class="qm-flex qm-justify-between qm-items-center qm-mb-s" style="padding-bottom: 4px; border-bottom: 1px solid var(--qm-border-warm);">
             <div class="qm-hadir-check-detail-title" style="font-size: 11px; letter-spacing: 0.05em;">DAFTAR SPKL BULAN INI</div>
-            <a href="${spklListUrl(summary.nrp, document.getElementById('qm-spkl-page-bulan')?.value, new Date().getFullYear())}" target="_blank" class="qm-text-primary qm-font-xs" style="text-decoration: underline;">Buka Halaman Penuh</a>
+            <a href="${spklListUrl(summary.nrp, uiAdapter.getValue('spklPageMonth') || (new Date().getMonth() + 1), new Date().getFullYear())}" target="_blank" class="qm-text-primary qm-font-xs" style="text-decoration: underline;">Buka Halaman Penuh</a>
           </div>
           ${listHtml}
         </div>
@@ -4176,7 +4176,7 @@
     let successCount = 0;
 
     for (let i = 0; i < queue.length; i++) {
-      if (!document.getElementById('qm-global-loader')) {
+      if (!uiAdapter.get('globalLoader')) {
         Logger.info('User cancelled background queue');
         return;
       }
@@ -6692,12 +6692,230 @@
 
   `;
 
+  const PANEL_ELEMENTS = Object.freeze({
+    panelShell: '#qm-panel, #qm-fab, #qm-backdrop',
+    allTabs: '.qm-tab',
+    allPanes: '.qm-pane',
+    activePane: '.qm-pane.active',
+    accordionHeaders: '.qm-accordion-header',
+    fab: '#qm-fab',
+    panel: '#qm-panel',
+    backdrop: '#qm-backdrop',
+    header: '#qm-header',
+    result: '#qm-result',
+    resultTitle: '#qm-result-title',
+    resultBody: '#qm-result-body',
+    history: '#qm-history',
+    checkNrpPane: '#qm-pane-check-nrp',
+    karyawanResults: '#qm-karyawan-results',
+    karyawanSearchButton: '#qm-btn-karyawan-search',
+    karyawanSearchInput: '#qm-input-karyawan-search',
+    lookupButton: '#qm-btn-check',
+    lookupNrp: '#qm-input-nrp',
+    globalMonth: '#qm-input-bulan',
+    globalYear: '#qm-input-tahun',
+    attendanceCheckButton: '#qm-btn-hadir-check',
+    attendanceCheckResult: '#qm-hadir-check-result',
+    attendanceCheckNrp: '#qm-input-hadir-check-nrp',
+    attendanceCheckStartDate: '#qm-input-hadir-check-start-date',
+    attendanceCheckEndDate: '#qm-input-hadir-check-end-date',
+    attendanceInputNrp: '#qm-input-hadir-nrp',
+    attendanceInputDate: '#qm-input-hadir-tanggal',
+    attendanceInputTime: '#qm-input-hadir-jam',
+    attendanceInputStatus: '#qm-input-hadir-status',
+    spklCheckButton: '#qm-btn-spkl-page-cek',
+    spklCheckResult: '#qm-spkl-result',
+    spklPageNrp: '#qm-spkl-page-nrp',
+    spklPageMonth: '#qm-spkl-page-bulan',
+    spklPageStartDate: '#qm-spkl-page-start-date',
+    spklPageEndDate: '#qm-spkl-page-end-date',
+    spklOnlineNrp: '#qm-spkl-online-nrp',
+    spklOnlineDate: '#qm-spkl-online-date',
+    spklEditModal: '#qm-modal-spkl-edit',
+    spklEditDate: '#qm-edit-spkl-tgl',
+    spklEditOt: '#qm-edit-spkl-ot',
+    spklEditJamAwal: '#qm-edit-spkl-jam-awal',
+    spklEditJamAkhir: '#qm-edit-spkl-jam-akhir',
+    spklEditJamOt: '#qm-edit-spkl-jam-ot',
+    distribusiNrp: '#qm-input-distribusi-nrp',
+    distribusiJkUseDistribusi: '#qm-dist-jk-use-distribusi',
+    distribusiJkSelect: '#qm-dist-jk-select-input',
+    distribusiJkTargetDate: '#qm-dist-jk-target-date',
+    distribusiJkTargetDateEnd: '#qm-dist-jk-target-date-end',
+    distribusiJkTargetShift: '#qm-dist-jk-target-shift',
+    distribusiJkValue: '#qm-jk-value',
+    distribusiSubsiUseDistribusi: '#qm-dist-subsi-use-distribusi',
+    distribusiSubsiJkSelect: '#qm-dist-subsi-jk-select-input',
+    distribusiSubsiDateStart: '#qm-input-distribusi-subsi-tgl-awal',
+    distribusiSubsiDateEnd: '#qm-input-distribusi-subsi-tgl-akhir',
+    distribusiSubsiShift: '#qm-input-distribusi-subsi-shift',
+    distribusiSubsiBagian: '#qm-input-distribusi-subsi-bagian',
+    distribusiSubsiSeksi: '#qm-input-distribusi-subsi-seksi',
+    distribusiSubsiGrup: '#qm-input-distribusi-subsi-grup',
+    distribusiKkNrp: '#qm-dist-KK-nrp',
+    distribusiKkDate: '#qm-dist-KK-date',
+    distribusiKkSelect: '#qm-dist-KK-select-input',
+    distribusiKkBagian: '#qm-dist-KK-bagian',
+    distribusiKkSeksi: '#qm-dist-KK-seksi',
+    distribusiKkGrup: '#qm-dist-KK-grup',
+    distribusiJkContainers: '#qm-dist-jk-options-container, #qm-dist-subsi-jk-container',
+    distribusiJkPrimaryContainer: '#qm-dist-jk-options-container',
+    distribusiSubsiJkContainer: '#qm-dist-subsi-jk-container',
+    distribusiKkContainer: '#qm-dist-KK-options-container',
+    anomalyBadge: '#qm-badge-anomali',
+    anomalyList: '#qm-anomali-list',
+    batchProgressBar: '#qm-batch-progress-bar',
+    batchStatus: '#qm-batch-status',
+    batchResults: '#qm-batch-results',
+    batchProgress: '#qm-batch-progress',
+    batchCheckButton: '#qm-btn-batch-check',
+    batchExportButton: '#qm-btn-export-batch',
+    configCollapseMenu: '#qm-config-collapse-menu',
+    themeLightButton: '#qm-btn-theme-light',
+    themeDarkButton: '#qm-btn-theme-dark',
+    showLogsButton: '#qm-btn-show-logs',
+    logContainer: '#qm-log-container',
+    logBody: '#qm-log-body',
+    shortcutInput: '#qm-input-shortcut',
+    shortcutRecordButton: '#qm-btn-record-shortcut',
+    globalLoader: '#qm-global-loader',
+    globalLoaderText: '#qm-global-loader-text',
+    globalLoaderBar: '#qm-global-loader-bar',
+    fixSpklNrp: '#qm-fix-spkl-nrp',
+    fixSpklMonth: '#qm-fix-spkl-bulan',
+    fixSpklYear: '#qm-fix-spkl-tahun',
+    hadirBulanNrp: '#qm-input-hadir-bulan-nrp',
+    hadirBulanMonth: '#qm-input-hadir-bulan-bln',
+    hadirBulanYear: '#qm-input-hadir-bulan-thn',
+    fixManyDate: '#qm-fix-many-date',
+    distribusiDate: '#qm-input-distribusi-tanggal'
+  });
+
+  const uiAdapter = {
+    resolve(target) {
+      return PANEL_ELEMENTS[target] || target;
+    },
+
+    get(target, root = document) {
+      return root.querySelector(this.resolve(target));
+    },
+
+    all(target, root = document) {
+      return Array.from(root.querySelectorAll(this.resolve(target)));
+    },
+
+    html(target, html) {
+      const el = this.get(target);
+      if (el) renderSafe(el, html);
+      return el;
+    },
+
+    text(target, value) {
+      const el = this.get(target);
+      if (el) el.textContent = value;
+      return el;
+    },
+
+    value(target, value) {
+      const el = this.get(target);
+      if (!el || !('value' in el)) return el || null;
+      if (value === undefined) return el.value;
+      el.value = value;
+      return el;
+    },
+
+    getValue(target, options = {}) {
+      const raw = this.value(target);
+      if (typeof raw !== 'string') return '';
+      return options.trim ? raw.trim() : raw;
+    },
+
+    checked(target, value) {
+      const el = this.get(target);
+      if (!el || typeof el.checked !== 'boolean') return false;
+      if (value === undefined) return el.checked;
+      el.checked = !!value;
+      return el.checked;
+    },
+
+    disabled(target, disabled) {
+      const el = this.get(target);
+      if (el && 'disabled' in el) el.disabled = !!disabled;
+      return el;
+    },
+
+    setDataset(target, key, value) {
+      const el = this.get(target);
+      if (el) el.dataset[key] = value;
+      return el;
+    },
+
+    addClass(target, className) {
+      this.all(target).forEach(el => el.classList.add(className));
+    },
+
+    removeClass(target, className) {
+      this.all(target).forEach(el => el.classList.remove(className));
+    },
+
+    toggleClass(target, className, force) {
+      this.all(target).forEach(el => el.classList.toggle(className, force));
+    },
+
+    focus(target) {
+      const el = this.get(target);
+      if (el && typeof el.focus === 'function') el.focus();
+      return el;
+    },
+
+    requestPrimaryFocus() {
+      const input = document.querySelector('.qm-pane.active #qm-input-karyawan-search, .qm-pane.active #qm-input-nrp, #qm-input-nrp');
+      if (input && typeof input.focus === 'function') input.focus();
+      return input;
+    },
+
+    activePaneId() {
+      return this.get('activePane')?.id || '';
+    },
+
+    activePaneKey() {
+      return this.activePaneId().replace(/^qm-pane-/, '');
+    },
+
+    activatePane(paneKey) {
+      this.all('allTabs').forEach(el => el.classList.toggle('active', el.dataset.pane === paneKey));
+      this.all('allPanes').forEach(el => el.classList.toggle('active', el.id === `qm-pane-${paneKey}`));
+    },
+
+    confirm(message) {
+      return window.confirm(message);
+    },
+
+    alert(message) {
+      window.alert(message);
+    },
+
+    openUrl(url, target = '_blank') {
+      if (target === '_self') window.location.href = url;
+      else window.open(url, target);
+    },
+
+    reload(delay = 0) {
+      setTimeout(() => window.location.reload(), delay);
+    },
+
+    findKaryawanSelect(key, type) {
+      const selector = type === 'jk' ? '.qm-karyawan-jk-select' : '.qm-karyawan-kk-select';
+      return this.all(selector).find(el => el.dataset.key === key) || null;
+    }
+  };
+
   const UI = {
     resultTimeout: null,
 
     showResult(type, title, bodyHtml) {
       clearTimeout(this.resultTimeout);
-      const resultEl = document.getElementById('qm-result');
+      const resultEl = uiAdapter.get('result');
       if (resultEl) {
         resultEl.classList.remove('success', 'danger', 'warning', 'qm-hidden', 'qm-fade-in');
         resultEl.classList.add(type, 'qm-visible-block');
@@ -6707,15 +6925,15 @@
           resultEl.classList.add('qm-fade-in');
         });
 
-        document.getElementById('qm-result-title').textContent = title;
-        renderSafe(document.getElementById('qm-result-body'), bodyHtml);
+        uiAdapter.text('resultTitle', title);
+        uiAdapter.html('resultBody', bodyHtml);
         this.resultTimeout = setTimeout(() => this.hideResult(), 3500);
       }
     },
 
     hideResult() {
       clearTimeout(this.resultTimeout);
-      const resultEl = document.getElementById('qm-result');
+      const resultEl = uiAdapter.get('result');
       if (resultEl) {
         resultEl.classList.remove('qm-fade-in');
         setTimeout(() => {
@@ -6727,7 +6945,7 @@
 
     setLoading(on) {
       state.loading = on;
-      const btn = document.getElementById('qm-btn-check');
+      const btn = uiAdapter.get('lookupButton');
       if (btn) {
         if (on) {
           btn.disabled = true;
@@ -6742,9 +6960,9 @@
     applyTheme(theme) {
       state.theme = theme;
       GM_setValue('qm_theme', theme);
-      const panel = document.getElementById('qm-panel');
-      const fab = document.getElementById('qm-fab');
-      const loader = document.getElementById('qm-global-loader');
+      const panel = uiAdapter.get('panel');
+      const fab = uiAdapter.get('fab');
+      const loader = uiAdapter.get('globalLoader');
 
       const isDark = theme === 'dark';
       [panel, fab, loader].forEach(el => {
@@ -6752,18 +6970,18 @@
       });
 
       // Update buttons in config
-      const btnLight = document.getElementById('qm-btn-theme-light');
-      const btnDark = document.getElementById('qm-btn-theme-dark');
+      const btnLight = uiAdapter.get('themeLightButton');
+      const btnDark = uiAdapter.get('themeDarkButton');
       if (btnLight) btnLight.classList.toggle('active', !isDark);
       if (btnDark) btnDark.classList.toggle('active', isDark);
     },
 
     showGlobalLoader(title, initialMsg, allowCancel = false) {
-      const existing = document.getElementById('qm-global-loader');
+      const existing = uiAdapter.get('globalLoader');
       if (existing) existing.remove();
 
       state.batchLogs = []; // Clear logs on new process
-      const logBody = document.getElementById('qm-log-body');
+      const logBody = uiAdapter.get('logBody');
       if (logBody) renderSafe(logBody, '');
 
       const cancelBtnHtml = allowCancel
@@ -6793,17 +7011,17 @@
 
     setGlobalProgress(pct, msg, silent = false) {
       if (msg) {
-        const textEl = document.getElementById('qm-global-loader-text');
+        const textEl = uiAdapter.get('globalLoaderText');
         if (textEl) textEl.textContent = msg;
         if (!silent) pushLog(msg);
       }
-      const barEl = document.getElementById('qm-global-loader-bar');
+      const barEl = uiAdapter.get('globalLoaderBar');
       if (barEl) barEl.style.width = pct + '%';
     },
 
     hideGlobalLoader(delay = 800) {
       setTimeout(() => {
-        const loader = document.getElementById('qm-global-loader');
+        const loader = uiAdapter.get('globalLoader');
         if (loader) {
           loader.classList.add('qm-loader-hiding');
           setTimeout(() => loader.remove(), 300);
@@ -6812,7 +7030,7 @@
     },
 
     renderHistory() {
-      const histEl = document.getElementById('qm-history');
+      const histEl = uiAdapter.get('history');
       if (!histEl) return;
       if (!state.history.length) { renderSafe(histEl, ''); return; }
       const items = state.history.map(h => `<div class="qm-history-item"><span class="qm-badge ${h.ok ? 'ok' : 'err'}">${h.ok ? '✓' : '✗'}</span><span class="qm-history-nrp">${escapeHtml(h.nrp)}</span><span class="qm-history-label">${escapeHtml(h.label)}</span><span class="qm-history-time">${escapeHtml(h.time)}</span></div>`).join('');
@@ -6833,7 +7051,7 @@
     state.batchLogs.push({ time, msg, level: type });
     if (state.batchLogs.length > 500) state.batchLogs.shift();
 
-    const logBody = document.getElementById('qm-log-body');
+    const logBody = uiAdapter.get('logBody');
     if (logBody) {
       const div = document.createElement('div');
       div.className = 'qm-log-item';
@@ -6845,8 +7063,8 @@
 
 
   function initDraggable() {
-    const panel = document.getElementById('qm-panel');
-    const header = document.getElementById('qm-header');
+    const panel = uiAdapter.get('panel');
+    const header = uiAdapter.get('header');
     if (!panel || !header) return;
 
     let isDragging = false;
@@ -6897,7 +7115,7 @@
   }
 
   function renderLogs() {
-    const logBody = document.getElementById('qm-log-body');
+    const logBody = uiAdapter.get('logBody');
     if (!logBody) return;
 
     if (state.batchLogs.length === 0) {
@@ -6919,7 +7137,9 @@
    * ============================================================ */
 
   function initJkChangeEvents() {
-    on('click', '#qm-btn-KK-update', handleUpdateKKMaster);
+    on('click', '#qm-btn-KK-update', function () {
+      handleUpdateKKMaster(panelReaders.distribusiKk());
+    });
 
     let globalDebounce;
     on('input', '#qm-input-distribusi-nrp, #qm-dist-KK-nrp, #qm-input-distribusi-subsi-nrp, #qm-input-nrp', function () {
@@ -6955,9 +7175,9 @@
     syncGlobalInputs(nrp, bulan, tahun);
 
     // 3. Show loading in summary area
-    const resBody = document.getElementById('qm-result-body');
-    if (resBody && document.getElementById('qm-pane-check-nrp').classList.contains('active')) {
-      renderSafe(resBody, '<div class="qm-flex qm-items-center qm-gap-s qm-p-m"><span class="qm-spinner"></span> <span>Memuat data karyawan...</span></div>');
+    const resBody = uiAdapter.get('resultBody');
+    if (resBody && uiAdapter.get('checkNrpPane')?.classList.contains('active')) {
+      uiAdapter.html('resultBody', '<div class="qm-flex qm-items-center qm-gap-s qm-p-m"><span class="qm-spinner"></span> <span>Memuat data karyawan...</span></div>');
     }
 
     try {
@@ -6965,13 +7185,13 @@
       const emp = await fetchEmployee(nrp);
       if (runId !== state.refreshRunId) return;
       if (!emp.found) {
-        if (resBody) renderSafe(resBody, '<div class="qm-text-danger qm-p-m">NRP tidak ditemukan.</div>');
+        if (resBody) uiAdapter.html('resultBody', '<div class="qm-text-danger qm-p-m">NRP tidak ditemukan.</div>');
         return;
       }
 
       // 5. Update Summary Info
       if (resBody) {
-        renderSafe(resBody, `
+        uiAdapter.html('resultBody', `
           <div class="qm-p-m qm-bg-parchment qm-rounded-m qm-border">
             <div class="qm-flex qm-justify-between qm-mb-s">
               <span class="qm-text-muted qm-text-xs">Nama:</span>
@@ -6994,7 +7214,7 @@
       }
 
       // 6. Refresh Active Pane Data
-      const activePane = document.querySelector('.qm-pane.active')?.id;
+      const activePane = uiAdapter.activePaneId();
       if (activePane === 'qm-pane-distribusi') {
         await refreshDistribusiOptions(nrp, emp, runId);
       } else if (activePane === 'qm-pane-spkl') {
@@ -7003,12 +7223,12 @@
 
     } catch (e) {
       Logger.error('refreshGlobalData error', e);
-      if (runId === state.refreshRunId && resBody) renderSafe(resBody, `<div class="qm-text-danger qm-p-m">Error: ${e.message}</div>`);
+      if (runId === state.refreshRunId && resBody) uiAdapter.html('resultBody', `<div class="qm-text-danger qm-p-m">Error: ${e.message}</div>`);
     }
   }
 
   function activePaneId() {
-    return document.querySelector('.qm-pane.active')?.id || '';
+    return uiAdapter.activePaneId();
   }
 
   function uniqueIds(ids) {
@@ -7056,9 +7276,7 @@
 
   function firstFilledValue(ids, trim = false) {
     for (const id of ids) {
-      const el = document.getElementById(id);
-      if (!el) continue;
-      const rawValue = trim ? el.value.trim() : el.value;
+      const rawValue = uiAdapter.getValue(`#${id}`, { trim });
       if (rawValue !== '' && rawValue !== null && rawValue !== undefined) return rawValue;
     }
     return '';
@@ -7068,26 +7286,26 @@
     // NRP inputs
     const nrpIds = ['qm-input-nrp', 'qm-spkl-page-nrp', 'qm-spkl-online-nrp', 'qm-fix-spkl-nrp', 'qm-input-hadir-check-nrp', 'qm-input-hadir-nrp', 'qm-input-hadir-bulan-nrp', 'qm-input-distribusi-nrp', 'qm-dist-KK-nrp'];
     nrpIds.forEach(id => {
-      const el = document.getElementById(id);
+      const el = uiAdapter.get(`#${id}`);
       if (el && el.value !== nrp) el.value = nrp;
     });
 
     // Month selects
     const bulanIds = ['qm-input-bulan', 'qm-fix-spkl-bulan', 'qm-spkl-page-bulan', 'qm-input-hadir-bulan-bln'];
     bulanIds.forEach(id => {
-      const el = document.getElementById(id);
+      const el = uiAdapter.get(`#${id}`);
       if (el && el.value != bulan) el.value = bulan;
     });
 
     // Year selects
     const tahunIds = ['qm-input-tahun', 'qm-fix-spkl-tahun', 'qm-input-hadir-bulan-thn'];
     tahunIds.forEach(id => {
-      const el = document.getElementById(id);
+      const el = uiAdapter.get(`#${id}`);
       if (el && el.value != tahun) el.value = tahun;
     });
 
     // Date/Month picker sync
-    const kkDate = document.getElementById('qm-dist-KK-date');
+    const kkDate = uiAdapter.get('distribusiKkDate');
     if (kkDate) {
       const mStr = String(bulan).padStart(2, '0');
       kkDate.value = `${tahun}-${mStr}`;
@@ -7096,10 +7314,10 @@
 
   async function refreshDistribusiOptions(nrp, emp, refreshRunId) {
     const jkContainers = [
-      document.getElementById('qm-dist-jk-options-container'),
-      document.getElementById('qm-dist-subsi-jk-container')
+      uiAdapter.get('distribusiJkPrimaryContainer'),
+      uiAdapter.get('distribusiSubsiJkContainer')
     ];
-    const kkContainer = document.getElementById('qm-dist-KK-options-container');
+    const kkContainer = uiAdapter.get('distribusiKkContainer');
 
     jkContainers.forEach(c => { if (c) renderSafe(c, '<span class="qm-spinner qm-spinner-xs"></span>'); });
     if (kkContainer) renderSafe(kkContainer, '<span class="qm-spinner qm-spinner-xs"></span>');
@@ -7131,7 +7349,7 @@
 
       // 3. Set values from emp data
       const setVal = (id, val) => {
-        const el = document.getElementById(id);
+        const el = uiAdapter.get(`#${id}`);
         if (el && val) {
           // If value not present in options, add a temporary one to show it immediately
           if (!Array.from(el.options).some(opt => opt.value === val)) {
@@ -7165,8 +7383,8 @@
     ];
 
     pairs.forEach(p => {
-      const elBag = document.getElementById(p.bag);
-      const elSek = document.getElementById(p.sek);
+      const elBag = uiAdapter.get(`#${p.bag}`);
+      const elSek = uiAdapter.get(`#${p.sek}`);
       if (elBag) elBag.dataset.nrp = nrp;
       if (elSek) elSek.dataset.nrp = nrp;
 
@@ -7239,7 +7457,7 @@
     sync(['qm-input-distribusi-subsi-shift'], 'select[name="status_shift"], select[name="shift"], select[name="kode_shift"], select[id*="shift"], select[name*="shift"]');
 
     // Fallback if Shift dropdown is still empty (only has "Pilih Shift")
-    const shiftEl = document.getElementById('qm-input-distribusi-subsi-shift');
+    const shiftEl = uiAdapter.get('distribusiSubsiShift');
     if (refreshRunId === state.refreshRunId && shiftEl && shiftEl.options.length <= 1) {
       shiftEl.innerHTML += `
         <option value="1">Shift 1 (Pagi)</option>
@@ -7301,20 +7519,20 @@
     return options;
   }
 
-  async function handleSaveJkChange() {
-    const nrp = document.getElementById('qm-input-distribusi-nrp')?.value.trim();
-    if (!nrp) { alert('Harap isi NRP.'); return; }
+  async function handleSaveJkChange(input = panelReaders.distribusiJk()) {
+    const nrp = String(input?.nrp || '').trim();
+    if (!nrp) { uiAdapter.alert('Harap isi NRP.'); return; }
 
-    const useDistribusi = document.getElementById('qm-dist-jk-use-distribusi')?.checked;
-    const jk = document.getElementById('qm-dist-jk-select-input')?.value;
-    const date = document.getElementById('qm-dist-jk-target-date')?.value;
-    const dateEnd = document.getElementById('qm-dist-jk-target-date-end')?.value;
-    const shift = document.getElementById('qm-dist-jk-target-shift')?.value;
+    const useDistribusi = !!input?.useDistribusi;
+    const jk = String(input?.jk || '').trim();
+    const date = String(input?.date || '').trim();
+    const dateEnd = String(input?.dateEnd || '').trim();
+    const shift = String(input?.shift || '').trim();
     const oldJk = sessionStorage.getItem('qm_jk_' + nrp);
 
     const emp = await fetchEmployee(nrp);
     if (!emp.found) {
-      alert('Data karyawan tidak ditemukan untuk NRP ' + nrp);
+      uiAdapter.alert('Data karyawan tidak ditemukan untuk NRP ' + nrp);
       return;
     }
 
@@ -7337,7 +7555,7 @@
         throwIfCancelled();
 
         // Update UI in-place for immediate feedback
-        const jkLabel = document.getElementById('qm-jk-value');
+        const jkLabel = uiAdapter.get('distribusiJkValue');
         if (jkLabel) jkLabel.textContent = jk;
         sessionStorage.setItem('qm_jk_' + nrp, jk);
         Logger.success(`Master Data updated to ${jk} for ${nrp}.`);
@@ -7560,21 +7778,21 @@
   // Removed in favor of unified updateDistribusiDropdowns
   // async function updateSubsiDropdowns(nrp, bag = '', sek = '') { ... }
 
-  async function handleDistribusiSubsi() {
-    const nrp = getPageContext().nrp;
-    if (!nrp) { alert('Gagal mendeteksi NRP. Pastikan Anda berada di halaman profile atau tabel kehadiran.'); return; }
+  async function handleDistribusiSubsi(input = panelReaders.distribusiSubsi()) {
+    const nrp = String(input?.nrp || '').trim();
+    if (!nrp) { uiAdapter.alert('Gagal mendeteksi NRP. Pastikan Anda berada di halaman profile atau tabel kehadiran.'); return; }
 
-    const useDistribusi = document.getElementById('qm-dist-subsi-use-distribusi')?.checked;
-    const jk = document.getElementById('qm-dist-subsi-jk-select-input')?.value;
-    const tglAwal = document.getElementById('qm-input-distribusi-subsi-tgl-awal')?.value;
-    const tglAkhir = document.getElementById('qm-input-distribusi-subsi-tgl-akhir')?.value;
-    const shift = document.getElementById('qm-input-distribusi-subsi-shift')?.value;
-    const bagian = document.getElementById('qm-input-distribusi-subsi-bagian')?.value || '';
-    const seksi = document.getElementById('qm-input-distribusi-subsi-seksi')?.value || '';
-    const grup = document.getElementById('qm-input-distribusi-subsi-grup')?.value || '';
+    const useDistribusi = !!input?.useDistribusi;
+    const jk = String(input?.jk || '').trim();
+    const tglAwal = String(input?.tglAwal || '').trim();
+    const tglAkhir = String(input?.tglAkhir || '').trim();
+    const shift = String(input?.shift || '').trim();
+    const bagian = String(input?.bagian || '').trim();
+    const seksi = String(input?.seksi || '').trim();
+    const grup = String(input?.grup || '').trim();
 
-    if (!jk) { alert('Tunggu opsi Jam Kerja termuat terlebih dahulu.'); return; }
-    if (!tglAwal || !tglAkhir) { alert('Harap isi Tanggal Awal dan Akhir.'); return; }
+    if (!jk) { uiAdapter.alert('Tunggu opsi Jam Kerja termuat terlebih dahulu.'); return; }
+    if (!tglAwal || !tglAkhir) { uiAdapter.alert('Harap isi Tanggal Awal dan Akhir.'); return; }
 
     Logger.info(`Starting handleDistribusiSubsi. JK: ${jk}, Bagian: ${bagian}, Seksi: ${seksi}, Grup: ${grup}`);
 
@@ -7603,7 +7821,7 @@
         } else {
           UI.showResult('success', 'Selesai', 'Request terkirim, harap cek hasil di tabel.');
         }
-        setTimeout(() => window.location.reload(), 1500);
+        uiAdapter.reload(1500);
       } catch (e) {
         Logger.error('handleDistribusiSubsi error', e);
         if (state.cancelRequested || isAbortError(e)) {
@@ -7622,7 +7840,7 @@
 
       // Store return URL for auto-return after redirect completion
       createAutomationFlow('distribusi-subsi', window.location.href, { nrp, tglAwal, tglAkhir, shift });
-      window.location.href = url;
+      uiAdapter.openUrl(url, '_self');
     }
   }
 
@@ -7803,21 +8021,19 @@
     return options;
   }
 
-  async function handleUpdateKKMaster() {
-    const nrpInput = document.getElementById('qm-dist-KK-nrp');
-    const dateInput = document.getElementById('qm-dist-KK-date');
-    const nrp = nrpInput?.value.trim();
-    const dateVal = dateInput?.value; // "YYYY-MM"
-    const KK = document.getElementById('qm-dist-KK-select-input')?.value;
+  async function handleUpdateKKMaster(input = panelReaders.distribusiKk()) {
+    const nrp = String(input?.nrp || '').trim();
+    const dateVal = String(input?.dateVal || '').trim(); // "YYYY-MM"
+    const KK = String(input?.KK || '').trim();
 
-    if (!nrp) { alert('Harap isi NRP.'); return; }
-    if (!KK) { alert('Pilih Kalender Kerja.'); return; }
-    if (!dateVal) { alert('Pilih periode (bulan/tahun).'); return; }
+    if (!nrp) { uiAdapter.alert('Harap isi NRP.'); return; }
+    if (!KK) { uiAdapter.alert('Pilih Kalender Kerja.'); return; }
+    if (!dateVal) { uiAdapter.alert('Pilih periode (bulan/tahun).'); return; }
 
     const [tahun, bulan] = dateVal.split('-');
-    const bagian = document.getElementById('qm-dist-KK-bagian')?.value;
-    const seksi = document.getElementById('qm-dist-KK-seksi')?.value;
-    const grup = document.getElementById('qm-dist-KK-grup')?.value;
+    const bagian = input?.bagian;
+    const seksi = input?.seksi;
+    const grup = input?.grup;
 
     UI.showGlobalLoader('Processing KK', 'Checking current data...');
     try {
@@ -7846,7 +8062,7 @@
 
       UI.setGlobalProgress(100, 'All done!');
       UI.showResult('success', 'Berhasil', 'Proses KK Selesai.');
-      setTimeout(() => window.location.reload(), 1500);
+      uiAdapter.reload(1500);
     } catch (e) {
       UI.showResult('danger', 'Gagal', 'Error: ' + e.message);
       Logger.error('handleUpdateKKMaster error', e);
@@ -8054,20 +8270,130 @@
    * 13. EVENT HANDLERS & PANEL
    * ============================================================ */
 
+  const panelReaders = Object.freeze({
+    lookup() {
+      return {
+        nrp: uiAdapter.getValue('lookupNrp', { trim: true }),
+        bulan: uiAdapter.getValue('globalMonth', { trim: true }),
+        tahun: uiAdapter.getValue('globalYear', { trim: true })
+      };
+    },
+
+    karyawanSearch() {
+      return {
+        query: uiAdapter.getValue('karyawanSearchInput', { trim: true }),
+        bulan: uiAdapter.getValue('globalMonth', { trim: true }) || (new Date().getMonth() + 1),
+        tahun: uiAdapter.getValue('globalYear', { trim: true }) || new Date().getFullYear()
+      };
+    },
+
+    attendanceCheck() {
+      return {
+        nrp: uiAdapter.getValue('attendanceCheckNrp', { trim: true }),
+        startDate: uiAdapter.getValue('attendanceCheckStartDate', { trim: true }),
+        endDate: uiAdapter.getValue('attendanceCheckEndDate', { trim: true })
+      };
+    },
+
+    spklOnline() {
+      return {
+        nrp: uiAdapter.getValue('spklOnlineNrp', { trim: true }),
+        dateInput: uiAdapter.getValue('spklOnlineDate', { trim: true })
+      };
+    },
+
+    spklPageLink() {
+      return {
+        nrp: uiAdapter.getValue('spklPageNrp', { trim: true }),
+        bulan: uiAdapter.getValue('spklPageMonth', { trim: true }) || uiAdapter.getValue('globalMonth', { trim: true }),
+        tahun: uiAdapter.getValue('globalYear', { trim: true }) || new Date().getFullYear()
+      };
+    },
+
+    spklCheck() {
+      return {
+        nrp: uiAdapter.getValue('spklPageNrp', { trim: true }),
+        startDate: uiAdapter.getValue('spklPageStartDate', { trim: true }),
+        endDate: uiAdapter.getValue('spklPageEndDate', { trim: true })
+      };
+    },
+
+    spklInlineEdit() {
+      return {
+        ot: uiAdapter.getValue('spklEditOt', { trim: true }),
+        jamAwal: uiAdapter.getValue('spklEditJamAwal', { trim: true }),
+        jamAkhir: uiAdapter.getValue('spklEditJamAkhir', { trim: true }),
+        jamOt: uiAdapter.getValue('spklEditJamOt', { trim: true })
+      };
+    },
+
+    attendanceInput() {
+      return {
+        nrp: uiAdapter.getValue('attendanceInputNrp', { trim: true }),
+        tgl: uiAdapter.getValue('attendanceInputDate', { trim: true }),
+        jam: uiAdapter.getValue('attendanceInputTime', { trim: true }),
+        status: uiAdapter.getValue('attendanceInputStatus', { trim: true })
+      };
+    },
+
+    distribusiJk() {
+      return {
+        nrp: uiAdapter.getValue('distribusiNrp', { trim: true }),
+        useDistribusi: uiAdapter.checked('distribusiJkUseDistribusi'),
+        jk: uiAdapter.getValue('distribusiJkSelect', { trim: true }),
+        date: uiAdapter.getValue('distribusiJkTargetDate', { trim: true }),
+        dateEnd: uiAdapter.getValue('distribusiJkTargetDateEnd', { trim: true }),
+        shift: uiAdapter.getValue('distribusiJkTargetShift', { trim: true })
+      };
+    },
+
+    distribusiSubsi() {
+      return {
+        nrp: getPageContext().nrp,
+        useDistribusi: uiAdapter.checked('distribusiSubsiUseDistribusi'),
+        jk: uiAdapter.getValue('distribusiSubsiJkSelect', { trim: true }),
+        tglAwal: uiAdapter.getValue('distribusiSubsiDateStart', { trim: true }),
+        tglAkhir: uiAdapter.getValue('distribusiSubsiDateEnd', { trim: true }),
+        shift: uiAdapter.getValue('distribusiSubsiShift', { trim: true }),
+        bagian: uiAdapter.getValue('distribusiSubsiBagian', { trim: true }),
+        seksi: uiAdapter.getValue('distribusiSubsiSeksi', { trim: true }),
+        grup: uiAdapter.getValue('distribusiSubsiGrup', { trim: true })
+      };
+    },
+
+    distribusiKk() {
+      return {
+        nrp: uiAdapter.getValue('distribusiKkNrp', { trim: true }),
+        dateVal: uiAdapter.getValue('distribusiKkDate', { trim: true }),
+        KK: uiAdapter.getValue('distribusiKkSelect', { trim: true }),
+        bagian: uiAdapter.getValue('distribusiKkBagian', { trim: true }),
+        seksi: uiAdapter.getValue('distribusiKkSeksi', { trim: true }),
+        grup: uiAdapter.getValue('distribusiKkGrup', { trim: true })
+      };
+    },
+
+    karyawanSave(key) {
+      return {
+        key,
+        nextJk: uiAdapter.findKaryawanSelect(key, 'jk')?.value || '',
+        nextKk: uiAdapter.findKaryawanSelect(key, 'kk')?.value || ''
+      };
+    }
+  });
+
   function openPanel() {
     state.isOpen = true;
     document.body.classList.add('qm-no-scroll');
-    document.querySelectorAll('#qm-panel, #qm-fab, #qm-backdrop').forEach(el => el.classList.add('qm-open'));
+    uiAdapter.addClass('panelShell', 'qm-open');
     setTimeout(() => {
-      const input = document.querySelector('.qm-pane.active #qm-input-karyawan-search, .qm-pane.active #qm-input-nrp, #qm-input-nrp');
-      if (input) input.focus();
+      uiAdapter.requestPrimaryFocus();
     }, 250);
   }
 
   function closePanel() {
     state.isOpen = false;
     document.body.classList.remove('qm-no-scroll');
-    document.querySelectorAll('#qm-panel, #qm-fab, #qm-backdrop').forEach(el => el.classList.remove('qm-open'));
+    uiAdapter.removeClass('panelShell', 'qm-open');
   }
 
   function togglePanel() {
@@ -8075,25 +8401,24 @@
   }
 
   function getKaryawanSearchInput() {
-    return document.getElementById('qm-input-karyawan-search');
+    return uiAdapter.get('karyawanSearchInput');
   }
 
   function prefillKaryawanSearch(autoSearch = false) {
     const input = getKaryawanSearchInput();
     if (!input) return;
 
-    const ctxNrp = getPageContext().nrp || document.getElementById('qm-input-nrp')?.value.trim() || '';
+    const ctxNrp = getPageContext().nrp || uiAdapter.getValue('lookupNrp', { trim: true }) || '';
     if (!ctxNrp) return;
 
     if (!input.value.trim()) input.value = ctxNrp;
     if (autoSearch && !state.karyawanLoading && !state.karyawanQuery && isValidNrp(input.value.trim())) {
-      CEK_NRP.search();
+      CEK_NRP.searchByQuery(panelReaders.karyawanSearch());
     }
   }
 
-  async function handleKaryawanSearch() {
-    const input = getKaryawanSearchInput();
-    const query = input ? input.value.trim() : '';
+  async function handleKaryawanSearch(input = panelReaders.karyawanSearch()) {
+    const query = String(input?.query || '').trim();
     if (!query) {
       UI.showResult('warning', 'Data Tidak Lengkap', 'Masukkan NRP atau nama karyawan terlebih dahulu.');
       return;
@@ -8107,8 +8432,8 @@
     renderKaryawanResults();
 
     if (isValidNrp(query)) {
-      const bulan = document.getElementById('qm-input-bulan')?.value || (new Date().getMonth() + 1);
-      const tahun = document.getElementById('qm-input-tahun')?.value || new Date().getFullYear();
+      const bulan = input?.bulan || (new Date().getMonth() + 1);
+      const tahun = input?.tahun || new Date().getFullYear();
       syncGlobalInputs(query, bulan, tahun);
     }
 
@@ -8122,18 +8447,16 @@
     }
   }
 
-  function handleNrpLookup() {
-    const inputNrp = document.getElementById('qm-input-nrp');
-    const inputBulan = document.getElementById('qm-input-bulan');
-    const nrp = inputNrp ? inputNrp.value.trim() : '';
-    const bulan = inputBulan ? inputBulan.value.trim() : '';
+  function handleNrpLookup(input = panelReaders.lookup()) {
+    const nrp = String(input?.nrp || '').trim();
+    const bulan = String(input?.bulan || '').trim();
     if (!nrp || !bulan) { UI.showResult('warning', 'Data Tidak Lengkap', 'Silakan masukkan NRP dan Bulan terlebih dahulu.'); return; }
     if (!/^\d+$/.test(nrp) || (nrp.length !== 4 && nrp.length !== 8)) { UI.showResult('warning', 'Format Tidak Valid', 'Hanya menerima 4 dan 8 angka NRP'); return; }
     UI.setLoading(true);
     sessionStorage.setItem(STORAGE.AUTO_NRP, nrp);
     sessionStorage.setItem(STORAGE.AUTO_BULAN, bulan);
-    const year = new Date().getFullYear();
-    window.location.href = attendanceUrl(bulan, year, nrp);
+    const year = input?.tahun || new Date().getFullYear();
+    uiAdapter.openUrl(attendanceUrl(bulan, year, nrp), '_self');
   }
 
   let manualSidebarOverride = false;
@@ -8146,7 +8469,7 @@
   }
 
   function handleExportAnomali() {
-    if (state.anomalies.length === 0) { alert('Tidak ada anomali untuk diekspor.'); return; }
+    if (state.anomalies.length === 0) { uiAdapter.alert('Tidak ada anomali untuk diekspor.'); return; }
     const wsData = [['Tanggal', 'Kolom', 'Pesan Anomali']];
     const sorted = [...state.anomalies].sort((a, b) => parseInt(a.tgl) - parseInt(b.tgl));
     sorted.forEach(a => wsData.push([a.tgl, a.col, a.msg]));
@@ -8154,11 +8477,10 @@
       const ws = XLSX.utils.aoa_to_sheet(wsData);
       const wb = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(wb, ws, 'Anomali');
-      const inputBulan = document.getElementById('qm-input-bulan');
-      const month = (inputBulan && inputBulan.value) ? inputBulan.value : (new Date().getMonth() + 1);
+      const month = uiAdapter.getValue('globalMonth', { trim: true }) || (new Date().getMonth() + 1);
       XLSX.writeFile(wb, `Anomali_Bulan_${month}.xlsx`);
     } else {
-      alert('Library XLSX gagal dimuat. Harap periksa koneksi atau header script.');
+      uiAdapter.alert('Library XLSX gagal dimuat. Harap periksa koneksi atau header script.');
     }
   }
 
@@ -8180,10 +8502,10 @@
     }
   }
 
-  function handleSpklOnlineCheck() {
-    const nrp = document.getElementById('qm-spkl-online-nrp')?.value.trim();
-    const dateInput = document.getElementById('qm-spkl-online-date')?.value;
-    if (!nrp || !dateInput) { alert('Harap isi NRP dan Tanggal.'); return; }
+  function handleSpklOnlineCheck(input = panelReaders.spklOnline()) {
+    const nrp = String(input?.nrp || '').trim();
+    const dateInput = String(input?.dateInput || '').trim();
+    if (!nrp || !dateInput) { uiAdapter.alert('Harap isi NRP dan Tanggal.'); return; }
 
     const d = new Date(dateInput);
     const day = String(d.getDate()).padStart(2, '0');
@@ -8191,12 +8513,12 @@
     const year = d.getFullYear();
 
     const url = ROUTES.SPKL_ONLINE(year, month, day, day, nrp);
-    window.open(url, '_blank');
+    uiAdapter.openUrl(url, '_blank');
   }
 
-  function handleSpklPageCheck() {
-    const nrp = document.getElementById('qm-spkl-page-nrp')?.value.trim();
-    const bulan = document.getElementById('qm-spkl-page-bulan')?.value;
+  function handleSpklPageCheck(input = panelReaders.spklPageLink()) {
+    const nrp = String(input?.nrp || '').trim();
+    const bulan = String(input?.bulan || '').trim();
 
     if (!nrp || !bulan) {
       UI.showResult('warning', 'Data Belum Lengkap', 'Silakan isi NRP dan Bulan terlebih dahulu.');
@@ -8213,25 +8535,25 @@
       return;
     }
 
-    const tahun = new Date().getFullYear();
-    window.open(spklListUrl(nrp, bulanInt, tahun), '_blank');
+    const tahun = input?.tahun || new Date().getFullYear();
+    uiAdapter.openUrl(spklListUrl(nrp, bulanInt, tahun), '_blank');
   }
 
-  async function handleAttendanceCheckNrp() {
-    const nrp = document.getElementById('qm-input-hadir-check-nrp')?.value.trim();
-    const startDate = document.getElementById('qm-input-hadir-check-start-date')?.value;
-    const endDate = document.getElementById('qm-input-hadir-check-end-date')?.value;
+  async function handleAttendanceCheckNrp(input = panelReaders.attendanceCheck()) {
+    const nrp = String(input?.nrp || '').trim();
+    const startDate = String(input?.startDate || '').trim();
+    const endDate = String(input?.endDate || '').trim();
 
     if (!nrp || !startDate || !endDate) {
-      alert('Harap isi NRP, Start date, dan End date.');
+      uiAdapter.alert('Harap isi NRP, Start date, dan End date.');
       return;
     }
     if (!/^\d+$/.test(nrp) || (nrp.length !== 4 && nrp.length !== 8)) {
-      alert('NRP harus 4 atau 8 digit angka.');
+      uiAdapter.alert('NRP harus 4 atau 8 digit angka.');
       return;
     }
     if (parseHrisDate(startDate)?.getTime() > parseHrisDate(endDate)?.getTime()) {
-      alert('Start date tidak boleh lebih besar dari End date.');
+      uiAdapter.alert('Start date tidak boleh lebih besar dari End date.');
       return;
     }
 
@@ -8269,10 +8591,10 @@
     renderAttendanceCheckResult();
   }
 
-  async function handleSpklCheckNrp() {
-    const nrp = document.getElementById('qm-spkl-page-nrp')?.value.trim();
-    const startDate = document.getElementById('qm-spkl-page-start-date')?.value;
-    const endDate = document.getElementById('qm-spkl-page-end-date')?.value;
+  async function handleSpklCheckNrp(input = panelReaders.spklCheck()) {
+    const nrp = String(input?.nrp || '').trim();
+    const startDate = String(input?.startDate || '').trim();
+    const endDate = String(input?.endDate || '').trim();
 
     if (!nrp || !startDate || !endDate) {
       UI.showResult('warning', 'Data Belum Lengkap', 'Silakan isi NRP dan Rentang Tanggal.');
@@ -8310,17 +8632,20 @@
     renderSpklCheckResult();
   }
 
-  function handleSpklInlineEdit(idx) {
+  function handleSpklInlineEdit(inputOrIdx) {
+    const idx = typeof inputOrIdx === 'number'
+      ? inputOrIdx
+      : parseInt(inputOrIdx?.index, 10);
     const entry = state.spklCheck?.summary?.entries?.[idx];
     if (!entry) return;
 
     state.spklEditCurrentIndex = idx;
     
     // Fill modal fields
-    document.getElementById('qm-edit-spkl-tgl').value = entry.dateText;
+    uiAdapter.value('spklEditDate', entry.dateText);
     
     // Try to match OT Code with select options
-    const selOt = document.getElementById('qm-edit-spkl-ot');
+    const selOt = uiAdapter.get('spklEditOt');
     const otMap = {
       'biasa': '1', 'long': '2', 'non': '3', 'awal': '4', 
       'nrest awal': '5A', 'nrest tengah': '5B', 'nrest akhir': '5C',
@@ -8334,23 +8659,23 @@
     }
     selOt.value = val;
     
-    document.getElementById('qm-edit-spkl-jam-awal').value = entry.jamAwal || '';
-    document.getElementById('qm-edit-spkl-jam-akhir').value = entry.jamAkhir || '';
-    document.getElementById('qm-edit-spkl-jam-ot').value = entry.jamOt || '';
+    uiAdapter.value('spklEditJamAwal', entry.jamAwal || '');
+    uiAdapter.value('spklEditJamAkhir', entry.jamAkhir || '');
+    uiAdapter.value('spklEditJamOt', entry.jamOt || '');
     
     // Show modal and focus
-    document.getElementById('qm-modal-spkl-edit').classList.remove('qm-hidden');
+    uiAdapter.removeClass('spklEditModal', 'qm-hidden');
     setTimeout(() => {
-      document.getElementById('qm-edit-spkl-ot').focus();
+      uiAdapter.focus('spklEditOt');
     }, 100);
   }
 
   function closeSpklEditPopup() {
-    document.getElementById('qm-modal-spkl-edit').classList.add('qm-hidden');
+    uiAdapter.addClass('spklEditModal', 'qm-hidden');
     state.spklEditCurrentIndex = -1;
   }
 
-  function handleSpklEditSave() {
+  function handleSpklEditSave(input = panelReaders.spklInlineEdit()) {
     const idx = state.spklEditCurrentIndex;
     const entry = state.spklCheck?.summary?.entries?.[idx];
     if (!entry) return;
@@ -8362,10 +8687,10 @@
     }
 
     const data = {
-      ot: document.getElementById('qm-edit-spkl-ot').value,
-      jamAwal: document.getElementById('qm-edit-spkl-jam-awal').value,
-      jamAkhir: document.getElementById('qm-edit-spkl-jam-akhir').value,
-      jamOt: document.getElementById('qm-edit-spkl-jam-ot').value
+      ot: input?.ot || '',
+      jamAwal: input?.jamAwal || '',
+      jamAkhir: input?.jamAkhir || '',
+      jamOt: input?.jamOt || ''
     };
 
     if (!data.jamAwal || !data.jamAkhir) {
@@ -8388,18 +8713,18 @@
     closeSpklEditPopup();
     UI.showResult('success', 'Processing', 'Mengarahkan ke halaman Edit SPKL...');
     setTimeout(() => {
-      window.location.href = toAbsoluteHrisUrl(editAction.href);
+      uiAdapter.openUrl(toAbsoluteHrisUrl(editAction.href), '_self');
     }, 1000);
   }
 
-  function handleInputHadir() {
-    const nrp = document.getElementById('qm-input-hadir-nrp')?.value.trim();
-    const tgl = document.getElementById('qm-input-hadir-tanggal')?.value;
-    const jam = document.getElementById('qm-input-hadir-jam')?.value;
-    const status = document.getElementById('qm-input-hadir-status')?.value;
+  function handleInputHadir(input = panelReaders.attendanceInput()) {
+    const nrp = String(input?.nrp || '').trim();
+    const tgl = String(input?.tgl || '').trim();
+    const jam = String(input?.jam || '').trim();
+    const status = String(input?.status ?? '').trim();
 
     if (!nrp || !tgl || !jam || status === "") {
-      alert('Harap isi semua field (NRP, Tanggal, Jam, dan Status).');
+      uiAdapter.alert('Harap isi semua field (NRP, Tanggal, Jam, dan Status).');
       return;
     }
 
@@ -8409,11 +8734,11 @@
     sessionStorage.setItem(STORAGE.INPUT_HADIR, JSON.stringify(data));
 
     const targetUrl = absenCreateUrl(nrp);
-    window.open(targetUrl, '_blank');
+    uiAdapter.openUrl(targetUrl, '_blank');
   }
 
-  function handleDistribusi() {
-    handleSaveJkChange();
+  function handleDistribusi(input = panelReaders.distribusiJk()) {
+    handleSaveJkChange(input);
   }
 
   function handleKeydownAnomalyGroup(e) {
@@ -8431,22 +8756,7 @@
   }
 
   function handleTabClick() {
-    const pane = this.getAttribute('data-pane');
-    document.querySelectorAll('.qm-tab').forEach(el => el.classList.remove('active'));
-    this.classList.add('active');
-    document.querySelectorAll('.qm-pane').forEach(el => el.classList.remove('active'));
-    const targetPane = document.getElementById(`qm-pane-${pane}`);
-    if (targetPane) targetPane.classList.add('active');
-    localStorage.setItem('qm_last_tab', pane);
-
-    if (pane === 'karyawan' || pane === 'check-nrp') {
-      CEK_NRP.prefillSearch(true);
-      CEK_NRP.renderResults();
-    }
-
-    if (pane === 'distribusi' || pane === 'check-nrp' || pane === 'spkl' || pane === 'kehadiran') {
-      refreshGlobalData('', '', '', pane);
-    }
+    activatePane(this.getAttribute('data-pane'));
   }
 
   function handleInputBulan() {
@@ -8463,7 +8773,7 @@
   function handleRecordShortcut() {
     isRecordingShortcut = true;
     this.textContent = 'Tunggu...';
-    document.getElementById('qm-input-shortcut').value = 'Tekan tombol...';
+    uiAdapter.value('shortcutInput', 'Tekan tombol...');
   }
 
   function handleBatchNrpClick(e) {
@@ -8489,9 +8799,9 @@
       if (e.key === 'Escape') {
         e.preventDefault();
         isRecordingShortcut = false;
-        const btn = document.getElementById('qm-btn-record-shortcut');
+        const btn = uiAdapter.get('shortcutRecordButton');
         if (btn) btn.textContent = 'Ubah';
-        const input = document.getElementById('qm-input-shortcut');
+        const input = uiAdapter.get('shortcutInput');
         if (input) input.value = shortcutKey;
         return;
       }
@@ -8503,9 +8813,9 @@
       if (['Control', 'Alt', 'Shift', 'Meta'].includes(e.key)) return;
       keys.push(e.key.length === 1 ? e.key.toUpperCase() : e.key);
       shortcutKey = keys.join('+');
-      const input = document.getElementById('qm-input-shortcut');
+      const input = uiAdapter.get('shortcutInput');
       if (input) input.value = shortcutKey;
-      const btn = document.getElementById('qm-btn-record-shortcut');
+      const btn = uiAdapter.get('shortcutRecordButton');
       if (btn) btn.textContent = 'Ubah';
       GM_setValue('qm_shortcut', shortcutKey);
       isRecordingShortcut = false;
@@ -8536,8 +8846,8 @@
   }
 
   function handleShowLogs() {
-    const container = document.getElementById('qm-log-container');
-    const btn = document.getElementById('qm-btn-show-logs');
+    const container = uiAdapter.get('logContainer');
+    const btn = uiAdapter.get('showLogsButton');
     if (container && btn) {
       const isHidden = container.classList.toggle('qm-hidden');
       if (!isHidden) {
@@ -8552,7 +8862,7 @@
   }
 
   function handleClearLogs() {
-    if (confirm('Bersihkan semua riwayat log aktivitas?')) {
+    if (uiAdapter.confirm('Bersihkan semua riwayat log aktivitas?')) {
       state.batchLogs = [];
       renderLogs();
     }
@@ -8560,7 +8870,7 @@
 
   function handleExportLogs() {
     if (state.batchLogs.length === 0) {
-      alert('Tidak ada log untuk diekspor.');
+      uiAdapter.alert('Tidak ada log untuk diekspor.');
       return;
     }
     const content = state.batchLogs.map(l => {
@@ -8630,6 +8940,8 @@
    * ============================================================ */
 
   const CEK_NRP = Object.freeze({
+    runLookup: handleNrpLookup,
+    searchByQuery: handleKaryawanSearch,
     lookup: handleNrpLookup,
     search: handleKaryawanSearch,
     prefillSearch: prefillKaryawanSearch,
@@ -8652,6 +8964,10 @@
     renderCheckResult: renderSpklCheckResult,
     fetchSummary: fetchSpklSummary,
     parseSummary: parseSpklSummary,
+    openOnlineForDate: handleSpklOnlineCheck,
+    openPageForMonth: handleSpklPageCheck,
+    checkByDateRange: handleSpklCheckNrp,
+    openInlineEditor: handleSpklInlineEdit,
     openOnlineCheck: handleSpklOnlineCheck,
     openPageCheck: handleSpklPageCheck,
     checkByNrp: handleSpklCheckNrp,
@@ -8672,6 +8988,8 @@
     autoSearchPage: autoBarcodeSearchPage,
     autoClickAddData,
     autoInput: autoInputHadir,
+    checkByRange: handleAttendanceCheckNrp,
+    submitSingle: handleInputHadir,
     renderCheckResult: renderAttendanceCheckResult,
     checkByNrp: handleAttendanceCheckNrp,
     handleInput: handleInputHadir,
@@ -8691,6 +9009,9 @@
     syncGlobalInputs,
     refreshGlobalData,
     refreshOptions: refreshDistribusiOptions,
+    submitJkChange: handleSaveJkChange,
+    submitSubsi: handleDistribusiSubsi,
+    submitKk: handleUpdateKKMaster,
     handleDistribusi,
     handleDistribusiSubsi,
     saveJkChange: handleSaveJkChange,
@@ -8783,202 +9104,67 @@
     return { valid, missing };
   }
 
-  function init() {
-    if (!state.karyawanEditor) resetKaryawanEditor();
-    if (!state.karyawanDetail) resetKaryawanDetail();
-
-    const schemaValid = validateStorageSchema();
-
-    SPKL.highlightPendingDate();
-    SPKL.autoFillTargetPage();
-    KEHADIRAN.autoSearchPage();
-    KEHADIRAN.autoClickAddData();
-    KEHADIRAN.autoInput();
-    DISTRIBUSI.autoDistribusi();
-    DISTRIBUSI.autoDistribusiSubsi();
-    DISTRIBUSI.autoDistKK();
-    SPKL.resumeBatch();
-    KEHADIRAN.resumeManyNrpBatch();
-    KEHADIRAN.resumeBulanBatch();
-    DISTRIBUSI.initChangeEvents();
-    DISTRIBUSI.checkJkRestoration();
-    SPKL.autoFillEditPage();
-
-    // Return to source page after process finish (autoDistribusi result page)
-    const activeFlow = getAutomationFlow();
-    const returnUrl = activeFlow?.returnUrl || sessionStorage.getItem(STORAGE.RETURN_URL);
-    const isFinished = activeFlow ? !!activeFlow.finished : sessionStorage.getItem(STORAGE.AUTO_FINISHED) === 'true';
-    const hasRestorationPending = sessionStorage.getItem('qm_jk_to_restore_' + getPageContext().nrp);
-
-    if (isFinished && returnUrl) {
-      const currentUrl = window.location.href.split('?')[0];
-      const targetUrlBase = returnUrl.split('?')[0];
-      const isReturnPage = currentUrl === targetUrlBase || window.location.href.includes(returnUrl);
-
-      if (isReturnPage) {
-        // We are back at the start page. Cleanup if no restoration is pending.
-        if (!hasRestorationPending) {
-          if (activeFlow) clearAutomationFlow(activeFlow.id);
-          else {
-            sessionStorage.removeItem(STORAGE.AUTO_FINISHED);
-            sessionStorage.removeItem(STORAGE.RETURN_URL);
-          }
-          UI.showResult('success', 'Selesai', 'Tugas latar belakang telah diselesaikan.');
-
-          // If on attendance table, trigger anomaly refresh to show the fix
-          if (isAttendancePagePath()) {
-            setTimeout(() => {
-              const btn = document.querySelector('[data-pane="anomali"]');
-              if (btn) btn.click();
-            }, 500);
-          }
-        }
-      } else if (!window.location.search.includes('qm_auto')) {
-        // We are on a result page, redirect back
-        UI.showGlobalLoader('Selesai', 'Kembali ke halaman awal...');
-        setTimeout(() => {
-          window.location.href = returnUrl;
-        }, 1500);
+  const PANE_REGISTRY = Object.freeze({
+    'check-nrp': {
+      onActivate() {
+        CEK_NRP.prefillSearch(true);
+        CEK_NRP.renderResults();
+        refreshGlobalData('', '', '', 'check-nrp');
       }
-    }
-
-    if (!document.getElementById('qm-fab')) {
-      document.body.insertAdjacentHTML('beforeend', HTML);
-
-      // Default NRP for FIX Panel
-      const ctx = getPageContext();
-      const elFixNrp = document.getElementById('qm-fix-spkl-nrp');
-      if (elFixNrp && ctx.nrp) elFixNrp.value = ctx.nrp;
-
-      const elBulanNrp = document.getElementById('qm-input-hadir-bulan-nrp');
-      if (elBulanNrp && ctx.nrp) elBulanNrp.value = ctx.nrp;
-
-      const elHadirCheckNrp = document.getElementById('qm-input-hadir-check-nrp');
-      if (elHadirCheckNrp && ctx.nrp) elHadirCheckNrp.value = ctx.nrp;
-
-      const elDistNrp = document.getElementById('qm-input-distribusi-nrp');
-      if (elDistNrp && ctx.nrp) elDistNrp.value = ctx.nrp;
-
-      const elDistKKNrp = document.getElementById('qm-dist-KK-nrp');
-      if (elDistKKNrp && ctx.nrp) elDistKKNrp.value = ctx.nrp;
-
-      CEK_NRP.renderResults();
-      KEHADIRAN.renderCheckResult();
-      SPKL.renderCheckResult();
-
-      const now = new Date();
-      const currentMonth = now.getMonth() + 1;
-      const currentYear = now.getFullYear();
-
-      // Populate Month Select
-      const monthNames = ['Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni', 'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'];
-      const monthOptions = monthNames.map((name, i) => `<option value="${i + 1}" ${i + 1 === currentMonth ? 'selected' : ''}>${name}</option>`).join('');
-
-      const inputBulan = document.getElementById('qm-input-bulan');
-      if (inputBulan) renderSafe(inputBulan, monthOptions);
-
-      const fixBulan = document.getElementById('qm-fix-spkl-bulan');
-      if (fixBulan) renderSafe(fixBulan, monthOptions);
-
-      const spklPageBulan = document.getElementById('qm-spkl-page-bulan');
-      if (spklPageBulan) renderSafe(spklPageBulan, monthOptions);
-
-      const bulanBulan = document.getElementById('qm-input-hadir-bulan-bln');
-      if (bulanBulan) renderSafe(bulanBulan, monthOptions);
-
-      // Populate Year Select
-      let years = '';
-      for (let y = currentYear - 2; y <= currentYear + 1; y++) {
-        years += `<option value="${y}" ${y === currentYear ? 'selected' : ''}>${y}</option>`;
+    },
+    karyawan: {
+      onActivate() {
+        CEK_NRP.prefillSearch(true);
+        CEK_NRP.renderResults();
       }
-
-      const inputTahun = document.getElementById('qm-input-tahun');
-      if (inputTahun) renderSafe(inputTahun, years);
-
-      const fixTahun = document.getElementById('qm-fix-spkl-tahun');
-      if (fixTahun) renderSafe(fixTahun, years);
-
-      // Default date for Banyak NRP
-      const elManyDate = document.getElementById('qm-fix-many-date');
-      if (elManyDate) {
-        elManyDate.value = `${currentYear}-${String(currentMonth).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    },
+    spkl: {
+      onActivate() {
+        refreshGlobalData('', '', '', 'spkl');
       }
-
-      const defaultCheckDate = `${currentYear}-${String(currentMonth).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
-      const elHadirCheckStartDate = document.getElementById('qm-input-hadir-check-start-date');
-      const elHadirCheckEndDate = document.getElementById('qm-input-hadir-check-end-date');
-      if (elHadirCheckStartDate) elHadirCheckStartDate.value = defaultCheckDate;
-      if (elHadirCheckEndDate) elHadirCheckEndDate.value = defaultCheckDate;
-
-      const elSpklStartDate = document.getElementById('qm-spkl-page-start-date');
-      const elSpklEndDate = document.getElementById('qm-spkl-page-end-date');
-      if (elSpklStartDate) elSpklStartDate.value = defaultCheckDate;
-      if (elSpklEndDate) elSpklEndDate.value = defaultCheckDate;
-
-      const elDistKKDate = document.getElementById('qm-dist-KK-date');
-      if (elDistKKDate) {
-        elDistKKDate.value = `${currentYear}-${String(currentMonth).padStart(2, '0')}`;
+    },
+    kehadiran: {
+      onActivate() {
+        refreshGlobalData('', '', '', 'kehadiran');
       }
-
-      const elDistDate = document.getElementById('qm-input-distribusi-tanggal');
-      if (elDistDate) {
-        elDistDate.value = `${currentYear}-${String(currentMonth).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    },
+    distribusi: {
+      onActivate() {
+        refreshGlobalData('', '', '', 'distribusi');
       }
+    },
+    anomali: { onActivate() {} },
+    config: { onActivate() {} }
+  });
 
-      // Apply Theme
-      UI.applyTheme(state.theme);
+  function activatePane(pane) {
+    if (!pane) return;
+    uiAdapter.activatePane(pane);
+    localStorage.setItem('qm_last_tab', pane);
+    PANE_REGISTRY[pane]?.onActivate?.();
+  }
 
-      // Restore Last Tab
-      const lastTab = localStorage.getItem('qm_last_tab');
-      if (lastTab) {
-        const tabBtn = document.querySelector(`.qm-tab[data-pane="${lastTab}"]`);
-        if (tabBtn) tabBtn.click();
-      }
-      initDraggable();
-      on('change', '#qm-config-debug-mode', handleDebugToggle);
-      on('click', '#qm-btn-show-logs', handleShowLogs);
-      on('click', '#qm-btn-clear-logs', handleClearLogs);
-      on('click', '#qm-btn-export-logs', handleExportLogs);
-    }
-    ANOMALI.detect();
-
-    if (!schemaValid) {
-      UI.showResult('warning', 'Data Direset', 'Versi data sesi tidak cocok. Data lama telah dibersihkan.');
-    }
-
-    // Validate DOM structure with polling to handle dynamic content loading
-    if (isAttendancePagePath() || isBarcodeCreatePagePath() || isDistribusiKalenderPagePath() || isSpklPagePath()) {
-      let domCheckAttempts = 0;
-      const maxDomCheckAttempts = 10; // 10 x 200ms = 2s max
-      const domCheckInterval = setInterval(function () {
-        domCheckAttempts++;
-        const isFinalAttempt = domCheckAttempts >= maxDomCheckAttempts;
-        const result = validateDomStructure({ silent: !isFinalAttempt });
-        if (result.valid || isFinalAttempt) {
-          clearInterval(domCheckInterval);
-        }
-      }, 200);
-    }
-
-    document.addEventListener('keydown', handleKeydownDocument);
-    document.addEventListener('click', handleDocumentClick);
-
-    on('click', '#qm-fab', togglePanel);
-    on('click', '#qm-backdrop', closePanel);
-    on('click', '#qm-btn-close-header', closePanel);
-    on('click', '#qm-btn-check', CEK_NRP.lookup);
-    on('click', '#qm-btn-karyawan-search', CEK_NRP.search);
-    on('click', '#qm-btn-spkl-batch', SPKL.startBatchProcess);
-    on('click', '#qm-btn-spkl-many-nrp', SPKL.startManyNrpBatch);
-    on('click', '#qm-btn-spkl-page-cek', SPKL.checkByNrp);
-    on('click', '#qm-btn-spkl-online-cek', SPKL.openOnlineCheck);
-    on('click', '#qm-btn-hadir-check', KEHADIRAN.checkByNrp);
-    on('click', '#qm-btn-hadir-proses', KEHADIRAN.handleInput);
-    on('click', '#qm-btn-hadir-bulan-proses', KEHADIRAN.startBulanBatch);
-    on('click', '#qm-btn-hadir-many-proses', KEHADIRAN.startManyNrpBatch);
-    on('click', '#qm-btn-distribusi-proses', DISTRIBUSI.handleDistribusi);
-    on('click', '#qm-btn-distribusi-subsi-proses', DISTRIBUSI.handleDistribusiSubsi);
-    on('click', '#qm-global-cancel-btn', function () {
+  const UI_EVENT_BINDINGS = Object.freeze([
+    { event: 'click', selector: '#qm-fab', handler: togglePanel },
+    { event: 'click', selector: '#qm-backdrop', handler: closePanel },
+    { event: 'click', selector: '#qm-btn-close-header', handler: closePanel },
+    { event: 'click', selector: '#qm-btn-check', handler() { CEK_NRP.runLookup(panelReaders.lookup()); } },
+    { event: 'click', selector: '#qm-btn-karyawan-search', handler() { CEK_NRP.searchByQuery(panelReaders.karyawanSearch()); } },
+    { event: 'click', selector: '#qm-btn-spkl-batch', handler: SPKL.startBatchProcess },
+    { event: 'click', selector: '#qm-btn-spkl-many-nrp', handler: SPKL.startManyNrpBatch },
+    { event: 'click', selector: '#qm-btn-spkl-page-cek', handler() { SPKL.checkByDateRange(panelReaders.spklCheck()); } },
+    { event: 'click', selector: '#qm-btn-spkl-online-cek', handler() { SPKL.openOnlineForDate(panelReaders.spklOnline()); } },
+    { event: 'click', selector: '#qm-btn-hadir-check', handler() { KEHADIRAN.checkByRange(panelReaders.attendanceCheck()); } },
+    { event: 'click', selector: '#qm-btn-hadir-proses', handler() { KEHADIRAN.submitSingle(panelReaders.attendanceInput()); } },
+    { event: 'click', selector: '#qm-btn-hadir-bulan-proses', handler: KEHADIRAN.startBulanBatch },
+    { event: 'click', selector: '#qm-btn-hadir-many-proses', handler: KEHADIRAN.startManyNrpBatch },
+    { event: 'click', selector: '#qm-btn-distribusi-proses', handler() { DISTRIBUSI.submitJkChange(panelReaders.distribusiJk()); } },
+    { event: 'click', selector: '#qm-btn-distribusi-subsi-proses', handler() { DISTRIBUSI.submitSubsi(panelReaders.distribusiSubsi()); } },
+    { event: 'click', selector: '#qm-btn-show-logs', handler: handleShowLogs },
+    { event: 'click', selector: '#qm-btn-clear-logs', handler: handleClearLogs },
+    { event: 'click', selector: '#qm-btn-export-logs', handler: handleExportLogs },
+    { event: 'change', selector: '#qm-config-debug-mode', handler: handleDebugToggle },
+    { event: 'click', selector: '#qm-global-cancel-btn', handler() {
       Logger.info('User cancelled automation');
       state.cancelRequested = true;
       sessionStorage.removeItem(STORAGE.SPKL_QUEUE);
@@ -8994,150 +9180,110 @@
       }
       UI.hideGlobalLoader(0);
       UI.showResult('info', 'Dibatalkan', 'Proses otomasi dihentikan oleh pengguna.');
-    });
-
-    on('click', '.qm-progress-container', () => {
-      const tabBtn = document.querySelector('.qm-tab[data-pane="config"]');
-      if (tabBtn) tabBtn.click();
-      const btn = document.getElementById('qm-btn-show-logs');
+    } },
+    { event: 'click', selector: '.qm-progress-container', handler() {
+      activatePane('config');
+      const container = uiAdapter.get('logContainer');
+      const btn = uiAdapter.get('showLogsButton');
       if (container && btn) {
         container.classList.remove('qm-hidden');
         btn.classList.add('qm-active');
         renderLogs();
         btn.querySelector('span').textContent = 'Sembunyikan Log';
       }
-    });
-
-    on('keydown', '#qm-spkl-online-nrp', function (e) {
-      if (e.key === 'Enter') { e.preventDefault(); document.getElementById('qm-btn-spkl-online-cek')?.click(); }
-    });
-
-    on('keydown', '#qm-spkl-page-nrp', function (e) {
-      if (e.key === 'Enter') { e.preventDefault(); document.getElementById('qm-btn-spkl-page-cek')?.click(); }
-    });
-
-    on('change', '#qm-fix-many-ot', function () {
-      const box = document.getElementById('qm-fix-many-ot7-box');
-      if (box) {
-        if (this.value === '7') box.classList.remove('qm-hidden');
-        else box.classList.add('qm-hidden');
-      }
-    });
-
-    on('input', '#qm-fix-spkl-data', function () {
-      const box = document.getElementById('qm-fix-spkl-ot7-box');
-      if (box) {
-        const has7 = this.value.split(/[,\n]+/).some(item => {
-          const parts = item.trim().split(/[-:=]/);
-          return parts.length > 1 && parts[1].trim() === '7';
-        });
-        if (has7) box.classList.remove('qm-hidden');
-        else box.classList.add('qm-hidden');
-      }
-    });
-
-    on('keydown', '#qm-input-nrp', function (e) {
+    } },
+    { event: 'keydown', selector: '#qm-spkl-online-nrp', handler(e) {
       if (e.key === 'Enter') {
         e.preventDefault();
-        const nrp = this.value.trim();
-        if (nrp.length >= 4) {
-          refreshGlobalData(nrp);
-        }
+        SPKL.openOnlineForDate(panelReaders.spklOnline());
       }
-    });
-
-    // Sync other NRP inputs too
-    on('input', '#qm-spkl-page-nrp, #qm-spkl-online-nrp, #qm-fix-spkl-nrp, #qm-input-hadir-check-nrp, #qm-input-hadir-nrp, #qm-input-hadir-bulan-nrp', function () {
+    } },
+    { event: 'keydown', selector: '#qm-spkl-page-nrp', handler(e) {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        SPKL.checkByDateRange(panelReaders.spklCheck());
+      }
+    } },
+    { event: 'change', selector: '#qm-fix-many-ot', handler() {
+      const box = uiAdapter.get('#qm-fix-many-ot7-box');
+      if (!box) return;
+      box.classList.toggle('qm-hidden', this.value !== '7');
+    } },
+    { event: 'input', selector: '#qm-fix-spkl-data', handler() {
+      const box = uiAdapter.get('#qm-fix-spkl-ot7-box');
+      if (!box) return;
+      const has7 = this.value.split(/[,\n]+/).some(item => {
+        const parts = item.trim().split(/[-:=]/);
+        return parts.length > 1 && parts[1].trim() === '7';
+      });
+      box.classList.toggle('qm-hidden', !has7);
+    } },
+    { event: 'keydown', selector: '#qm-input-nrp', handler(e) {
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
       const nrp = this.value.trim();
-      if (nrp.length >= 4) {
-        refreshGlobalData(nrp);
-      }
-    });
-
-    on('input', '#qm-input-hadir-check-nrp', function () {
+      if (nrp.length >= 4) refreshGlobalData(nrp);
+    } },
+    { event: 'input', selector: '#qm-spkl-page-nrp, #qm-spkl-online-nrp, #qm-fix-spkl-nrp, #qm-input-hadir-check-nrp, #qm-input-hadir-nrp, #qm-input-hadir-bulan-nrp', handler() {
+      const nrp = this.value.trim();
+      if (nrp.length >= 4) refreshGlobalData(nrp);
+    } },
+    { event: 'input', selector: '#qm-input-hadir-check-nrp', handler() {
       state.attendanceCheck = createEmptyAttendanceCheck();
       KEHADIRAN.renderCheckResult();
-    });
-
-    on('input', '#qm-spkl-page-nrp', function () {
+    } },
+    { event: 'input', selector: '#qm-spkl-page-nrp', handler() {
       state.spklCheck = createEmptySpklCheck();
       SPKL.renderCheckResult();
-    });
-
-    on('change', '#qm-spkl-page-start-date, #qm-spkl-page-end-date', function () {
+    } },
+    { event: 'change', selector: '#qm-spkl-page-start-date, #qm-spkl-page-end-date', handler() {
       state.spklCheck = createEmptySpklCheck();
       SPKL.renderCheckResult();
-    });
-
-    on('click', '.qm-spkl-inline-edit-btn', function () {
-      const idx = parseInt(this.dataset.index, 10);
-      SPKL.openInlineEdit(idx);
-    });
-
-    on('click', '.qm-modal-close-btn, .qm-modal-cancel-btn', function () {
-      SPKL.closeInlineEdit();
-    });
-
-    on('click', '#qm-btn-spkl-edit-save', function () {
-      SPKL.saveInlineEdit();
-    });
-
-    on('change', '#qm-input-hadir-check-start-date, #qm-input-hadir-check-end-date', function () {
+    } },
+    { event: 'click', selector: '.qm-spkl-inline-edit-btn', handler() {
+      SPKL.openInlineEditor({ index: parseInt(this.dataset.index, 10) });
+    } },
+    { event: 'click', selector: '.qm-modal-close-btn, .qm-modal-cancel-btn', handler() { SPKL.closeInlineEdit(); } },
+    { event: 'click', selector: '#qm-btn-spkl-edit-save', handler() { SPKL.saveInlineEdit(panelReaders.spklInlineEdit()); } },
+    { event: 'change', selector: '#qm-input-hadir-check-start-date, #qm-input-hadir-check-end-date', handler() {
       state.attendanceCheck = createEmptyAttendanceCheck();
       KEHADIRAN.renderCheckResult();
-    });
-
-    on('input', '#qm-input-karyawan-search', function () {
-      const value = this.value.trim();
-      if (!isValidNrp(value)) return;
-      const bulan = document.getElementById('qm-input-bulan')?.value || (new Date().getMonth() + 1);
-      const tahun = document.getElementById('qm-input-tahun')?.value || new Date().getFullYear();
-      syncGlobalInputs(value, bulan, tahun);
-    });
-
-    // Sync Month/Year changes
-    on('change', '#qm-input-bulan, #qm-input-tahun, #qm-fix-spkl-bulan, #qm-fix-spkl-tahun, #qm-input-hadir-bulan-bln', function () {
+    } },
+    { event: 'input', selector: '#qm-input-karyawan-search', handler() {
+      const { query, bulan, tahun } = panelReaders.karyawanSearch();
+      if (isValidNrp(query)) syncGlobalInputs(query, bulan, tahun);
+    } },
+    { event: 'change', selector: '#qm-input-bulan, #qm-input-tahun, #qm-fix-spkl-bulan, #qm-fix-spkl-tahun, #qm-input-hadir-bulan-bln', handler() {
       const isMonthField = this.id === 'qm-input-bulan' || this.id === 'qm-fix-spkl-bulan' || this.id === 'qm-input-hadir-bulan-bln';
       const isYearField = this.id === 'qm-input-tahun' || this.id === 'qm-fix-spkl-tahun';
       refreshGlobalData('', isMonthField ? this.value : '', isYearField ? this.value : '', this.id);
-    });
-
-    // General Keyboard Navigation for forms
-    initKeyboardNavigation();
-
-    on('click', '.qm-tab', handleTabClick);
-    on('click', '.qm-karyawan-detail-btn', function () { CEK_NRP.toggleDetail(this.dataset.key || ''); });
-    on('click', '.qm-karyawan-edit-btn', function () { CEK_NRP.toggleEditor(this.dataset.key || ''); });
-    on('click', '.qm-karyawan-save-btn', CEK_NRP.saveEditor);
-    on('click', '.qm-fix-dot', handleFixDotClick);
-    on('click', '.qm-btn-fix-pill', handleFixDotClick);
-
-    on('click', '#qm-btn-batch-check', function (e) {
-      if (this.dataset.running) {
-        ANOMALI.cancelBatchCheck();
-      } else {
-        ANOMALI.startBatchCheck();
-      }
-    });
-    on('mouseover', '#qm-btn-batch-check', function (e) {
-      if (this.dataset.running) {
-        this.classList.add('qm-btn-danger');
-        this.textContent = 'Batal';
-      }
-    });
-    on('mouseout', '#qm-btn-batch-check', function (e) {
-      if (this.dataset.running) {
-        this.classList.remove('qm-btn-danger');
-        this.textContent = 'Memproses...';
-      }
-    });
-    on('click', '#qm-btn-export-batch', ANOMALI.exportBatchResults);
-    on('click', '.qm-batch-nrp-link', ANOMALI.handleBatchNrpClick);
-    on('click', '.qm-batch-fix-btn', ANOMALI.handleBatchFixClick);
-
-    on('click', '.qm-btn-barcode-delete', async function (e) {
+    } },
+    { event: 'click', selector: '.qm-tab', handler: handleTabClick },
+    { event: 'click', selector: '.qm-karyawan-detail-btn', handler() { CEK_NRP.toggleDetail(this.dataset.key || ''); } },
+    { event: 'click', selector: '.qm-karyawan-edit-btn', handler() { CEK_NRP.toggleEditor(this.dataset.key || ''); } },
+    { event: 'click', selector: '.qm-karyawan-save-btn', handler() { CEK_NRP.saveEditor(panelReaders.karyawanSave(this.dataset.key || '')); } },
+    { event: 'click', selector: '.qm-fix-dot', handler: handleFixDotClick },
+    { event: 'click', selector: '.qm-btn-fix-pill', handler: handleFixDotClick },
+    { event: 'click', selector: '#qm-btn-batch-check', handler() {
+      if (this.dataset.running) ANOMALI.cancelBatchCheck();
+      else ANOMALI.startBatchCheck();
+    } },
+    { event: 'mouseover', selector: '#qm-btn-batch-check', handler() {
+      if (!this.dataset.running) return;
+      this.classList.add('qm-btn-danger');
+      this.textContent = 'Batal';
+    } },
+    { event: 'mouseout', selector: '#qm-btn-batch-check', handler() {
+      if (!this.dataset.running) return;
+      this.classList.remove('qm-btn-danger');
+      this.textContent = 'Memproses...';
+    } },
+    { event: 'click', selector: '#qm-btn-export-batch', handler: ANOMALI.exportBatchResults },
+    { event: 'click', selector: '.qm-batch-nrp-link', handler: ANOMALI.handleBatchNrpClick },
+    { event: 'click', selector: '.qm-batch-fix-btn', handler: ANOMALI.handleBatchFixClick },
+    { event: 'click', selector: '.qm-btn-barcode-delete', handler: async function () {
       const url = this.dataset.url;
-      if (!url || !confirm('Hapus data barcode ini?')) return;
+      if (!url || !uiAdapter.confirm('Hapus data barcode ini?')) return;
 
       const btn = this;
       const originalText = btn.textContent;
@@ -9146,54 +9292,40 @@
 
       try {
         await hrisFetch(url);
-        KEHADIRAN.checkByNrp(); // Refresh results
+        KEHADIRAN.checkByRange(panelReaders.attendanceCheck());
       } catch (e) {
-        alert('Gagal menghapus data: ' + e.message);
+        uiAdapter.alert('Gagal menghapus data: ' + e.message);
         btn.disabled = false;
         btn.textContent = originalText;
       }
-    });
-
-    // Batch Grouping (Bagian)
-    on('click', '.qm-batch-group-header', function () {
-      const targetSelector = this.dataset.target;
-      const rows = document.querySelectorAll(targetSelector);
+    } },
+    { event: 'click', selector: '.qm-batch-group-header', handler() {
+      const rows = document.querySelectorAll(this.dataset.target);
       const isExpanded = this.classList.contains('expanded');
       this.classList.toggle('expanded');
       rows.forEach(r => {
         if (isExpanded) {
           r.classList.add('qm-hidden');
-          r.classList.remove('qm-table-row', 'expanded'); // Collapse sub-groups too
-        } else {
-          if (r.classList.contains('qm-batch-seksi-header')) {
-            r.classList.remove('qm-hidden');
-            r.classList.add('qm-table-row');
-          } else {
-            r.classList.add('qm-hidden');
-            r.classList.remove('qm-table-row');
-          }
-        }
-      });
-    });
-
-    // Batch Grouping (Seksi)
-    on('click', '.qm-batch-seksi-header', function () {
-      const targetSelector = this.dataset.target;
-      const rows = document.querySelectorAll(targetSelector);
-      const isExpanded = this.classList.contains('expanded');
-      this.classList.toggle('expanded');
-      rows.forEach(r => {
-        if (isExpanded) {
-          r.classList.add('qm-hidden');
-          r.classList.remove('qm-table-row');
-        } else {
+          r.classList.remove('qm-table-row', 'expanded');
+        } else if (r.classList.contains('qm-batch-seksi-header')) {
           r.classList.remove('qm-hidden');
           r.classList.add('qm-table-row');
+        } else {
+          r.classList.add('qm-hidden');
+          r.classList.remove('qm-table-row');
         }
       });
-    });
-
-    on('click', '.qm-batch-date-header', function (e) {
+    } },
+    { event: 'click', selector: '.qm-batch-seksi-header', handler() {
+      const rows = document.querySelectorAll(this.dataset.target);
+      const isExpanded = this.classList.contains('expanded');
+      this.classList.toggle('expanded');
+      rows.forEach(r => {
+        r.classList.toggle('qm-hidden', isExpanded);
+        r.classList.toggle('qm-table-row', !isExpanded);
+      });
+    } },
+    { event: 'click', selector: '.qm-batch-date-header', handler(e) {
       if (e.target.closest('.qm-batch-fix-btn')) return;
       const content = this.nextElementSibling;
       this.classList.toggle('expanded');
@@ -9201,52 +9333,186 @@
         content.classList.toggle('qm-hidden');
         content.classList.toggle('qm-visible-block');
       }
-    });
-
-    // 14. Accordion Toggle for FIX Panel
-    on('click', '.qm-accordion-header', function () {
+    } },
+    { event: 'click', selector: '.qm-accordion-header', handler() {
       this.classList.toggle('expanded');
       const content = this.nextElementSibling;
-      if (content) {
-        content.classList.toggle('qm-content-open');
-      }
-    });
+      if (content) content.classList.toggle('qm-content-open');
+    } },
+    { event: 'change', selector: '#qm-config-collapse-menu', handler() {
+      alwaysCollapseMenu = this.checked;
+      GM_setValue('qm_always_collapse', alwaysCollapseMenu);
+      if (alwaysCollapseMenu) enforceSidebar();
+      else document.body.classList.remove('enlarged');
+    } },
+    { event: 'click', selector: '#qm-btn-theme-light', handler() { UI.applyTheme('light'); } },
+    { event: 'click', selector: '#qm-btn-theme-dark', handler() { UI.applyTheme('dark'); } },
+    { event: 'click', selector: '#qm-btn-record-shortcut', handler: handleRecordShortcut },
+    { event: 'click', selector: '.button-menu-mobile, .open-left, #sidebar-menu', handler() { manualSidebarOverride = true; } }
+  ]);
 
-    const collapseCheckbox = document.getElementById('qm-config-collapse-menu');
-    if (collapseCheckbox) {
-      collapseCheckbox.checked = alwaysCollapseMenu;
-      on('change', '#qm-config-collapse-menu', function () {
-        alwaysCollapseMenu = this.checked;
-        GM_setValue('qm_always_collapse', alwaysCollapseMenu);
-        if (alwaysCollapseMenu) {
-          enforceSidebar();
-        } else {
-          document.body.classList.remove('enlarged');
+  function bindDeclarativeEvents(bindings) {
+    bindings.forEach(binding => on(binding.event, binding.selector, binding.handler));
+  }
+
+  function bootstrapDomainState() {
+    if (!state.karyawanEditor) resetKaryawanEditor();
+    if (!state.karyawanDetail) resetKaryawanDetail();
+  }
+
+  function runStartupAutomations() {
+    SPKL.highlightPendingDate();
+    SPKL.autoFillTargetPage();
+    KEHADIRAN.autoSearchPage();
+    KEHADIRAN.autoClickAddData();
+    KEHADIRAN.autoInput();
+    DISTRIBUSI.autoDistribusi();
+    DISTRIBUSI.autoDistribusiSubsi();
+    DISTRIBUSI.autoDistKK();
+    SPKL.resumeBatch();
+    KEHADIRAN.resumeManyNrpBatch();
+    KEHADIRAN.resumeBulanBatch();
+    DISTRIBUSI.initChangeEvents();
+    DISTRIBUSI.checkJkRestoration();
+    SPKL.autoFillEditPage();
+  }
+
+  function handleAutomationReturnState() {
+    const activeFlow = getAutomationFlow();
+    const returnUrl = activeFlow?.returnUrl || sessionStorage.getItem(STORAGE.RETURN_URL);
+    const isFinished = activeFlow ? !!activeFlow.finished : sessionStorage.getItem(STORAGE.AUTO_FINISHED) === 'true';
+    const hasRestorationPending = sessionStorage.getItem('qm_jk_to_restore_' + getPageContext().nrp);
+
+    if (!isFinished || !returnUrl) return;
+
+    const currentUrl = window.location.href.split('?')[0];
+    const targetUrlBase = returnUrl.split('?')[0];
+    const isReturnPage = currentUrl === targetUrlBase || window.location.href.includes(returnUrl);
+
+    if (isReturnPage) {
+      if (!hasRestorationPending) {
+        if (activeFlow) clearAutomationFlow(activeFlow.id);
+        else {
+          sessionStorage.removeItem(STORAGE.AUTO_FINISHED);
+          sessionStorage.removeItem(STORAGE.RETURN_URL);
         }
-      });
+        UI.showResult('success', 'Selesai', 'Tugas latar belakang telah diselesaikan.');
+
+        if (isAttendancePagePath()) {
+          setTimeout(() => {
+            document.querySelector('[data-pane="anomali"]')?.click();
+          }, 500);
+        }
+      }
+      return;
     }
 
-    // Theme Switcher
-    on('click', '#qm-btn-theme-light', () => UI.applyTheme('light'));
-    on('click', '#qm-btn-theme-dark', () => UI.applyTheme('dark'));
+    if (!window.location.search.includes('qm_auto')) {
+      UI.showGlobalLoader('Selesai', 'Kembali ke halaman awal...');
+      setTimeout(() => uiAdapter.openUrl(returnUrl, '_self'), 1500);
+    }
+  }
 
+  function mountPanel() {
+    if (uiAdapter.get('fab')) return false;
+    document.body.insertAdjacentHTML('beforeend', HTML);
+    return true;
+  }
+
+  function initializePanelDefaults() {
+    const ctx = getPageContext();
+    const now = new Date();
+    const currentMonth = now.getMonth() + 1;
+    const currentYear = now.getFullYear();
+    const defaultCheckDate = `${currentYear}-${String(currentMonth).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    const monthNames = ['Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni', 'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'];
+    const monthOptions = monthNames.map((name, i) => `<option value="${i + 1}" ${i + 1 === currentMonth ? 'selected' : ''}>${name}</option>`).join('');
+
+    ['fixSpklNrp', 'hadirBulanNrp', 'attendanceCheckNrp', 'distribusiNrp', 'distribusiKkNrp'].forEach(key => {
+      if (ctx.nrp) uiAdapter.value(key, ctx.nrp);
+    });
+
+    ['globalMonth', 'fixSpklMonth', 'spklPageMonth', 'hadirBulanMonth'].forEach(key => {
+      const el = uiAdapter.get(key);
+      if (el) renderSafe(el, monthOptions);
+    });
+
+    let years = '';
+    for (let y = currentYear - 2; y <= currentYear + 1; y++) {
+      years += `<option value="${y}" ${y === currentYear ? 'selected' : ''}>${y}</option>`;
+    }
+    ['globalYear', 'fixSpklYear'].forEach(key => {
+      const el = uiAdapter.get(key);
+      if (el) renderSafe(el, years);
+    });
+
+    uiAdapter.value('fixManyDate', defaultCheckDate);
+    uiAdapter.value('attendanceCheckStartDate', defaultCheckDate);
+    uiAdapter.value('attendanceCheckEndDate', defaultCheckDate);
+    uiAdapter.value('spklPageStartDate', defaultCheckDate);
+    uiAdapter.value('spklPageEndDate', defaultCheckDate);
+    uiAdapter.value('distribusiKkDate', `${currentYear}-${String(currentMonth).padStart(2, '0')}`);
+    uiAdapter.value('distribusiDate', defaultCheckDate);
+    uiAdapter.value('shortcutInput', shortcutKey);
+
+    CEK_NRP.renderResults();
+    KEHADIRAN.renderCheckResult();
+    SPKL.renderCheckResult();
+    UI.applyTheme(state.theme);
+
+    const collapseCheckbox = uiAdapter.get('configCollapseMenu');
+    if (collapseCheckbox) collapseCheckbox.checked = alwaysCollapseMenu;
+
+    initDraggable();
+
+    const lastTab = localStorage.getItem('qm_last_tab') || 'check-nrp';
+    activatePane(lastTab);
+  }
+
+  function applyAccessibilityBindings() {
+    uiAdapter.all('accordionHeaders').forEach(el => {
+      if (!el.hasAttribute('tabindex')) el.setAttribute('tabindex', '0');
+    });
+  }
+
+  function startDomValidationPolling() {
+    if (!(isAttendancePagePath() || isBarcodeCreatePagePath() || isDistribusiKalenderPagePath() || isSpklPagePath())) return;
+    let domCheckAttempts = 0;
+    const maxDomCheckAttempts = 10;
+    const domCheckInterval = setInterval(function () {
+      domCheckAttempts++;
+      const isFinalAttempt = domCheckAttempts >= maxDomCheckAttempts;
+      const result = validateDomStructure({ silent: !isFinalAttempt });
+      if (result.valid || isFinalAttempt) clearInterval(domCheckInterval);
+    }, 200);
+  }
+
+  function bindUiEvents() {
+    document.addEventListener('keydown', handleKeydownDocument);
+    document.addEventListener('click', handleDocumentClick);
+    bindDeclarativeEvents(UI_EVENT_BINDINGS);
+    initKeyboardNavigation();
+  }
+
+  function init() {
+    bootstrapDomainState();
+    const schemaValid = validateStorageSchema();
+    runStartupAutomations();
+    handleAutomationReturnState();
+
+    if (mountPanel()) initializePanelDefaults();
+
+    ANOMALI.detect();
+
+    if (!schemaValid) {
+      UI.showResult('warning', 'Data Direset', 'Versi data sesi tidak cocok. Data lama telah dibersihkan.');
+    }
+    startDomValidationPolling();
+    bindUiEvents();
     enforceSidebar();
     const _sidebarObserver = new MutationObserver(enforceSidebar);
     _sidebarObserver.observe(document.body, { attributes: true, attributeFilter: ['class'] });
-
-    const shortcutInput = document.getElementById('qm-input-shortcut');
-    if (shortcutInput) shortcutInput.value = shortcutKey;
-    on('click', '#qm-btn-record-shortcut', handleRecordShortcut);
-
-    // Sidebar Manual Override
-    on('click', '.button-menu-mobile, .open-left, #sidebar-menu', function () {
-      manualSidebarOverride = true;
-    });
-
-    // Make accordions keyboard accessible
-    document.querySelectorAll('.qm-accordion-header').forEach(el => {
-      if (!el.hasAttribute('tabindex')) el.setAttribute('tabindex', '0');
-    });
+    applyAccessibilityBindings();
   }
 
 
