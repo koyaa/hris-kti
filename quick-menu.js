@@ -5731,14 +5731,6 @@
       .qm-icon-close { opacity: 0; transform: rotate(-45deg) scale(0.5); }
     }
 
-    #qm-backdrop {
-      position: fixed; top: 0; left: 0; right: 0; bottom: 0;
-      z-index: 99997; opacity: 0; pointer-events: none; transition: opacity var(--qm-t-med);
-      /* Use hardware acceleration for filter if kept, but blur is heavy */
-      -webkit-backdrop-filter: blur(4px);
-      &.qm-open { opacity: 1; pointer-events: auto; }
-    }
-
     /* --- Main Panel --- */
     #qm-panel {
       position: fixed; top: 60px; left: 50%; z-index: 99998;
@@ -5747,11 +5739,11 @@
       display: flex; flex-direction: column;
       background: var(--qm-bg); border-radius: var(--qm-r-xl); box-shadow: 0 20px 80px var(--qm-shadow-panel);
       overflow: hidden; color: var(--qm-text);
-      transform: translateX(-50%) translateY(10px); opacity: 0; pointer-events: none;
-      transition: transform var(--qm-t-panel), opacity var(--qm-t-panel);
+      transform: translateX(-50%) translateY(10px); opacity: 0; visibility: hidden; pointer-events: none;
+      transition: transform var(--qm-t-panel), opacity var(--qm-t-panel), visibility var(--qm-t-panel);
       will-change: transform, opacity;
 
-      &.qm-open { transform: translateX(-50%) translateY(0); opacity: 1; pointer-events: auto; }
+      &.qm-open { transform: translateX(-50%) translateY(0); opacity: 1; visibility: visible; pointer-events: auto; }
 
       @media (min-width: 1200px) {
         max-width: 1200px;
@@ -6567,17 +6559,17 @@
   const SPIKE_SVG = `<svg class="qm-spike-mark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round"><line x1="12" y1="4" x2="12" y2="20"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="6.34" y1="6.34" x2="17.66" y2="17.66"/><line x1="6.34" y1="17.66" x2="17.66" y2="6.34"/></svg>`;
 
   const HTML = `
-    <button id="qm-fab" title="Quick Menu" aria-label="Quick Menu">
-      <div class="qm-icon-menu">
-        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><circle cx="17.5" cy="17.5" r="3.5"/><line x1="17.5" y1="15.5" x2="17.5" y2="19.5"/><line x1="15.5" y1="17.5" x2="19.5" y2="17.5"/></svg>
-      </div>
-      <div class="qm-icon-close">
-        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-      </div>
-    </button>
+    <div id="qm-widget">
+      <button id="qm-fab" title="Quick Menu" aria-label="Quick Menu">
+        <div class="qm-icon-menu">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><circle cx="17.5" cy="17.5" r="3.5"/><line x1="17.5" y1="15.5" x2="17.5" y2="19.5"/><line x1="15.5" y1="17.5" x2="19.5" y2="17.5"/></svg>
+        </div>
+        <div class="qm-icon-close">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </div>
+      </button>
 
-    <div id="qm-backdrop" role="presentation"></div>
-    <div id="qm-panel" role="dialog" aria-label="Quick Menu Panel">
+      <div id="qm-panel" role="dialog" aria-label="Quick Menu Panel">
       <div id="qm-header">
         <div class="qm-header-brand">
           <div class="qm-header-mark">
@@ -7206,7 +7198,6 @@
       </div>
       </div> <!-- End qm-content-area -->
       </div> <!-- End qm-panel-body -->
-    </div>
 
       <div id="qm-footer">
         <div class="qm-footer-left">
@@ -7260,20 +7251,18 @@
         </div>
       </div>
     </div>
-
     </div>
 
   `;
 
   const PANEL_ELEMENTS = Object.freeze({
-    panelShell: '#qm-panel, #qm-fab, #qm-backdrop',
+    panelShell: '#qm-panel, #qm-fab',
     allTabs: '.qm-tab',
     allPanes: '.qm-pane',
     activePane: '.qm-pane.active',
     accordionHeaders: '.qm-accordion-header',
     fab: '#qm-fab',
     panel: '#qm-panel',
-    backdrop: '#qm-backdrop',
     header: '#qm-header',
     result: '#qm-result',
     resultTitle: '#qm-result-title',
@@ -9434,7 +9423,7 @@
   }
 
   function handleDocumentClick(e) {
-    if (state.isOpen && !e.target.closest('#qm-panel, #qm-fab, #qm-backdrop')) closePanel();
+    if (state.isOpen && !e.target.closest('#qm-panel, #qm-fab')) closePanel();
   }
 
   function handleRecordShortcut() {
@@ -9817,7 +9806,6 @@
 
   const UI_EVENT_BINDINGS = Object.freeze([
     { event: 'click', selector: '#qm-fab', handler: togglePanel },
-    { event: 'click', selector: '#qm-backdrop', handler: closePanel },
     { event: 'click', selector: '#qm-btn-close-header', handler: closePanel },
     { event: 'click', selector: '#qm-btn-check', handler() { CEK_NRP.runLookup(panelReaders.lookup()); } },
     { event: 'click', selector: '#qm-btn-karyawan-search', handler() { CEK_NRP.searchByQuery(panelReaders.karyawanSearch()); } },
