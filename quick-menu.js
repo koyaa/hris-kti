@@ -416,6 +416,21 @@
     return !!flow;
   }
 
+  function finishAutomationFlow(flowId) {
+    const flow = getAutomationFlow();
+    if (!flow || flow.id !== flowId) return;
+
+    markAutomationFlowFinished(flowId);
+    const returnUrl = flow.returnUrl;
+    clearAutomationFlow(flowId);
+
+    if (returnUrl && returnUrl !== window.location.href) {
+      window.location.href = returnUrl;
+    } else {
+      window.location.reload();
+    }
+  }
+
   function isActiveAutomationFlow(flowId, type) {
     const flow = getAutomationFlow();
     if (!flow) return false;
@@ -2879,7 +2894,8 @@
             text: text,
             href: el.getAttribute('href'),
             onclick: el.getAttribute('onclick'),
-            className: el.className
+            className: el.className,
+            dataTarget: el.getAttribute('data-target')
           });
         }
       });
@@ -2935,7 +2951,10 @@
     const tahun = start.getFullYear();
     const url = spklListUrl(nrp, bulan, tahun);
     const html = await hrisFetch(url);
-    return parseSpklSummary(parseHTML(html), nrp, startDate, endDate);
+    const summary = parseSpklSummary(parseHTML(html), nrp, startDate, endDate);
+    summary.bulan = bulan;
+    summary.tahun = tahun;
+    return summary;
   }
 
   function parseSpklSummary(doc, nrp, startDate, endDate) {
@@ -2974,13 +2993,46 @@
         }
       }
 
+      const rawOt = otIdx !== -1 ? tds[otIdx].textContent.trim().replace(/\s+/g, ' ').toUpperCase() : '-';
+      const otMap = {
+        'OT BIASA': '1',
+        'LONG SHIFT': '2',
+        'NON STOP': '3',
+        'OT AWAL': '4',
+        'NO REST (AWAL)': '5A',
+        'NO REST (TENGAH)': '5B',
+        'NO REST (AKHIR)': '5C',
+        'STANDBY': '6',
+        'LAIN-LAIN': '7',
+        'OVERTIME': 'OT'
+      };
+
+      const rawShift = shiftIdx !== -1 ? tds[shiftIdx].textContent.trim().replace(/\s+/g, ' ').toUpperCase() : '';
+      const shiftMap = {
+        'SHIFT I': '1',
+        'SHIFT II': '2',
+        'SHIFT III': '3',
+        'LONG SHIFT I': '4',
+        'LONG SHIFT II': '5'
+      };
+
       const actions = [];
       tr.querySelectorAll('a, button').forEach(el => {
         const text = el.textContent.trim();
-        if (text) {
+        let href = el.getAttribute('href');
+        const dataTarget = el.getAttribute('data-target');
+        
+        // If it's a modal button without href, try to construct edit URL
+        if (!href && dataTarget && dataTarget.startsWith('#editData')) {
+          const id = dataTarget.replace('#editData', '');
+          href = `/spkl/edit/${id}`;
+        }
+
+        if (text || href || dataTarget) {
           actions.push({
-            text,
-            href: el.getAttribute('href'),
+            text: text || 'Edit',
+            href: href,
+            modalTarget: dataTarget,
             onclick: el.getAttribute('onclick')
           });
         }
@@ -2988,9 +3040,9 @@
 
       entries.push({
         dateText,
-        otCode: otIdx !== -1 ? tds[otIdx].textContent.trim() : '-',
+        otCode: otMap[rawOt] || rawOt,
         status: statusIdx !== -1 ? tds[statusIdx].textContent.trim() : '-',
-        shift: shiftIdx !== -1 ? tds[shiftIdx].textContent.trim() : '-',
+        shift: shiftMap[rawShift] || rawShift,
         jamAwal: mskIdx !== -1 ? tds[mskIdx].textContent.trim() : '-',
         jamAkhir: klrIdx !== -1 ? tds[klrIdx].textContent.trim() : '-',
         jamOt: jamOtIdx !== -1 ? tds[jamOtIdx].textContent.trim() : '-',
@@ -2998,7 +3050,7 @@
       });
     });
 
-    return { nrp, entries };
+    return { nrp, entries, startDate, endDate };
   }
 
   function renderAttendanceCheckResult() {
@@ -3035,34 +3087,69 @@
       : (summary.hasMasuk && summary.hasKeluar ? 'LENGKAP' : 'PERLU CEK');
     const statusClass = totalEntries === 0 || !summary.hasMasuk || !summary.hasKeluar ? 'err' : 'ok';
 
-    const detailHtml = totalEntries === 0
+    // Group entries by date
+    const grouped = {};
+    summary.entries.forEach((entry, idx) => {
+      if (!grouped[entry.dateText]) {
+        grouped[entry.dateText] = {
+          dateText: entry.dateText,
+          masuk: null,
+          keluar: null,
+          indices: []
+        };
+      }
+      if (entry.status === 'Masuk') grouped[entry.dateText].masuk = entry;
+      else if (entry.status === 'Keluar') grouped[entry.dateText].keluar = entry;
+      grouped[entry.dateText].indices.push(idx);
+    });
+
+    const sortedDates = Object.keys(grouped).sort((a, b) => {
+      const [da, ma, ya] = a.split('-');
+      const [db, mb, yb] = b.split('-');
+      return new Date(ya, ma - 1, da) - new Date(yb, mb - 1, db);
+    });
+
+    const detailHtml = sortedDates.length === 0
       ? '<div class="qm-hadir-check-detail-empty">Tidak ada baris barcode pada rentang tanggal ini.</div>'
-      : summary.entries.map(entry => {
-        const actionsHtml = (entry.actions || []).map(act => {
-          const isDelete = /hapus|delete/i.test(act.text);
-          const cls = isDelete ? 'qm-text-danger' : 'qm-text-primary';
-          const href = act.href ? toAbsoluteHrisUrl(act.href) : '#';
-          const onclick = act.onclick ? `onclick="${act.onclick.replace(/"/g, '&quot;')}"` : '';
+      : `
+        <div class="qm-hadir-table-container">
+          <table class="qm-hadir-table">
+            <thead>
+              <tr>
+                <th style="width: 30px;"></th>
+                <th style="width: 80px;">Tanggal</th>
+                <th>Masuk</th>
+                <th>Keluar</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${sortedDates.map(dateStr => {
+                const group = grouped[dateStr];
+                const m = group.masuk;
+                const k = group.keluar;
+                
+                const renderTime = (entry) => {
+                  if (!entry) return '<span class="qm-text-muted qm-font-xs">-</span>';
+                  const isDelete = (entry.actions || []).some(a => /hapus|delete/i.test(a.text));
+                  const deleteBtn = isDelete 
+                    ? `<button type="button" class="qm-btn-text qm-text-danger qm-btn-barcode-delete" data-url="${toAbsoluteHrisUrl((entry.actions.find(a => /hapus|delete/i.test(a.text))).href)}" style="margin-left: 4px; font-size: 10px;">&times;</button>`
+                    : '';
+                  return `<span class="qm-font-mono">${escapeHtml(entry.time || '-')}</span>${deleteBtn}`;
+                };
 
-          if (isDelete) {
-            return `<button type="button" class="qm-btn-text qm-font-xs qm-text-danger qm-btn-barcode-delete" data-url="${href}" style="margin-left: 8px;">${escapeHtml(act.text)}</button>`;
-          }
-          return `<a href="${href}" ${onclick} target="_blank" class="qm-btn-text qm-font-xs ${cls}" style="margin-left: 8px;">${escapeHtml(act.text)}</a>`;
-        }).join('');
-
-        return `
-          <div class="qm-hadir-check-detail-item">
-            <div class="qm-hadir-check-detail-top">
-              <span class="qm-hadir-check-detail-status qm-font-semibold" style="font-size: var(--qm-font-s);">${escapeHtml(entry.status)}</span>
-              <span class="qm-hadir-check-detail-time qm-font-mono" style="font-size: var(--qm-font-s);">${escapeHtml(entry.time || '-')}</span>
-              <div class="qm-flex-1 qm-ml-m qm-text-muted" style="font-size: var(--qm-font-xs); opacity: 0.8;">
-                ${escapeHtml(entry.dateText)} ${escapeHtml(entry.time || '')}
-              </div>
-              <div class="qm-hadir-check-actions">${actionsHtml}</div>
-            </div>
-          </div>
-        `;
-      }).join('');
+                return `
+                  <tr>
+                    <td><input type="checkbox" class="qm-hadir-batch-cb" data-indices="${group.indices.join(',')}"></td>
+                    <td><span style="font-size: var(--qm-font-xs);">${escapeHtml(dateStr)}</span></td>
+                    <td>${renderTime(m)}</td>
+                    <td>${renderTime(k)}</td>
+                  </tr>
+                `;
+              }).join('')}
+            </tbody>
+          </table>
+        </div>
+      `;
 
     uiAdapter.html('attendanceCheckResult', `
       <div class="qm-hadir-check-card">
@@ -3081,11 +3168,422 @@
           </div>
         </div>
         <div class="qm-hadir-check-detail">
-          <div class="qm-hadir-check-detail-title">DETAIL BARCODE</div>
+          <div class="qm-flex qm-justify-between qm-items-center qm-mb-s" style="padding-bottom: 4px; border-bottom: 1px solid var(--qm-border-warm);">
+            <div class="qm-flex qm-items-center">
+              <input type="checkbox" id="qm-hadir-batch-cb-all" class="qm-mr-s">
+              <label for="qm-hadir-batch-cb-all" class="qm-hadir-check-detail-title qm-m-0 qm-cursor-pointer">PILIH SEMUA</label>
+            </div>
+            <button type="button" class="qm-btn qm-btn-primary qm-btn-sm" id="qm-btn-hadir-batch-edit" style="padding: 2px 8px; font-size: 10px;">Edit Terpilih</button>
+          </div>
           ${detailHtml}
         </div>
       </div>
     `);
+  }
+
+  function openHadirBatchEdit() {
+    const checkboxes = document.querySelectorAll('.qm-hadir-batch-cb:checked');
+    if (checkboxes.length === 0) {
+      uiAdapter.alert('Pilih setidaknya satu baris untuk diedit.');
+      return;
+    }
+
+    const indices = [];
+    checkboxes.forEach(cb => {
+      const idxs = cb.dataset.indices.split(',').map(n => parseInt(n, 10));
+      indices.push(...idxs);
+    });
+    state.activeHadirBatchIndices = indices;
+
+    // Clear previous inputs
+    uiAdapter.value('hadirEditJamMasuk', '');
+    uiAdapter.value('hadirEditJamKeluar', '');
+    uiAdapter.value('hadirEditStatus', '');
+
+    const modal = uiAdapter.get('hadirEditModal');
+    if (modal) {
+      modal.classList.remove('qm-hidden');
+      setTimeout(() => uiAdapter.focus('hadirEditJamMasuk'), 100);
+    }
+  }
+
+  function closeHadirBatchEdit() {
+    const modal = uiAdapter.get('hadirEditModal');
+    if (modal) modal.classList.add('qm-hidden');
+    state.activeHadirBatchIndices = [];
+  }
+
+  function toggleHadirRowInputs(checkbox) {
+    const row = checkbox.closest('tr');
+    if (!row) return;
+
+    const cells = row.querySelectorAll('td');
+    const masukCell = cells[2];
+    const keluarCell = cells[3];
+
+    if (checkbox.checked) {
+      if (!row.dataset.originalMasuk) row.dataset.originalMasuk = masukCell.innerHTML;
+      if (!row.dataset.originalKeluar) row.dataset.originalKeluar = keluarCell.innerHTML;
+
+      const mTime = masukCell.querySelector('.qm-font-mono')?.textContent.trim() || '';
+      const kTime = keluarCell.querySelector('.qm-font-mono')?.textContent.trim() || '';
+
+      masukCell.innerHTML = `<input type="time" class="qm-hadir-inline-input qm-input" value="${mTime.includes(':') ? mTime.substring(0, 5) : ''}" data-prev="${mTime}" style="width: 85px; padding: 2px; height: 24px; font-size: 11px;">`;
+      keluarCell.innerHTML = `<input type="time" class="qm-hadir-inline-input qm-input" value="${kTime.includes(':') ? kTime.substring(0, 5) : ''}" data-prev="${kTime}" style="width: 85px; padding: 2px; height: 24px; font-size: 11px;">`;
+    } else {
+      if (row.dataset.originalMasuk) masukCell.innerHTML = row.dataset.originalMasuk;
+      if (row.dataset.originalKeluar) keluarCell.innerHTML = row.dataset.originalKeluar;
+    }
+  }
+
+  function startHadirPageLoop() {
+    const checkboxes = document.querySelectorAll('.qm-hadir-batch-cb:checked');
+    if (checkboxes.length === 0) {
+      uiAdapter.alert('Pilih setidaknya satu baris.');
+      return;
+    }
+
+    const tasks = [];
+    const current = state.attendanceCheck;
+    if (!current || !current.summary) return;
+
+    checkboxes.forEach(cb => {
+      const row = cb.closest('tr');
+      const inputs = row.querySelectorAll('.qm-hadir-inline-input');
+      const mVal = inputs[0]?.value;
+      const kVal = inputs[1]?.value;
+      const mPrev = inputs[0]?.dataset.prev || '';
+      const kPrev = inputs[1]?.dataset.prev || '';
+
+      if (!cb.dataset.indices) return;
+      const indices = cb.dataset.indices.split(',').map(n => parseInt(n, 10));
+      
+      indices.forEach(idx => {
+        if (isNaN(idx)) return;
+        const entry = current.summary.entries[idx];
+        if (!entry) return;
+        const editAction = (entry.actions || []).find(act => /edit|ubah/i.test(act.text));
+        if (!editAction) return;
+
+        const isMasuk = entry.status === 'Masuk';
+        const targetTime = isMasuk ? mVal : kVal;
+        const prevTime = (isMasuk ? mPrev : kPrev).substring(0, 5);
+
+        // Logic: If target is empty but prev was not -> DELETE
+        // If target is different from prev -> EDIT
+        const isDelete = prevTime && !targetTime;
+        const isEdit = targetTime && targetTime !== prevTime;
+
+        if (isEdit || isDelete) {
+          // Format date for matching (e.g., 01-Apr-2026)
+          const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+          const d = entry.date;
+          const dateMatch = `${String(d.getDate()).padStart(2, '0')}-${months[d.getMonth()]}-${d.getFullYear()}`;
+          
+          tasks.push({
+            index: idx,
+            type: isDelete ? 'delete' : 'edit',
+            dataTarget: editAction.dataTarget,
+            dateMatch: dateMatch,
+            timeMatch: entry.time ? entry.time.substring(0, 5) : '',
+            statusMatch: entry.status,
+            time: targetTime,
+            status: isMasuk ? '1' : '0'
+          });
+        }
+      });
+    });
+
+    if (tasks.length === 0) {
+      uiAdapter.alert('Tidak ada perubahan waktu yang terdeteksi.');
+      return;
+    }
+
+    const nrp = current.summary.nrp;
+    const startObj = parseHrisDate(uiAdapter.getValue('attendanceCheckStartDate'));
+    const tahun = startObj ? startObj.getFullYear() : new Date().getFullYear();
+    const bulan = startObj ? String(startObj.getMonth() + 1).padStart(2, '0') : String(new Date().getMonth() + 1).padStart(2, '0');
+    const baseUrl = routeByNrp(nrp, ROUTES.ABSEN_BARCODE, ROUTES.ABSEN_BARCODE_OS)(tahun, bulan, nrp);
+
+    createAutomationFlow('attendance-batch', window.location.href, {
+      tasks,
+      currentIndex: 0,
+      baseUrl
+    });
+
+    UI.showResult('info', 'Otomasi Dimulai', `Memproses ${tasks.length} item...`);
+    setTimeout(() => {
+      window.location.href = baseUrl;
+    }, 800);
+  }
+
+  async function resumeHadirPageLoop() {
+    const flow = getAutomationFlow();
+    if (!flow || flow.type !== 'attendance-batch') return;
+
+    const tasks = flow.meta.tasks;
+    const idx = flow.meta.currentIndex;
+    const task = tasks[idx];
+
+    if (!task) {
+      finishAutomationFlow(flow.id);
+      return;
+    }
+
+    if (!isBarcodePagePath()) {
+      window.location.href = flow.meta.baseUrl;
+      return;
+    }
+
+    UI.showGlobalLoader('Otomasi', `Mengolah baris ${idx + 1}/${tasks.length}...`);
+
+    // Find modal - be more flexible with selectors
+    const modal = document.querySelector('.modal.show, .modal.in, [role="dialog"].show') || 
+                  document.querySelector('.modal-content');
+    const isVisible = modal && (modal.offsetWidth > 0 || modal.offsetHeight > 0);
+
+    if (isVisible) {
+      // Broad selectors for the date/time input
+      const timeInput = modal.querySelector('input[name*="tanggal"], input[id*="tanggal"], .tanggal_edit, #tanggal_edit');
+      const statusInput = modal.querySelector('select[name*="status"], select[id*="status"], #status_edit, .status_edit');
+      
+      if (timeInput) {
+        const val = timeInput.value;
+        // User's example: 2026-04-01 07:00:00.000
+        // Screenshot shows: 01/04/2026 , 17:00
+        // We try to keep the date prefix and only change the HH:mm
+        let newVal = '';
+        if (val.includes(',')) {
+          // Format like "01/04/2026 , 17:00"
+          newVal = val.split(',')[0] + ', ' + task.time;
+        } else if (val.length >= 10) {
+          // Format like "2026-04-01 ..." or "01-04-2026 ..."
+          newVal = val.substring(0, 11) + task.time + (val.includes(':') && val.length > 16 ? val.substring(16) : ':00');
+        } else {
+          newVal = task.time; // Fallback
+        }
+        
+        timeInput.value = newVal;
+        // Trigger change event just in case
+        timeInput.dispatchEvent(new Event('change', { bubbles: true }));
+
+        if (statusInput && task.status) {
+          statusInput.value = task.status;
+          statusInput.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+
+        setTimeout(() => {
+          // Find Submit button by type, class, or text
+          const buttons = Array.from(modal.querySelectorAll('button, input[type="submit"]'));
+          const submitBtn = buttons.find(b => 
+            b.type === 'submit' || 
+            b.classList.contains('btn-primary') || 
+            /submit|simpan|save/i.test(b.textContent)
+          );
+
+          if (submitBtn) {
+            flow.meta.currentIndex++;
+            sessionStorage.setItem(STORAGE.AUTO_FLOW, JSON.stringify(flow));
+            submitBtn.click();
+          } else {
+            Logger.error('Tombol Submit tidak ditemukan di modal.');
+            // Skip this one if we can't save
+            flow.meta.currentIndex++;
+            sessionStorage.setItem(STORAGE.AUTO_FLOW, JSON.stringify(flow));
+            window.location.reload();
+          }
+        }, 400); // Speed up: 800ms -> 400ms
+      } else {
+        Logger.error('Input waktu tidak ditemukan di modal.');
+        flow.meta.currentIndex++;
+        sessionStorage.setItem(STORAGE.AUTO_FLOW, JSON.stringify(flow));
+        window.location.reload();
+      }
+    } else {
+      // Find the specific row by matching Date and Status
+      let targetRow = null;
+      
+      const headers = Array.from(document.querySelectorAll('table thead th')).map(th => th.textContent.trim().toLowerCase());
+      const tanggalIdx = headers.indexOf('tanggal');
+      const statusIdx = headers.indexOf('status');
+      
+      if (tanggalIdx !== -1 && statusIdx !== -1) {
+        const rows = document.querySelectorAll('table tbody tr');
+        for (const row of rows) {
+          const cells = row.querySelectorAll('td');
+          if (cells.length <= Math.max(tanggalIdx, statusIdx)) continue;
+          
+          const rowTanggal = cells[tanggalIdx].textContent.trim();
+          const rowStatus = cells[statusIdx].textContent.trim();
+          
+          if (rowTanggal.includes(task.dateMatch) && rowStatus === task.statusMatch) {
+            targetRow = row;
+            break;
+          }
+        }
+      }
+
+      if (!targetRow) {
+        const rows = document.querySelectorAll('table tbody tr');
+        targetRow = rows[task.index];
+      }
+
+      if (targetRow) {
+        if (task.type === 'delete') {
+          // Find delete button: btn-danger or text "Hapus/Delete"
+          const buttons = Array.from(targetRow.querySelectorAll('button, a.btn'));
+          const delBtn = buttons.find(b => 
+            b.classList.contains('btn-danger') || 
+            /hapus|delete|remove/i.test(b.textContent) ||
+            b.querySelector('.fa-trash, .fa-times')
+          );
+
+          if (delBtn) {
+            const oldConfirm = window.confirm;
+            window.confirm = () => true;
+            try {
+              delBtn.click();
+              // After delete, the page usually reloads or the row disappears.
+              // We'll update the flow and wait for the next iteration.
+              flow.meta.currentIndex++;
+              sessionStorage.setItem(STORAGE.AUTO_FLOW, JSON.stringify(flow));
+              // Small delay to let the click process before any potential reload
+              setTimeout(() => {
+                if (getAutomationFlow()) window.location.reload();
+              }, 1000);
+            } finally {
+              setTimeout(() => { window.confirm = oldConfirm; }, 500);
+            }
+          } else {
+            Logger.error('Tombol Delete tidak ditemukan di baris.');
+            flow.meta.currentIndex++;
+            sessionStorage.setItem(STORAGE.AUTO_FLOW, JSON.stringify(flow));
+            window.location.reload();
+          }
+        } else {
+          // EDIT ACTION
+          let editBtn = targetRow.querySelector('.btn-warning, button[data-toggle="modal"], a[href*="edit"]');
+          if (!editBtn && task.dataTarget) {
+            editBtn = document.querySelector(`button[data-target="${task.dataTarget}"]`);
+          }
+
+          if (editBtn) {
+            editBtn.click();
+            setTimeout(resumeHadirPageLoop, 800);
+          } else {
+            Logger.error(`Gagal menemukan tombol edit untuk ${task.dateMatch}`);
+            flow.meta.currentIndex++;
+            sessionStorage.setItem(STORAGE.AUTO_FLOW, JSON.stringify(flow));
+            window.location.reload();
+          }
+        }
+      } else {
+        Logger.error(`Gagal menemukan baris matching untuk ${task.dateMatch}`);
+        flow.meta.currentIndex++;
+        sessionStorage.setItem(STORAGE.AUTO_FLOW, JSON.stringify(flow));
+        window.location.reload();
+      }
+    }
+  }
+
+
+  async function processHadirBatchEdit(input) {
+    const indices = state.activeHadirBatchIndices || [];
+    if (indices.length === 0) return;
+
+    const current = state.attendanceCheck;
+    if (!current || !current.summary) return;
+
+    if (!input.jamMasuk && !input.jamKeluar && !input.status) {
+      uiAdapter.alert('Tidak ada data yang diubah.');
+      return;
+    }
+
+    const saveBtn = uiAdapter.get('#qm-btn-hadir-edit-save');
+    if (saveBtn) saveBtn.disabled = true;
+    closeHadirBatchEdit();
+
+    // Start global progress bar
+    UI.startProgress('Memproses Batch Edit Kehadiran...', indices.length);
+
+    let successCount = 0;
+    let failCount = 0;
+
+    for (let i = 0; i < indices.length; i++) {
+      const idx = indices[i];
+      const entry = current.summary.entries[idx];
+      if (!entry) { failCount++; continue; }
+
+      const editAction = (entry.actions || []).find(act => /edit|ubah/i.test(act.text));
+      if (!editAction || !editAction.href) { failCount++; continue; }
+
+      try {
+        const editUrl = toAbsoluteHrisUrl(editAction.href);
+        const html = await hrisFetch(editUrl);
+        const doc = parseHTML(html);
+        const form = doc.querySelector('form');
+        if (!form) throw new Error('Form edit tidak ditemukan.');
+
+        const basePostData = new URLSearchParams();
+        form.querySelectorAll('input, select, textarea').forEach(el => {
+          if (!el.name || el.type === 'submit' || el.type === 'button') return;
+          if ((el.type === 'checkbox' || el.type === 'radio') && !el.checked) return;
+          basePostData.append(el.name, el.value);
+        });
+
+        // The date format is DD-MM-YYYY in entry.dateText
+        const [d, m, y] = entry.dateText.split('-');
+        const datePrefix = `${y}-${m}-${d}`;
+
+        const submissions = [];
+
+        // Intelligent selection of what to update based on the entry's current status
+        if (entry.status === 'Masuk' && input.jamMasuk) {
+          const pd = new URLSearchParams(basePostData.toString());
+          pd.set('tanggal', `${datePrefix} ${input.jamMasuk}:00`);
+          pd.set('status', input.status || '1');
+          submissions.push(pd);
+        } else if (entry.status === 'Keluar' && input.jamKeluar) {
+          const pd = new URLSearchParams(basePostData.toString());
+          pd.set('tanggal', `${datePrefix} ${input.jamKeluar}:00`);
+          pd.set('status', input.status || '0');
+          submissions.push(pd);
+        } else if (input.status && !input.jamMasuk && !input.jamKeluar) {
+          // If only status is changed, update current record
+          const pd = new URLSearchParams(basePostData.toString());
+          const timeStr = entry.time || '00:00:00';
+          pd.set('tanggal', `${datePrefix} ${timeStr}`);
+          pd.set('status', input.status);
+          submissions.push(pd);
+        }
+
+        // Execute submissions for this date sequentially
+        for (const postData of submissions) {
+          const response = await fetch(form.action || editUrl, {
+            method: 'POST',
+            body: postData
+          });
+          if (!response.ok) throw new Error('HTTP ' + response.status);
+        }
+
+        successCount++;
+      } catch (e) {
+        Logger.error(`Batch edit failed for index ${idx}`, e);
+        failCount++;
+      }
+
+      UI.updateProgress(i + 1, indices.length, `Selesai: ${i + 1}/${indices.length}`);
+      // Small delay to be polite to the server
+      await new Promise(r => setTimeout(r, 200));
+    }
+
+    UI.endProgress();
+    if (saveBtn) saveBtn.disabled = false;
+
+    uiAdapter.alert(`Proses selesai. Berhasil: ${successCount}, Gagal: ${failCount}`);
+
+    // Refresh table
+    KEHADIRAN.checkByRange(panelReaders.attendanceCheck());
   }
 
   function renderSpklCheckResult() {
@@ -3133,7 +3631,8 @@
           const href = act.href ? toAbsoluteHrisUrl(act.href) : '#';
 
           if (isEdit) {
-            return `<button type="button" class="qm-btn-text qm-font-xs qm-text-primary qm-spkl-inline-edit-btn" data-index="${idx}" style="margin-left: 8px;">Edit</button>`;
+            // Edit handled by batch
+            return '';
           }
           if (isDelete) {
             return `<button type="button" class="qm-btn-text qm-font-xs qm-text-danger qm-spkl-inline-delete-btn" data-url="${href}" style="margin-left: 8px;">Delete</button>`;
@@ -3146,6 +3645,7 @@
         return `
           <div class="qm-hadir-check-detail-item">
             <div class="qm-hadir-check-detail-top">
+              <input type="checkbox" class="qm-spkl-batch-cb qm-mr-s" data-index="${idx}">
               <div class="qm-flex qm-items-center" style="min-width: 30px;">
                 <span class="qm-font-semibold" style="font-size: var(--qm-font-s);">${escapeHtml(day)}</span>
               </div>
@@ -3161,6 +3661,51 @@
               </div>
               <div class="qm-hadir-check-actions">${actionsHtml}</div>
             </div>
+            <div class="qm-spkl-inline-inputs qm-hidden" style="margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--qm-border-warm);">
+              <div class="qm-flex qm-gap-s qm-mb-s">
+                <div class="qm-flex-1">
+                  <label class="qm-field-label" style="font-size: 9px; margin-bottom: 2px;">Jenis OT</label>
+                  <select class="qm-select qm-spkl-inline-jenis" style="height: 24px; padding: 0 4px; font-size: 10px;">
+                    <option value="" ${!entry.otCode ? 'selected' : ''}>Pilih Jenis</option>
+                    <option value="1" ${entry.otCode==='1' ? 'selected' : ''}>OT BIASA</option>
+                    <option value="2" ${entry.otCode==='2' ? 'selected' : ''}>LONG SHIFT</option>
+                    <option value="3" ${entry.otCode==='3' ? 'selected' : ''}>NON STOP</option>
+                    <option value="4" ${entry.otCode==='4' ? 'selected' : ''}>OT AWAL</option>
+                    <option value="5A" ${entry.otCode==='5A' ? 'selected' : ''}>NO REST (AWAL)</option>
+                    <option value="5B" ${entry.otCode==='5B' ? 'selected' : ''}>NO REST (TENGAH)</option>
+                    <option value="5C" ${entry.otCode==='5C' ? 'selected' : ''}>NO REST (AKHIR)</option>
+                    <option value="6" ${entry.otCode==='6' ? 'selected' : ''}>STANDBY</option>
+                    <option value="7" ${entry.otCode==='7' ? 'selected' : ''}>LAIN-LAIN</option>
+                    <option value="OT" ${entry.otCode==='OT' ? 'selected' : ''}>OVERTIME</option>
+                  </select>
+                </div>
+                <div class="qm-flex-1">
+                  <label class="qm-field-label" style="font-size: 9px; margin-bottom: 2px;">Shift</label>
+                  <select class="qm-select qm-spkl-inline-shift" style="height: 24px; padding: 0 4px; font-size: 10px;">
+                    <option value="" ${!entry.shift ? 'selected' : ''}>Pilih Shift</option>
+                    <option value="1" ${entry.shift==='1' ? 'selected' : ''}>SHIFT I</option>
+                    <option value="2" ${entry.shift==='2' ? 'selected' : ''}>SHIFT II</option>
+                    <option value="3" ${entry.shift==='3' ? 'selected' : ''}>SHIFT III</option>
+                    <option value="4" ${entry.shift==='4' ? 'selected' : ''}>LONG SHIFT I</option>
+                    <option value="5" ${entry.shift==='5' ? 'selected' : ''}>LONG SHIFT II</option>
+                  </select>
+                </div>
+              </div>
+              <div class="qm-flex qm-gap-s">
+                <div class="qm-flex-1">
+                  <label class="qm-field-label" style="font-size: 9px; margin-bottom: 2px;">Jam Awal</label>
+                  <input type="time" class="qm-input qm-spkl-inline-awal" value="${entry.jamAwal.includes(':') ? entry.jamAwal.substring(0,5) : ''}" style="height: 24px; padding: 2px 4px; font-size: 10px;">
+                </div>
+                <div class="qm-flex-1">
+                  <label class="qm-field-label" style="font-size: 9px; margin-bottom: 2px;">Jam Akhir</label>
+                  <input type="time" class="qm-input qm-spkl-inline-akhir" value="${entry.jamAkhir.includes(':') ? entry.jamAkhir.substring(0,5) : ''}" style="height: 24px; padding: 2px 4px; font-size: 10px;">
+                </div>
+                <div class="qm-flex-1">
+                  <label class="qm-field-label" style="font-size: 9px; margin-bottom: 2px;">Tambahan</label>
+                  <input type="number" step="0.01" class="qm-input qm-spkl-inline-tambahan" value="${entry.jamOt}" style="height: 24px; padding: 2px 4px; font-size: 10px;">
+                </div>
+              </div>
+            </div>
           </div>
         `;
       }).join('');
@@ -3169,8 +3714,14 @@
       <div class="qm-hadir-check-card" style="margin-top: 8px; padding: 10px 14px;">
         <div class="qm-hadir-check-detail">
           <div class="qm-flex qm-justify-between qm-items-center qm-mb-s" style="padding-bottom: 4px; border-bottom: 1px solid var(--qm-border-warm);">
-            <div class="qm-hadir-check-detail-title" style="font-size: 11px; letter-spacing: 0.05em;">DAFTAR SPKL BULAN INI</div>
-            <a href="${spklListUrl(summary.nrp, uiAdapter.getValue('spklPageMonth') || (new Date().getMonth() + 1), new Date().getFullYear())}" target="_blank" class="qm-text-primary qm-font-xs" style="text-decoration: underline;">Buka Halaman Penuh</a>
+            <div class="qm-flex qm-items-center">
+              <input type="checkbox" id="qm-spkl-batch-cb-all" class="qm-mr-s">
+              <label for="qm-spkl-batch-cb-all" class="qm-hadir-check-detail-title qm-m-0 qm-cursor-pointer" style="font-size: 11px; letter-spacing: 0.05em;">PILIH SEMUA SPKL</label>
+            </div>
+            <div class="qm-flex qm-items-center qm-gap-s">
+              <button type="button" class="qm-btn qm-btn-primary qm-btn-sm" id="qm-btn-spkl-batch-edit" style="padding: 2px 8px; font-size: 10px;">Edit Terpilih</button>
+              <a href="${spklListUrl(summary.nrp, uiAdapter.getValue('spklPageMonth') || (new Date().getMonth() + 1), new Date().getFullYear())}" target="_blank" class="qm-text-primary qm-font-xs" style="text-decoration: underline;">Buka Halaman Penuh</a>
+            </div>
           </div>
           ${listHtml}
         </div>
@@ -3848,7 +4399,7 @@
         setField(selOt, data.ot);
         setField(inMsk, data.jamAwal);
         setField(inKlr, data.jamAkhir);
-        
+
         const inJamOt = document.querySelector(SELECTORS.SPKL_MODAL_JAM_OT);
         if (inJamOt && data.jamOt) setField(inJamOt, data.jamOt);
 
@@ -5814,10 +6365,44 @@
       color: var(--qm-near-black);
     }
     .qm-hadir-check-detail-time {
-      font-size: var(--qm-font-s);
+      font-size: var(--qm-font-m);
       font-weight: 700;
-      color: var(--qm-p-600);
-      font-family: var(--qm-font-mono);
+      color: var(--qm-charcoal);
+    }
+    
+    /* Attendance Table Styles */
+    .qm-hadir-table-container {
+      background: var(--qm-white);
+      border-radius: var(--qm-r-m);
+      border: 1px solid var(--qm-border);
+      overflow: hidden;
+    }
+    .qm-hadir-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: var(--qm-font-s);
+    }
+    .qm-hadir-table th {
+      background: var(--qm-bg-alt);
+      padding: 10px 12px;
+      text-align: left;
+      font-weight: 700;
+      color: var(--qm-stone);
+      text-transform: uppercase;
+      font-size: 10px;
+      letter-spacing: 0.05em;
+      border-bottom: 1px solid var(--qm-border);
+    }
+    .qm-hadir-table td {
+      padding: 10px 12px;
+      border-bottom: 1px solid rgba(0,0,0,0.05);
+      vertical-align: middle;
+    }
+    .qm-hadir-table tr:last-child td {
+      border-bottom: none;
+    }
+    .qm-hadir-table tr:hover {
+      background: #fafafa;
     }
     .qm-hadir-check-detail-raw {
       font-size: var(--qm-font-s);
@@ -6639,51 +7224,39 @@
       </div>
     </div>
 
-    <!-- SPKL Edit Modal -->
-    <div id="qm-modal-spkl-edit" class="qm-modal-overlay qm-hidden">
+    <!-- Hadir Edit Modal -->
+    <div id="qm-modal-hadir-edit" class="qm-modal-overlay qm-hidden">
       <div class="qm-modal-content">
         <div class="qm-modal-header">
-          <h6 class="qm-serif">Edit SPKL</h6>
+          <h6 class="qm-serif">Edit Data Kehadiran</h6>
           <button type="button" class="qm-modal-close-btn">&times;</button>
         </div>
         <div class="qm-modal-body">
           <div class="qm-mb-m">
-            <label class="qm-field-label">Tanggal</label>
-            <input id="qm-edit-spkl-tgl" type="text" class="qm-input" readonly style="background: var(--qm-bg-alt);">
-          </div>
-          <div class="qm-mb-m">
-            <label class="qm-field-label">Jenis OT</label>
-            <select id="qm-edit-spkl-ot" class="qm-select">
-              <option value="1">OT BIASA</option>
-              <option value="2">LONG SHIFT</option>
-              <option value="3">NON STOP</option>
-              <option value="4">OT AWAL</option>
-              <option value="5A">NO REST (AWAL)</option>
-              <option value="5B">NO REST (TENGAH)</option>
-              <option value="5C">NO REST (AKHIR)</option>
-              <option value="6">STANDBY</option>
-              <option value="7">LAIN-LAIN</option>
-              <option value="OT">OVERTIME</option>
-            </select>
+            <div class="qm-text-s qm-text-muted qm-mb-s">Edit akan diterapkan ke semua data yang dipilih. Kosongkan nilai yang tidak ingin diubah.</div>
           </div>
           <div class="qm-flex qm-gap-m qm-mb-m">
             <div class="qm-flex-1">
-              <label class="qm-field-label">Jam Awal</label>
-              <input id="qm-edit-spkl-jam-awal" type="time" class="qm-input">
+              <label class="qm-field-label">Jam Masuk</label>
+              <input id="qm-edit-hadir-jam-masuk" type="time" class="qm-input">
             </div>
             <div class="qm-flex-1">
-              <label class="qm-field-label">Jam Akhir</label>
-              <input id="qm-edit-spkl-jam-akhir" type="time" class="qm-input">
+              <label class="qm-field-label">Jam Keluar</label>
+              <input id="qm-edit-hadir-jam-keluar" type="time" class="qm-input">
             </div>
           </div>
           <div class="qm-mb-m">
-            <label class="qm-field-label">Tambahan Jam OT (Koreksi)</label>
-            <input id="qm-edit-spkl-jam-ot" type="number" step="0.5" class="qm-input" placeholder="Contoh: 1.5">
+            <label class="qm-field-label">Status (Set ke dua Jam)</label>
+            <select id="qm-edit-hadir-status" class="qm-select">
+              <option value="">Abaikan / Tidak Ubah Status</option>
+              <option value="1">Masuk</option>
+              <option value="0">Keluar</option>
+            </select>
           </div>
         </div>
         <div class="qm-modal-footer">
           <button type="button" class="qm-modal-cancel-btn qm-btn qm-btn-outline">Batal</button>
-          <button type="button" id="qm-btn-spkl-edit-save" class="qm-btn qm-btn-primary">Simpan</button>
+          <button type="button" id="qm-btn-hadir-edit-save" class="qm-btn qm-btn-primary">Simpan</button>
         </div>
       </div>
     </div>
@@ -6737,6 +7310,14 @@
     spklEditJamAwal: '#qm-edit-spkl-jam-awal',
     spklEditJamAkhir: '#qm-edit-spkl-jam-akhir',
     spklEditJamOt: '#qm-edit-spkl-jam-ot',
+    hadirEditModal: '#qm-modal-hadir-edit',
+    hadirEditNrp: '#qm-edit-hadir-nrp',
+    hadirEditNama: '#qm-edit-hadir-nama',
+    hadirEditBagian: '#qm-edit-hadir-bagian',
+    hadirEditSeksi: '#qm-edit-hadir-seksi',
+    hadirEditGroup: '#qm-edit-hadir-group',
+    hadirEditTanggal: '#qm-edit-hadir-tanggal',
+    hadirEditStatus: '#qm-edit-hadir-status',
     distribusiNrp: '#qm-input-distribusi-nrp',
     distribusiJkUseDistribusi: '#qm-dist-jk-use-distribusi',
     distribusiJkSelect: '#qm-dist-jk-select-input',
@@ -8378,6 +8959,14 @@
         nextJk: uiAdapter.findKaryawanSelect(key, 'jk')?.value || '',
         nextKk: uiAdapter.findKaryawanSelect(key, 'kk')?.value || ''
       };
+    },
+
+    hadirInlineEdit() {
+      return {
+        jamMasuk: uiAdapter.getValue('hadirEditJamMasuk', { trim: true }),
+        jamKeluar: uiAdapter.getValue('hadirEditJamKeluar', { trim: true }),
+        status: uiAdapter.getValue('hadirEditStatus', { trim: true })
+      };
     }
   });
 
@@ -8632,89 +9221,167 @@
     renderSpklCheckResult();
   }
 
-  function handleSpklInlineEdit(inputOrIdx) {
-    const idx = typeof inputOrIdx === 'number'
-      ? inputOrIdx
-      : parseInt(inputOrIdx?.index, 10);
-    const entry = state.spklCheck?.summary?.entries?.[idx];
-    if (!entry) return;
-
-    state.spklEditCurrentIndex = idx;
-    
-    // Fill modal fields
-    uiAdapter.value('spklEditDate', entry.dateText);
-    
-    // Try to match OT Code with select options
-    const selOt = uiAdapter.get('spklEditOt');
-    const otMap = {
-      'biasa': '1', 'long': '2', 'non': '3', 'awal': '4', 
-      'nrest awal': '5A', 'nrest tengah': '5B', 'nrest akhir': '5C',
-      'standby': '6', 'lain': '7', 'ot': 'OT'
-    };
-    
-    const cleanOt = entry.otCode.toLowerCase();
-    let val = '1';
-    for (const [k, v] of Object.entries(otMap)) {
-      if (cleanOt.includes(k)) { val = v; break; }
+  function toggleSpklRowInputs(checkbox) {
+    const row = checkbox.closest('.qm-hadir-check-detail-item');
+    if (!row) return;
+    const inlineInputs = row.querySelector('.qm-spkl-inline-inputs');
+    if (inlineInputs) {
+      if (checkbox.checked) {
+        inlineInputs.classList.remove('qm-hidden');
+      } else {
+        inlineInputs.classList.add('qm-hidden');
+      }
     }
-    selOt.value = val;
-    
-    uiAdapter.value('spklEditJamAwal', entry.jamAwal || '');
-    uiAdapter.value('spklEditJamAkhir', entry.jamAkhir || '');
-    uiAdapter.value('spklEditJamOt', entry.jamOt || '');
-    
-    // Show modal and focus
-    uiAdapter.removeClass('spklEditModal', 'qm-hidden');
-    setTimeout(() => {
-      uiAdapter.focus('spklEditOt');
-    }, 100);
   }
 
-  function closeSpklEditPopup() {
-    uiAdapter.addClass('spklEditModal', 'qm-hidden');
-    state.spklEditCurrentIndex = -1;
-  }
-
-  function handleSpklEditSave(input = panelReaders.spklInlineEdit()) {
-    const idx = state.spklEditCurrentIndex;
-    const entry = state.spklCheck?.summary?.entries?.[idx];
-    if (!entry) return;
-
-    const editAction = entry.actions.find(act => /edit/i.test(act.text));
-    if (!editAction || !editAction.href) {
-      UI.showResult('danger', 'Error', 'Gagal menemukan URL Edit untuk record ini.');
+  function startSpklPageLoop() {
+    const checkboxes = document.querySelectorAll('.qm-spkl-batch-cb:checked');
+    if (checkboxes.length === 0) {
+      uiAdapter.alert('Pilih setidaknya satu baris SPKL untuk diedit.');
       return;
     }
 
-    const data = {
-      ot: input?.ot || '',
-      jamAwal: input?.jamAwal || '',
-      jamAkhir: input?.jamAkhir || '',
-      jamOt: input?.jamOt || ''
-    };
+    const tasks = [];
+    const current = state.spklCheck;
+    if (!current || !current.summary) return;
 
-    if (!data.jamAwal || !data.jamAkhir) {
-      UI.showResult('warning', 'Data Kurang', 'Harap isi Jam Awal dan Jam Akhir.');
-      return;
-    }
+    checkboxes.forEach(cb => {
+      const row = cb.closest('.qm-hadir-check-detail-item');
+      if (!row) return;
 
-    Logger.info('handleSpklEditSave: Saving SPKL inline', data);
-    
-    // Create automation flow
-    createAutomationFlow('spkl-edit', {
-      nrp: state.spklCheck.summary.nrp,
-      date: entry.dateText
+      const idx = parseInt(cb.dataset.index, 10);
+      if (isNaN(idx)) return;
+      
+      const entry = current.summary.entries[idx];
+      if (!entry) return;
+
+      const editAction = (entry.actions || []).find(act => /edit/i.test(act.text));
+      if (!editAction) return;
+
+      const inlineInputs = row.querySelector('.qm-spkl-inline-inputs');
+      if (!inlineInputs) return;
+
+      const jenis = inlineInputs.querySelector('.qm-spkl-inline-jenis')?.value || '';
+      const shift = inlineInputs.querySelector('.qm-spkl-inline-shift')?.value || '';
+      const awal = inlineInputs.querySelector('.qm-spkl-inline-awal')?.value || '';
+      const akhir = inlineInputs.querySelector('.qm-spkl-inline-akhir')?.value || '';
+      const tambahan = inlineInputs.querySelector('.qm-spkl-inline-tambahan')?.value || '';
+
+      tasks.push({
+        index: idx,
+        modalTarget: editAction.modalTarget,
+        href: toAbsoluteHrisUrl(editAction.href),
+        jenis,
+        shift,
+        awal,
+        akhir,
+        tambahan
+      });
     });
-    
-    // Store data for filling
-    sessionStorage.setItem('qm_spkl_edit_pending', JSON.stringify(data));
-    
-    // Close modal and redirect
-    closeSpklEditPopup();
-    UI.showResult('success', 'Processing', 'Mengarahkan ke halaman Edit SPKL...');
+
+    if (tasks.length === 0) {
+      uiAdapter.alert('Pilih setidaknya satu baris valid.');
+      return;
+    }
+
+    const nrp = current.summary.nrp;
+    const bulan = current.summary.bulan || uiAdapter.getValue('spklPageMonth') || (new Date().getMonth() + 1);
+    const tahun = current.summary.tahun || new Date().getFullYear();
+    const baseUrl = spklListUrl(nrp, bulan, tahun);
+
+    createAutomationFlow('spkl-batch', window.location.href, {
+      tasks,
+      currentIndex: 0,
+      baseUrl
+    });
+
+    UI.showResult('info', 'Otomasi Dimulai', `Memproses ${tasks.length} item...`);
     setTimeout(() => {
-      uiAdapter.openUrl(toAbsoluteHrisUrl(editAction.href), '_self');
-    }, 1000);
+      window.location.href = baseUrl;
+    }, 300);
+  }
+
+  async function resumeSpklPageLoop() {
+    const flow = getAutomationFlow();
+    if (!flow || flow.type !== 'spkl-batch') return;
+
+    const tasks = flow.meta.tasks;
+    const idx = flow.meta.currentIndex;
+    const task = tasks[idx];
+
+    if (!task) {
+      finishAutomationFlow(flow.id);
+      return;
+    }
+
+    const currentUrl = window.location.href.split('?')[0];
+    const targetBase = (flow.meta.baseUrl || '').split('?')[0];
+    
+    if (currentUrl !== targetBase && !window.location.href.includes('/spkl')) {
+      window.location.href = flow.meta.baseUrl;
+      return;
+    }
+
+    UI.showGlobalLoader('Otomasi', `Mengolah baris ${idx + 1}/${tasks.length}...`);
+
+    const modal = document.querySelector('.modal.show, .modal.in, [role="dialog"].show') || 
+                  document.querySelector('.modal-content');
+    const isVisible = modal && (modal.offsetWidth > 0 || modal.offsetHeight > 0);
+
+    if (isVisible) {
+      const inputs = {
+        jenis_ot: modal.querySelector('select[name*="jenis_ot"], select[id*="jenis_ot"], #jenis_ot_edit'),
+        shift: modal.querySelector('select[name*="shift"], select[id*="shift"], #shift'),
+        awal: modal.querySelector('input[name*="jam_awal_ot"], input[id*="jam_awal_ot"], input[type="time"]'),
+        akhir: modal.querySelector('input[name*="jam_akhir_ot"], input[id*="jam_akhir_ot"], input[type="time"]:nth-of-type(2)'),
+        tambahan: modal.querySelector('input[name*="tambahan_jam_ot"], input[id*="tambahan_jam_ot"]')
+      };
+
+      if (inputs.awal && task.awal) { inputs.awal.value = task.awal; inputs.awal.dispatchEvent(new Event('change', { bubbles: true })); }
+      if (!inputs.akhir) {
+        const timeInputs = modal.querySelectorAll('input[type="time"]');
+        if (timeInputs.length >= 2) inputs.akhir = timeInputs[1];
+      }
+      if (inputs.akhir && task.akhir) { inputs.akhir.value = task.akhir; inputs.akhir.dispatchEvent(new Event('change', { bubbles: true })); }
+      
+      if (inputs.jenis_ot && task.jenis) { inputs.jenis_ot.value = task.jenis; inputs.jenis_ot.dispatchEvent(new Event('change', { bubbles: true })); }
+      if (inputs.shift && task.shift) { inputs.shift.value = task.shift; inputs.shift.dispatchEvent(new Event('change', { bubbles: true })); }
+      if (inputs.tambahan && task.tambahan) { inputs.tambahan.value = task.tambahan; inputs.tambahan.dispatchEvent(new Event('change', { bubbles: true })); }
+
+      setTimeout(() => {
+        const buttons = Array.from(modal.querySelectorAll('button, input[type="submit"]'));
+        const submitBtn = buttons.find(b => 
+          b.type === 'submit' || 
+          b.classList.contains('btn-primary') || 
+          /submit|simpan|save/i.test(b.textContent)
+        );
+
+        flow.meta.currentIndex++;
+        sessionStorage.setItem(STORAGE.AUTO_FLOW, JSON.stringify(flow));
+
+        if (submitBtn) {
+          submitBtn.click();
+        } else {
+          Logger.error('Tombol Submit tidak ditemukan di modal SPKL.');
+          window.location.reload();
+        }
+      }, 200);
+    } else {
+      let editBtn = null;
+      if (task.modalTarget) {
+        editBtn = document.querySelector(`button[data-target="${task.modalTarget}"], [data-target="${task.modalTarget}"]`);
+      }
+      
+      if (editBtn) {
+        editBtn.click();
+        setTimeout(resumeSpklPageLoop, 300);
+      } else {
+        Logger.error('Tombol edit tidak ditemukan di halaman SPKL.');
+        flow.meta.currentIndex++;
+        sessionStorage.setItem(STORAGE.AUTO_FLOW, JSON.stringify(flow));
+        window.location.reload();
+      }
+    }
   }
 
   function handleInputHadir(input = panelReaders.attendanceInput()) {
@@ -8967,13 +9634,12 @@
     openOnlineForDate: handleSpklOnlineCheck,
     openPageForMonth: handleSpklPageCheck,
     checkByDateRange: handleSpklCheckNrp,
-    openInlineEditor: handleSpklInlineEdit,
     openOnlineCheck: handleSpklOnlineCheck,
     openPageCheck: handleSpklPageCheck,
     checkByNrp: handleSpklCheckNrp,
-    openInlineEdit: handleSpklInlineEdit,
-    closeInlineEdit: closeSpklEditPopup,
-    saveInlineEdit: handleSpklEditSave,
+    toggleRowInputs: toggleSpklRowInputs,
+    startPageLoop: startSpklPageLoop,
+    resumePageLoop: resumeSpklPageLoop,
     startBatchProcess: runSpklBatchProcess,
     resumeBatch: checkSpklBatchResume,
     startManyNrpBatch: runSpklManyNrpBatch,
@@ -9001,6 +9667,11 @@
     resumeBulanBatch: checkHadirBulanResume,
     fetchBarcodeSummary: fetchBarcodeAttendanceSummary,
     parseBarcodeSummary: parseBarcodeAttendanceSummary,
+    openBatchEdit: openHadirBatchEdit,
+    closeBatchEdit: closeHadirBatchEdit,
+    toggleRowInputs: toggleHadirRowInputs,
+    startPageLoop: startHadirPageLoop,
+    resumePageLoop: resumeHadirPageLoop,
   });
 
   const DISTRIBUSI = Object.freeze({
@@ -9133,8 +9804,8 @@
         refreshGlobalData('', '', '', 'distribusi');
       }
     },
-    anomali: { onActivate() {} },
-    config: { onActivate() {} }
+    anomali: { onActivate() { } },
+    config: { onActivate() { } }
   });
 
   function activatePane(pane) {
@@ -9164,187 +9835,274 @@
     { event: 'click', selector: '#qm-btn-clear-logs', handler: handleClearLogs },
     { event: 'click', selector: '#qm-btn-export-logs', handler: handleExportLogs },
     { event: 'change', selector: '#qm-config-debug-mode', handler: handleDebugToggle },
-    { event: 'click', selector: '#qm-global-cancel-btn', handler() {
-      Logger.info('User cancelled automation');
-      state.cancelRequested = true;
-      sessionStorage.removeItem(STORAGE.SPKL_QUEUE);
-      sessionStorage.removeItem(STORAGE.SPKL_CURRENT_INDEX);
-      sessionStorage.removeItem(STORAGE.SPKL_FIX_PENDING);
-      const activeFlow = getAutomationFlow();
-      if (activeFlow) clearAutomationFlow(activeFlow.id);
-      else sessionStorage.removeItem(STORAGE.AUTO_FINISHED);
-      if (state.activeCancelableFlow) {
-        UI.setGlobalProgress(5, 'Membatalkan proses...', true);
-        if (state.activeAbortController) state.activeAbortController.abort();
-        return;
+    {
+      event: 'click', selector: '#qm-global-cancel-btn', handler() {
+        Logger.info('User cancelled automation');
+        state.cancelRequested = true;
+        sessionStorage.removeItem(STORAGE.SPKL_QUEUE);
+        sessionStorage.removeItem(STORAGE.SPKL_CURRENT_INDEX);
+        sessionStorage.removeItem(STORAGE.SPKL_FIX_PENDING);
+        const activeFlow = getAutomationFlow();
+        if (activeFlow) clearAutomationFlow(activeFlow.id);
+        else sessionStorage.removeItem(STORAGE.AUTO_FINISHED);
+        if (state.activeCancelableFlow) {
+          UI.setGlobalProgress(5, 'Membatalkan proses...', true);
+          if (state.activeAbortController) state.activeAbortController.abort();
+          return;
+        }
+        UI.hideGlobalLoader(0);
+        UI.showResult('info', 'Dibatalkan', 'Proses otomasi dihentikan oleh pengguna.');
       }
-      UI.hideGlobalLoader(0);
-      UI.showResult('info', 'Dibatalkan', 'Proses otomasi dihentikan oleh pengguna.');
-    } },
-    { event: 'click', selector: '.qm-progress-container', handler() {
-      activatePane('config');
-      const container = uiAdapter.get('logContainer');
-      const btn = uiAdapter.get('showLogsButton');
-      if (container && btn) {
-        container.classList.remove('qm-hidden');
-        btn.classList.add('qm-active');
-        renderLogs();
-        btn.querySelector('span').textContent = 'Sembunyikan Log';
+    },
+    {
+      event: 'click', selector: '.qm-progress-container', handler() {
+        activatePane('config');
+        const container = uiAdapter.get('logContainer');
+        const btn = uiAdapter.get('showLogsButton');
+        if (container && btn) {
+          container.classList.remove('qm-hidden');
+          btn.classList.add('qm-active');
+          renderLogs();
+          btn.querySelector('span').textContent = 'Sembunyikan Log';
+        }
       }
-    } },
-    { event: 'keydown', selector: '#qm-spkl-online-nrp', handler(e) {
-      if (e.key === 'Enter') {
+    },
+    {
+      event: 'keydown', selector: '#qm-spkl-online-nrp', handler(e) {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          SPKL.openOnlineForDate(panelReaders.spklOnline());
+        }
+      }
+    },
+    {
+      event: 'keydown', selector: '#qm-spkl-page-nrp', handler(e) {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          SPKL.checkByDateRange(panelReaders.spklCheck());
+        }
+      }
+    },
+    {
+      event: 'change', selector: '#qm-fix-many-ot', handler() {
+        const box = uiAdapter.get('#qm-fix-many-ot7-box');
+        if (!box) return;
+        box.classList.toggle('qm-hidden', this.value !== '7');
+      }
+    },
+    {
+      event: 'input', selector: '#qm-fix-spkl-data', handler() {
+        const box = uiAdapter.get('#qm-fix-spkl-ot7-box');
+        if (!box) return;
+        const has7 = this.value.split(/[,\n]+/).some(item => {
+          const parts = item.trim().split(/[-:=]/);
+          return parts.length > 1 && parts[1].trim() === '7';
+        });
+        box.classList.toggle('qm-hidden', !has7);
+      }
+    },
+    {
+      event: 'keydown', selector: '#qm-input-nrp', handler(e) {
+        if (e.key !== 'Enter') return;
         e.preventDefault();
-        SPKL.openOnlineForDate(panelReaders.spklOnline());
+        const nrp = this.value.trim();
+        if (nrp.length >= 4) refreshGlobalData(nrp);
       }
-    } },
-    { event: 'keydown', selector: '#qm-spkl-page-nrp', handler(e) {
-      if (e.key === 'Enter') {
-        e.preventDefault();
-        SPKL.checkByDateRange(panelReaders.spklCheck());
+    },
+    {
+      event: 'input', selector: '#qm-spkl-page-nrp, #qm-spkl-online-nrp, #qm-fix-spkl-nrp, #qm-input-hadir-check-nrp, #qm-input-hadir-nrp, #qm-input-hadir-bulan-nrp', handler() {
+        const nrp = this.value.trim();
+        if (nrp.length >= 4) refreshGlobalData(nrp);
       }
-    } },
-    { event: 'change', selector: '#qm-fix-many-ot', handler() {
-      const box = uiAdapter.get('#qm-fix-many-ot7-box');
-      if (!box) return;
-      box.classList.toggle('qm-hidden', this.value !== '7');
-    } },
-    { event: 'input', selector: '#qm-fix-spkl-data', handler() {
-      const box = uiAdapter.get('#qm-fix-spkl-ot7-box');
-      if (!box) return;
-      const has7 = this.value.split(/[,\n]+/).some(item => {
-        const parts = item.trim().split(/[-:=]/);
-        return parts.length > 1 && parts[1].trim() === '7';
-      });
-      box.classList.toggle('qm-hidden', !has7);
-    } },
-    { event: 'keydown', selector: '#qm-input-nrp', handler(e) {
-      if (e.key !== 'Enter') return;
-      e.preventDefault();
-      const nrp = this.value.trim();
-      if (nrp.length >= 4) refreshGlobalData(nrp);
-    } },
-    { event: 'input', selector: '#qm-spkl-page-nrp, #qm-spkl-online-nrp, #qm-fix-spkl-nrp, #qm-input-hadir-check-nrp, #qm-input-hadir-nrp, #qm-input-hadir-bulan-nrp', handler() {
-      const nrp = this.value.trim();
-      if (nrp.length >= 4) refreshGlobalData(nrp);
-    } },
-    { event: 'input', selector: '#qm-input-hadir-check-nrp', handler() {
-      state.attendanceCheck = createEmptyAttendanceCheck();
-      KEHADIRAN.renderCheckResult();
-    } },
-    { event: 'input', selector: '#qm-spkl-page-nrp', handler() {
-      state.spklCheck = createEmptySpklCheck();
-      SPKL.renderCheckResult();
-    } },
-    { event: 'change', selector: '#qm-spkl-page-start-date, #qm-spkl-page-end-date', handler() {
-      state.spklCheck = createEmptySpklCheck();
-      SPKL.renderCheckResult();
-    } },
-    { event: 'click', selector: '.qm-spkl-inline-edit-btn', handler() {
-      SPKL.openInlineEditor({ index: parseInt(this.dataset.index, 10) });
-    } },
-    { event: 'click', selector: '.qm-modal-close-btn, .qm-modal-cancel-btn', handler() { SPKL.closeInlineEdit(); } },
-    { event: 'click', selector: '#qm-btn-spkl-edit-save', handler() { SPKL.saveInlineEdit(panelReaders.spklInlineEdit()); } },
-    { event: 'change', selector: '#qm-input-hadir-check-start-date, #qm-input-hadir-check-end-date', handler() {
-      state.attendanceCheck = createEmptyAttendanceCheck();
-      KEHADIRAN.renderCheckResult();
-    } },
-    { event: 'input', selector: '#qm-input-karyawan-search', handler() {
-      const { query, bulan, tahun } = panelReaders.karyawanSearch();
-      if (isValidNrp(query)) syncGlobalInputs(query, bulan, tahun);
-    } },
-    { event: 'change', selector: '#qm-input-bulan, #qm-input-tahun, #qm-fix-spkl-bulan, #qm-fix-spkl-tahun, #qm-input-hadir-bulan-bln', handler() {
-      const isMonthField = this.id === 'qm-input-bulan' || this.id === 'qm-fix-spkl-bulan' || this.id === 'qm-input-hadir-bulan-bln';
-      const isYearField = this.id === 'qm-input-tahun' || this.id === 'qm-fix-spkl-tahun';
-      refreshGlobalData('', isMonthField ? this.value : '', isYearField ? this.value : '', this.id);
-    } },
+    },
+    {
+      event: 'input', selector: '#qm-input-hadir-check-nrp', handler() {
+        state.attendanceCheck = createEmptyAttendanceCheck();
+        KEHADIRAN.renderCheckResult();
+      }
+    },
+    {
+      event: 'input', selector: '#qm-spkl-page-nrp', handler() {
+        state.spklCheck = createEmptySpklCheck();
+        SPKL.renderCheckResult();
+      }
+    },
+    {
+      event: 'change', selector: '#qm-spkl-page-start-date, #qm-spkl-page-end-date', handler() {
+        state.spklCheck = createEmptySpklCheck();
+        SPKL.renderCheckResult();
+      }
+    },
+    {
+      event: 'click', selector: '#qm-btn-spkl-batch-edit', handler() {
+        SPKL.startPageLoop();
+      }
+    },
+    {
+      event: 'click', selector: '#qm-btn-hadir-batch-edit', handler() {
+        KEHADIRAN.startPageLoop();
+      }
+    },
+    {
+      event: 'change', selector: '.qm-hadir-batch-cb', handler() {
+        KEHADIRAN.toggleRowInputs(this);
+      }
+    },
+    {
+      event: 'click', selector: '.qm-modal-close-btn, .qm-modal-cancel-btn', handler() {
+        SPKL.closeBatchEdit();
+        KEHADIRAN.closeBatchEdit();
+      }
+    },
+    { event: 'click', selector: '#qm-btn-spkl-edit-save', handler() { SPKL.processBatchEdit(panelReaders.spklInlineEdit()); } },
+    { event: 'click', selector: '#qm-btn-hadir-edit-save', handler() { KEHADIRAN.processBatchEdit(panelReaders.hadirInlineEdit()); } },
+    {
+      event: 'change', selector: '#qm-hadir-batch-cb-all', handler() {
+        const isChecked = this.checked;
+        document.querySelectorAll('.qm-hadir-batch-cb').forEach(cb => {
+          cb.checked = isChecked;
+          KEHADIRAN.toggleRowInputs(cb);
+        });
+      }
+    },
+    {
+      event: 'change', selector: '.qm-spkl-batch-cb', handler() {
+        SPKL.toggleRowInputs(this);
+      }
+    },
+    {
+      event: 'change', selector: '#qm-spkl-batch-cb-all', handler() {
+        const isChecked = this.checked;
+        document.querySelectorAll('.qm-spkl-batch-cb').forEach(cb => {
+          cb.checked = isChecked;
+          SPKL.toggleRowInputs(cb);
+        });
+      }
+    },
+    {
+      event: 'change', selector: '#qm-input-hadir-check-start-date, #qm-input-hadir-check-end-date', handler() {
+        state.attendanceCheck = createEmptyAttendanceCheck();
+        KEHADIRAN.renderCheckResult();
+      }
+    },
+    {
+      event: 'input', selector: '#qm-input-karyawan-search', handler() {
+        const { query, bulan, tahun } = panelReaders.karyawanSearch();
+        if (isValidNrp(query)) syncGlobalInputs(query, bulan, tahun);
+      }
+    },
+    {
+      event: 'change', selector: '#qm-input-bulan, #qm-input-tahun, #qm-fix-spkl-bulan, #qm-fix-spkl-tahun, #qm-input-hadir-bulan-bln', handler() {
+        const isMonthField = this.id === 'qm-input-bulan' || this.id === 'qm-fix-spkl-bulan' || this.id === 'qm-input-hadir-bulan-bln';
+        const isYearField = this.id === 'qm-input-tahun' || this.id === 'qm-fix-spkl-tahun';
+        refreshGlobalData('', isMonthField ? this.value : '', isYearField ? this.value : '', this.id);
+      }
+    },
     { event: 'click', selector: '.qm-tab', handler: handleTabClick },
     { event: 'click', selector: '.qm-karyawan-detail-btn', handler() { CEK_NRP.toggleDetail(this.dataset.key || ''); } },
     { event: 'click', selector: '.qm-karyawan-edit-btn', handler() { CEK_NRP.toggleEditor(this.dataset.key || ''); } },
     { event: 'click', selector: '.qm-karyawan-save-btn', handler() { CEK_NRP.saveEditor(panelReaders.karyawanSave(this.dataset.key || '')); } },
     { event: 'click', selector: '.qm-fix-dot', handler: handleFixDotClick },
     { event: 'click', selector: '.qm-btn-fix-pill', handler: handleFixDotClick },
-    { event: 'click', selector: '#qm-btn-batch-check', handler() {
-      if (this.dataset.running) ANOMALI.cancelBatchCheck();
-      else ANOMALI.startBatchCheck();
-    } },
-    { event: 'mouseover', selector: '#qm-btn-batch-check', handler() {
-      if (!this.dataset.running) return;
-      this.classList.add('qm-btn-danger');
-      this.textContent = 'Batal';
-    } },
-    { event: 'mouseout', selector: '#qm-btn-batch-check', handler() {
-      if (!this.dataset.running) return;
-      this.classList.remove('qm-btn-danger');
-      this.textContent = 'Memproses...';
-    } },
+    {
+      event: 'click', selector: '#qm-btn-batch-check', handler() {
+        if (this.dataset.running) ANOMALI.cancelBatchCheck();
+        else ANOMALI.startBatchCheck();
+      }
+    },
+    {
+      event: 'mouseover', selector: '#qm-btn-batch-check', handler() {
+        if (!this.dataset.running) return;
+        this.classList.add('qm-btn-danger');
+        this.textContent = 'Batal';
+      }
+    },
+    {
+      event: 'mouseout', selector: '#qm-btn-batch-check', handler() {
+        if (!this.dataset.running) return;
+        this.classList.remove('qm-btn-danger');
+        this.textContent = 'Memproses...';
+      }
+    },
     { event: 'click', selector: '#qm-btn-export-batch', handler: ANOMALI.exportBatchResults },
     { event: 'click', selector: '.qm-batch-nrp-link', handler: ANOMALI.handleBatchNrpClick },
     { event: 'click', selector: '.qm-batch-fix-btn', handler: ANOMALI.handleBatchFixClick },
-    { event: 'click', selector: '.qm-btn-barcode-delete', handler: async function () {
-      const url = this.dataset.url;
-      if (!url || !uiAdapter.confirm('Hapus data barcode ini?')) return;
+    {
+      event: 'click', selector: '.qm-btn-barcode-delete', handler: async function () {
+        const url = this.dataset.url;
+        if (!url || !uiAdapter.confirm('Hapus data barcode ini?')) return;
 
-      const btn = this;
-      const originalText = btn.textContent;
-      btn.disabled = true;
-      btn.textContent = '...';
+        const btn = this;
+        const originalText = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = '...';
 
-      try {
-        await hrisFetch(url);
-        KEHADIRAN.checkByRange(panelReaders.attendanceCheck());
-      } catch (e) {
-        uiAdapter.alert('Gagal menghapus data: ' + e.message);
-        btn.disabled = false;
-        btn.textContent = originalText;
-      }
-    } },
-    { event: 'click', selector: '.qm-batch-group-header', handler() {
-      const rows = document.querySelectorAll(this.dataset.target);
-      const isExpanded = this.classList.contains('expanded');
-      this.classList.toggle('expanded');
-      rows.forEach(r => {
-        if (isExpanded) {
-          r.classList.add('qm-hidden');
-          r.classList.remove('qm-table-row', 'expanded');
-        } else if (r.classList.contains('qm-batch-seksi-header')) {
-          r.classList.remove('qm-hidden');
-          r.classList.add('qm-table-row');
-        } else {
-          r.classList.add('qm-hidden');
-          r.classList.remove('qm-table-row');
+        try {
+          await hrisFetch(url);
+          KEHADIRAN.checkByRange(panelReaders.attendanceCheck());
+        } catch (e) {
+          uiAdapter.alert('Gagal menghapus data: ' + e.message);
+          btn.disabled = false;
+          btn.textContent = originalText;
         }
-      });
-    } },
-    { event: 'click', selector: '.qm-batch-seksi-header', handler() {
-      const rows = document.querySelectorAll(this.dataset.target);
-      const isExpanded = this.classList.contains('expanded');
-      this.classList.toggle('expanded');
-      rows.forEach(r => {
-        r.classList.toggle('qm-hidden', isExpanded);
-        r.classList.toggle('qm-table-row', !isExpanded);
-      });
-    } },
-    { event: 'click', selector: '.qm-batch-date-header', handler(e) {
-      if (e.target.closest('.qm-batch-fix-btn')) return;
-      const content = this.nextElementSibling;
-      this.classList.toggle('expanded');
-      if (content) {
-        content.classList.toggle('qm-hidden');
-        content.classList.toggle('qm-visible-block');
       }
-    } },
-    { event: 'click', selector: '.qm-accordion-header', handler() {
-      this.classList.toggle('expanded');
-      const content = this.nextElementSibling;
-      if (content) content.classList.toggle('qm-content-open');
-    } },
-    { event: 'change', selector: '#qm-config-collapse-menu', handler() {
-      alwaysCollapseMenu = this.checked;
-      GM_setValue('qm_always_collapse', alwaysCollapseMenu);
-      if (alwaysCollapseMenu) enforceSidebar();
-      else document.body.classList.remove('enlarged');
-    } },
+    },
+    {
+      event: 'click', selector: '.qm-batch-group-header', handler() {
+        const rows = document.querySelectorAll(this.dataset.target);
+        const isExpanded = this.classList.contains('expanded');
+        this.classList.toggle('expanded');
+        rows.forEach(r => {
+          if (isExpanded) {
+            r.classList.add('qm-hidden');
+            r.classList.remove('qm-table-row', 'expanded');
+          } else if (r.classList.contains('qm-batch-seksi-header')) {
+            r.classList.remove('qm-hidden');
+            r.classList.add('qm-table-row');
+          } else {
+            r.classList.add('qm-hidden');
+            r.classList.remove('qm-table-row');
+          }
+        });
+      }
+    },
+    {
+      event: 'click', selector: '.qm-batch-seksi-header', handler() {
+        const rows = document.querySelectorAll(this.dataset.target);
+        const isExpanded = this.classList.contains('expanded');
+        this.classList.toggle('expanded');
+        rows.forEach(r => {
+          r.classList.toggle('qm-hidden', isExpanded);
+          r.classList.toggle('qm-table-row', !isExpanded);
+        });
+      }
+    },
+    {
+      event: 'click', selector: '.qm-batch-date-header', handler(e) {
+        if (e.target.closest('.qm-batch-fix-btn')) return;
+        const content = this.nextElementSibling;
+        this.classList.toggle('expanded');
+        if (content) {
+          content.classList.toggle('qm-hidden');
+          content.classList.toggle('qm-visible-block');
+        }
+      }
+    },
+    {
+      event: 'click', selector: '.qm-accordion-header', handler() {
+        this.classList.toggle('expanded');
+        const content = this.nextElementSibling;
+        if (content) content.classList.toggle('qm-content-open');
+      }
+    },
+    {
+      event: 'change', selector: '#qm-config-collapse-menu', handler() {
+        alwaysCollapseMenu = this.checked;
+        GM_setValue('qm_always_collapse', alwaysCollapseMenu);
+        if (alwaysCollapseMenu) enforceSidebar();
+        else document.body.classList.remove('enlarged');
+      }
+    },
     { event: 'click', selector: '#qm-btn-theme-light', handler() { UI.applyTheme('light'); } },
     { event: 'click', selector: '#qm-btn-theme-dark', handler() { UI.applyTheme('dark'); } },
     { event: 'click', selector: '#qm-btn-record-shortcut', handler: handleRecordShortcut },
@@ -9370,8 +10128,10 @@
     DISTRIBUSI.autoDistribusiSubsi();
     DISTRIBUSI.autoDistKK();
     SPKL.resumeBatch();
+    SPKL.resumePageLoop();
     KEHADIRAN.resumeManyNrpBatch();
     KEHADIRAN.resumeBulanBatch();
+    KEHADIRAN.resumePageLoop();
     DISTRIBUSI.initChangeEvents();
     DISTRIBUSI.checkJkRestoration();
     SPKL.autoFillEditPage();
