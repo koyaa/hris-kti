@@ -918,7 +918,7 @@
   }
 
   /** Run a task inside a hidden same-origin iframe with proper lifecycle management. */
-  function runInHiddenIframe(url, taskFn, onComplete, onError) {
+  function runInHiddenIframe(url, taskFn, onComplete, onError, timeoutMs = 300000) {
     const iframe = document.createElement('iframe');
     iframe.style.display = 'none';
     iframe.src = url;
@@ -932,8 +932,8 @@
 
     const timeoutId = setTimeout(() => {
       cleanup();
-      if (onError) onError(new Error('Koneksi halaman Timeout (15s)'));
-    }, 15000);
+      if (onError) onError(new Error(`Koneksi halaman Timeout (${Math.round(timeoutMs / 1000)}s)`));
+    }, timeoutMs);
 
     iframe.onload = () => {
       try {
@@ -2148,6 +2148,7 @@
     batchBulan: 0,
     batchTahun: 0,
     batchRunId: 0,
+    batchProcessId: null,
     batchActiveWorkers: 0,
     batchTotal: 0,
     batchAborted: false,
@@ -2159,6 +2160,12 @@
     activeCancelableFlow: false,
     cancelRequested: false,
     backgroundHeartbeatTimer: null,
+    processes: [],
+    processSeq: 0,
+    activeProcessId: null,
+    legacyProgressProcessId: null,
+    globalProgressProcessId: null,
+    processCancelHandlers: new Map(),
     karyawanQuery: '',
     karyawanResults: [],
     karyawanGroupsExpanded: { internal: false, outsource: false },
@@ -2836,6 +2843,17 @@
     state.batchAborted = false;
     state.batchRunId++;
     const batchRunId = state.batchRunId;
+    state.batchProcessId = ProcessRunner.current() || ProcessRunner.start('Proses Batch Cek NRP', {
+      message: `Memproses 0/${nrps.length} NRP`,
+      cancelable: true,
+      onCancel: handleBatchCancel
+    });
+    ProcessRunner.update(state.batchProcessId, {
+      label: 'Proses Batch Cek NRP',
+      message: `Memproses 0/${nrps.length} NRP`,
+      percent: 0,
+      cancelable: true
+    });
     const prof = startProfile('startBatchAnomalyCheck:init');
 
     state.batchQueue = nrps.map(nrp => ({ nrp, status: 'pending', msg: '' }));
@@ -2862,6 +2880,8 @@
 
     if (btnCheck) { btnCheck.dataset.running = 'true'; btnCheck.textContent = 'Memproses...'; }
     if (progress) progress.classList.remove('is-hidden');
+    const legacyProgress = uiAdapter.get('#qa-legacy-progress');
+    if (legacyProgress) legacyProgress.classList.remove('qm-hidden');
 
     // Render the initial pending/processing skeleton immediately
     _renderBatchResultsImmediate();
@@ -2892,6 +2912,10 @@
     state.batchAborted = true;
     state.batchRunId++;
     state.batchQueue = [];
+    if (state.batchProcessId) {
+      ProcessRunner.fail(state.batchProcessId, 'Dibatalkan');
+      state.batchProcessId = null;
+    }
     const btnCheck = uiAdapter.get('batchCheckButton');
     if (btnCheck) btnCheck.textContent = 'Membatalkan...';
     finishBatch(state.batchRunId);
@@ -2914,6 +2938,7 @@
     state.batchBulan = 0;
     state.batchTahun = 0;
     state.batchAborted = false;
+    state.batchProcessId = null;
 
     localStorage.removeItem('qm-batch-results');
     localStorage.removeItem('qm-batch-bulan');
@@ -2926,6 +2951,8 @@
 
     const progress = uiAdapter.get('batchProgress');
     if (progress) progress.classList.add('is-hidden');
+    const legacyProgress = uiAdapter.get('#qa-legacy-progress');
+    if (legacyProgress) legacyProgress.classList.add('qm-hidden');
 
     const btnExport = uiAdapter.get('batchExportButton');
     if (btnExport) {
@@ -3031,9 +3058,13 @@
       btnExport.classList.remove('qm-hidden');
       btnExport.disabled = false;
       btnExport.style.opacity = '1';
+      const legacyProgress = uiAdapter.get('#qa-legacy-progress');
+      if (legacyProgress) legacyProgress.classList.remove('qm-hidden');
     } else {
       if (progress) progress.classList.add('is-hidden');
       if (btnExport) btnExport.classList.add('qm-hidden');
+      const legacyProgress = uiAdapter.get('#qa-legacy-progress');
+      if (legacyProgress) legacyProgress.classList.add('qm-hidden');
     }
 
     if (statusBar) statusBar.textContent = 'Selesai: ' + finishedCount + '/' + state.batchTotal + ' NRP';
@@ -3043,6 +3074,10 @@
       UI.showResult('warning', 'Dibatalkan', 'Proses pemeriksaan batch dihentikan oleh pengguna.');
       pushLog('Proses batch dibatalkan oleh pengguna.', 'error');
     } else {
+      if (state.batchProcessId) {
+        ProcessRunner.complete(state.batchProcessId, 'Selesai: ' + finishedCount + '/' + state.batchTotal + ' NRP');
+        state.batchProcessId = null;
+      }
       pushLog(`Batch check selesai. Total ${finishedCount} NRP diproses.`);
       const container = uiAdapter.get('batchResults');
       const scrollContainer = container ? container.closest('.panel-state') : null;
@@ -3096,6 +3131,12 @@
     const statusEl = uiAdapter.get('batchStatus');
     if (barEl) barEl.style.width = pct + '%';
     if (statusEl) statusEl.textContent = 'Memproses... ' + finishedCount + '/' + state.batchTotal;
+    if (state.batchProcessId) {
+      ProcessRunner.update(state.batchProcessId, {
+        percent: pct,
+        message: 'Memproses... ' + finishedCount + '/' + state.batchTotal
+      });
+    }
   }
 
   let renderBatchTimeout;
@@ -5385,7 +5426,7 @@
     let successCount = 0;
 
     for (let i = 0; i < queue.length; i++) {
-      if (!uiAdapter.get('globalLoader')) {
+      if (state.cancelRequested) {
         Logger.info('User cancelled background queue');
         return;
       }
@@ -5427,14 +5468,12 @@
       return;
     }
 
-    createAutomationFlow('spkl-batch-single', window.location.href, { nrp, bulan, tahun });
-
     if (!/^\d{4}$|^\d{8}$/.test(nrp)) {
       UI.showResult('warning', 'NRP Tidak Valid', 'Gunakan 4 digit (Reguler) atau 8 digit (OS).');
       return;
     }
 
-    let targetUrl = spklCreateUrl(nrp);
+    const targetUrl = spklCreateUrl(nrp);
 
     // Save OT 7 details if any
     let jamAwal = "", jamAkhir = "", shiftVal = "";
@@ -5445,17 +5484,24 @@
     jamAkhir = elAkhir ? elAkhir.value : "";
     shiftVal = elShift ? elShift.value : "";
 
-    if (!window.location.href.includes(targetUrl)) {
-      sessionStorage.setItem("spkl_saved_data", JSON.stringify({ nrp, tahun, bulan, batchData, jamAwal, jamAkhir, shiftVal }));
-      UI.showResult('success', 'Mengalihkan...', 'Halaman akan berpindah. Proses dilanjutkan otomatis.');
-      setTimeout(() => { window.location.href = targetUrl; }, 1000);
-      return;
-    }
-
-    _continueSpklBatch(nrp, tahun, bulan, batchData, jamAwal, jamAkhir, shiftVal);
+    UI.showGlobalLoader('Proses SPKL Batch', 'Membuka form SPKL di background...', true);
+    await new Promise((resolve, reject) => {
+      runInHiddenIframe(
+        targetUrl,
+        async (doc, win) => {
+          await _continueSpklBatch(nrp, tahun, bulan, batchData, jamAwal, jamAkhir, shiftVal, doc, win);
+          return { done: false };
+        },
+        resolve,
+        reject
+      );
+    });
+    UI.setGlobalProgress(100, 'Selesai!');
+    UI.hideGlobalLoader(1000);
+    UI.showResult('success', 'SPKL Selesai', 'Batch SPKL berhasil diproses di background.');
   }
 
-  async function _continueSpklBatch(nrp, tahun, bulan, batchData, jamAwal, jamAkhir, shiftVal) {
+  async function _continueSpklBatch(nrp, tahun, bulan, batchData, jamAwal, jamAkhir, shiftVal, rootDoc = document, rootWin = window) {
     const taskList = [];
     const items = batchData.split(',');
     for (let item of items) {
@@ -5474,16 +5520,16 @@
       return;
     }
 
-    UI.showGlobalLoader('Proses SPKL Batch', 'Memulai...');
+    if (rootDoc === document) UI.showGlobalLoader('Proses SPKL Batch', 'Memulai...');
 
     // Hoist DOM lookups outside loop (constant per batch run)
-    const nrpInput = document.getElementById("nrp_input");
-    const tanggalInput = document.getElementById("tanggal");
-    const jenisOtSelect = document.getElementById("jenis_ot");
-    const btnTambah = document.getElementById("btnTambah");
-    const jamAwalEl = document.querySelector("#jam_awal_ot");
-    const jamAkhirEl = document.querySelector("#jam_akhir_ot");
-    const shiftEl = document.querySelector("#shift");
+    const nrpInput = rootDoc.getElementById("nrp_input");
+    const tanggalInput = rootDoc.getElementById("tanggal");
+    const jenisOtSelect = rootDoc.getElementById("jenis_ot");
+    const btnTambah = rootDoc.getElementById("btnTambah");
+    const jamAwalEl = rootDoc.querySelector("#jam_awal_ot");
+    const jamAkhirEl = rootDoc.querySelector("#jam_akhir_ot");
+    const shiftEl = rootDoc.querySelector("#shift");
 
     for (let i = 0; i < taskList.length; i++) {
       const task = taskList[i];
@@ -5497,8 +5543,8 @@
       setField(tanggalInput, fullDate, ['input', 'change']);
       if (jenisOtSelect) {
         setField(jenisOtSelect, task.jenisOt);
-        if (window.jQuery && window.jQuery(jenisOtSelect).selectpicker) {
-          window.jQuery(jenisOtSelect).selectpicker('refresh');
+        if (rootWin.jQuery && rootWin.jQuery(jenisOtSelect).selectpicker) {
+          rootWin.jQuery(jenisOtSelect).selectpicker('refresh');
         }
       }
 
@@ -5514,18 +5560,12 @@
     }
 
     UI.setGlobalProgress(95, 'Menyimpan...');
-    const btnSubmit = document.getElementById("submit");
+    const btnSubmit = rootDoc.getElementById("submit");
     if (btnSubmit) {
-      const activeFlow = getAutomationFlow();
-      if (activeFlow && activeFlow.type === 'spkl-batch-single') {
-        markAutomationFlowFinished(activeFlow.id);
-      } else {
-        sessionStorage.setItem(STORAGE.AUTO_FINISHED, 'true');
-      }
       await new Promise(r => setTimeout(r, TIMING.SPKL_SUBMIT_DELAY));
       btnSubmit.click();
       UI.setGlobalProgress(100, 'Selesai, Master!');
-      UI.hideGlobalLoader(2000);
+      if (rootDoc === document) UI.hideGlobalLoader(2000);
     }
   }
 
@@ -5632,8 +5672,6 @@
       return;
     }
 
-    createAutomationFlow('spkl-batch-many', window.location.href, { date: dateVal, jenisOt: jO });
-
     let jamAwal = "", jamAkhir = "", shiftVal = "";
     if (jO === "7") {
       const elAwal = document.getElementById("qm-fix-many-jam-awal");
@@ -5661,33 +5699,49 @@
       return;
     }
 
-    const state = {
+    const batchState = {
       date: dateVal,
       jenisOt: jO, jamAwal, jamAkhir, shiftVal,
       internal: int, outsource: out,
       indexes: { internal: 0, outsource: 0 }
     };
 
-    sessionStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    sessionStorage.removeItem(STORAGE_KEY);
+    UI.showGlobalLoader('Batch NRP', 'Membuka form SPKL di background...', true);
 
-    const current = spklAddPageKind();
-    const target = (int.length > 0 ? "internal" : "outsource");
+    const groups = [
+      { route: 'internal', list: int },
+      { route: 'outsource', list: out }
+    ].filter(group => group.list.length > 0);
 
-    if (current !== target) {
-      UI.showResult('success', 'Mengalihkan...', 'Pindah ke halaman input ' + target + '.');
-      setTimeout(() => { window.location.href = spklAddUrl(target); }, 1000);
-    } else {
-      _processManyNrpPage(target, state);
+    for (const group of groups) {
+      if (state.cancelRequested) throw new Error('Dibatalkan oleh pengguna');
+      batchState.indexes[group.route] = 0;
+      await new Promise((resolve, reject) => {
+        runInHiddenIframe(
+          spklAddUrl(group.route),
+          async (doc, win) => {
+            await _processManyNrpPage(group.route, batchState, doc, win, false);
+            return { done: false };
+          },
+          resolve,
+          reject
+        );
+      });
     }
+
+    UI.setGlobalProgress(100, 'Selesai!');
+    UI.hideGlobalLoader(1000);
+    UI.showResult('success', 'Batch SPKL Selesai', `Berhasil memproses ${nrps.length} NRP.`);
   }
 
-  async function _processManyNrpPage(route, s) {
+  async function _processManyNrpPage(route, s, rootDoc = document, rootWin = window, persistState = true) {
     const STORAGE_KEY = "hris_spkl_ot_runner_v1";
-    const tEl = document.querySelector("#tanggal");
-    const nEl = document.querySelector("#nrp_input");
-    const jEl = document.querySelector("#jenis_ot");
-    const tbBtn = document.querySelector("#btnTambah");
-    const sbBtn = document.querySelector("#submit");
+    const tEl = rootDoc.querySelector("#tanggal");
+    const nEl = rootDoc.querySelector("#nrp_input");
+    const jEl = rootDoc.querySelector("#jenis_ot");
+    const tbBtn = rootDoc.querySelector("#btnTambah");
+    const sbBtn = rootDoc.querySelector("#submit");
 
     if (!tEl || !nEl || !jEl || !tbBtn || !sbBtn) {
       alert("Elemen form tidak lengkap. Pastikan berada di halaman input yang benar.");
@@ -5698,6 +5752,7 @@
     let idx = s.indexes[route];
 
     for (; idx < list.length; idx++) {
+      if (state.cancelRequested) throw new Error('Dibatalkan oleh pengguna');
       const nrp = list[idx];
       UI.setGlobalProgress((idx / list.length) * 100, `Batch NRP: ${nrp}`);
 
@@ -5711,15 +5766,15 @@
       await new Promise(r => setTimeout(r, TIMING.SESSION_SAVE_DELAY3));
 
       if (s.jenisOt === "7") {
-        setVal(document.querySelector("#jam_awal_ot"), s.jamAwal);
-        setVal(document.querySelector("#jam_akhir_ot"), s.jamAkhir);
-        setVal(document.querySelector("#shift"), s.shiftVal);
+        setVal(rootDoc.querySelector("#jam_awal_ot"), s.jamAwal);
+        setVal(rootDoc.querySelector("#jam_akhir_ot"), s.jamAkhir);
+        setVal(rootDoc.querySelector("#shift"), s.shiftVal);
         await new Promise(r => setTimeout(r, TIMING.SESSION_SAVE_DELAY2));
       }
 
       tbBtn.click();
       s.indexes[route] = idx + 1;
-      sessionStorage.setItem(STORAGE_KEY, JSON.stringify(s));
+      if (persistState) sessionStorage.setItem(STORAGE_KEY, JSON.stringify(s));
       await new Promise(r => setTimeout(r, TIMING.SPKL_BATCH_NRP_CLICK_DELAY));
     }
 
@@ -5730,16 +5785,10 @@
     })(s);
 
     if (!nextR) {
-      sessionStorage.removeItem(STORAGE_KEY);
+      if (persistState) sessionStorage.removeItem(STORAGE_KEY);
       UI.setGlobalProgress(100, 'Selesai!');
-      const activeFlow = getAutomationFlow();
-      if (activeFlow && activeFlow.type === 'spkl-batch-many') {
-        markAutomationFlowFinished(activeFlow.id);
-      } else {
-        sessionStorage.setItem(STORAGE.AUTO_FINISHED, 'true');
-      }
     } else {
-      sessionStorage.setItem(STORAGE_KEY, JSON.stringify(s));
+      if (persistState) sessionStorage.setItem(STORAGE_KEY, JSON.stringify(s));
     }
     sbBtn.click();
   }
@@ -6644,9 +6693,108 @@
 .tag-blue { background: var(--color-tag-blue-bg); color: var(--color-tag-blue-text); }
 
 .menu-footer {
-  justify-content: space-between;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
+  max-height: 190px;
+  overflow-y: auto;
   border-top: 1px solid var(--color-border);
   background: rgba(255, 255, 255, 0.4);
+}
+
+.process-list {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.process-row {
+  width: 100%;
+  min-height: 42px;
+  display: grid;
+  grid-template-columns: minmax(110px, 0.8fr) minmax(160px, 1.4fr) 42px auto;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  background: var(--color-surface-strong);
+  box-sizing: border-box;
+}
+
+.process-row.is-complete { border-color: rgba(76, 175, 80, 0.35); }
+.process-row.is-error { border-color: rgba(211, 98, 88, 0.45); }
+.process-row.is-cancelled { opacity: 0.75; }
+
+.process-label {
+  min-width: 0;
+  font-size: 0.78rem;
+  font-weight: 800;
+  color: var(--color-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.process-track {
+  height: 22px;
+  position: relative;
+  overflow: hidden;
+  border-radius: 7px;
+  border: 1px solid var(--color-border);
+  background: var(--color-surface-soft);
+}
+
+.process-fill {
+  height: 100%;
+  width: 0%;
+  background: var(--color-accent-strong);
+  transition: width 0.2s ease-out;
+}
+
+.process-row.is-error .process-fill { background: var(--color-tag-red-text); }
+.process-row.is-complete .process-fill { background: #7eb77f; }
+
+.process-message {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 8px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--color-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-shadow: 0 0 4px rgba(255,255,255,0.55);
+}
+
+.process-percent {
+  font-size: 0.72rem;
+  font-weight: 800;
+  color: var(--color-text-muted);
+  text-align: right;
+}
+
+.process-cancel {
+  height: 26px;
+  min-width: 56px;
+  padding: 0 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 7px;
+  background: var(--color-tag-red-bg);
+  color: var(--color-tag-red-text);
+  font-size: 0.72rem;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.process-cancel:disabled {
+  opacity: 0.55;
+  cursor: default;
 }
 
 .progress-bar-container {
@@ -8093,7 +8241,8 @@
       </section>
 
       <footer id="qa-footer" class="menu-footer is-hidden">
-        <div class="progress-bar-container">
+        <div id="qa-process-list" class="process-list"></div>
+        <div id="qa-legacy-progress" class="progress-bar-container qm-hidden">
           <div class="progress-bar-track">
             <div id="qa-progress-fill" class="progress-bar-fill"></div>
             <div id="qa-progress-status" class="progress-status-text">Working...</div>
@@ -8157,6 +8306,7 @@
       detailTitle: document.querySelector('#qa-detail-title'),
       backBtn: document.querySelector('#qa-back-btn'),
       footer: document.querySelector('#qa-footer'),
+      processList: document.querySelector('#qa-process-list'),
       progressFill: document.querySelector('#qa-progress-fill'),
       progressStatus: document.querySelector('#qa-progress-status'),
       searchIcon: document.querySelector('.search-icon')
@@ -8583,21 +8733,7 @@
       if (mSelect && !mSelect.children.length) mSelect.innerHTML = monthOptions;
       if (ySelect && !ySelect.children.length) ySelect.innerHTML = yearOptions;
     },
-    startProgress: (label, duration = 3000) => {
-      els.footer.classList.remove('is-hidden');
-      if (els.progressStatus) els.progressStatus.textContent = label + '...';
-      let p = 0;
-      const step = 100 / (duration / 100);
-      const iv = setInterval(() => {
-        p += step;
-        if (p > 100) p = 100;
-        if (els.progressFill) els.progressFill.style.width = p + '%';
-        if (p >= 100) {
-          clearInterval(iv);
-          setTimeout(() => els.footer.classList.add('is-hidden'), 600);
-        }
-      }, 100);
-    }
+    startProgress: (label, duration = 3000) => UI.startProgress(label, duration)
   };
 
 
@@ -8683,6 +8819,7 @@
     anomalyList: '#qm-anomali-list',
     batchProgressBar: '#qa-progress-fill',
     batchStatus: '#qa-progress-status',
+    processList: '#qa-process-list',
     batchResults: '#qm-batch-results',
     batchProgress: '#qa-footer',
     batchCheckButton: '#qm-btn-batch-check',
@@ -8828,6 +8965,190 @@
     }
   };
 
+  const ProcessRunner = {
+    activeContextId: null,
+    cleanupDelay: 4500,
+
+    start(label, options = {}) {
+      const id = options.id || `proc-${Date.now()}-${++state.processSeq}`;
+      const existing = state.processes.find(p => p.id === id);
+      if (existing) return existing.id;
+      if (options.resetCancel !== false) {
+        state.cancelRequested = false;
+        state.hadirCancelRequested = false;
+      }
+
+      const process = {
+        id,
+        label: label || 'Process',
+        message: options.message || 'Memulai...',
+        percent: Number.isFinite(options.percent) ? options.percent : 0,
+        status: 'running',
+        capability: options.capability || 'background',
+        cancelable: !!options.cancelable,
+        startedAt: Date.now(),
+        completedAt: null
+      };
+      state.processes.push(process);
+      state.activeProcessId = id;
+      if (typeof options.onCancel === 'function') {
+        state.processCancelHandlers.set(id, options.onCancel);
+      }
+      this.render();
+      return id;
+    },
+
+    get(id) {
+      return state.processes.find(p => p.id === id) || null;
+    },
+
+    current() {
+      return this.activeContextId || state.activeProcessId || state.legacyProgressProcessId || state.globalProgressProcessId || null;
+    },
+
+    update(id, patch = {}) {
+      const process = this.get(id);
+      if (!process) return null;
+      if (patch.label !== undefined) process.label = patch.label;
+      if (patch.message !== undefined) process.message = patch.message;
+      if (patch.percent !== undefined && Number.isFinite(Number(patch.percent))) {
+        process.percent = Math.max(0, Math.min(100, Number(patch.percent)));
+      }
+      if (patch.status !== undefined) process.status = patch.status;
+      if (patch.cancelable !== undefined) process.cancelable = !!patch.cancelable;
+      this.render();
+      return process;
+    },
+
+    complete(id, message = 'Selesai') {
+      const process = this.update(id, { percent: 100, status: 'complete', message });
+      if (process) {
+        process.completedAt = Date.now();
+        state.processCancelHandlers.delete(id);
+        this.scheduleCleanup(id);
+      }
+    },
+
+    fail(id, message = 'Gagal') {
+      const process = this.update(id, { status: 'error', message });
+      if (process) {
+        process.completedAt = Date.now();
+        state.processCancelHandlers.delete(id);
+        this.scheduleCleanup(id, this.cleanupDelay * 2);
+      }
+    },
+
+    cancel(id) {
+      const process = this.get(id);
+      if (!process || process.status !== 'running') return;
+      const handler = state.processCancelHandlers.get(id);
+      if (handler) handler();
+      this.update(id, { status: 'cancelled', message: 'Membatalkan...', cancelable: false });
+    },
+
+    scheduleCleanup(id, delay = this.cleanupDelay) {
+      setTimeout(() => {
+        state.processes = state.processes.filter(p => p.id !== id || p.status === 'running');
+        if (state.activeProcessId === id) state.activeProcessId = state.processes.find(p => p.status === 'running')?.id || null;
+        if (state.legacyProgressProcessId === id) state.legacyProgressProcessId = null;
+        if (state.globalProgressProcessId === id) state.globalProgressProcessId = null;
+        this.render();
+      }, delay);
+    },
+
+    render() {
+      const footer = uiAdapter.get('batchProgress');
+      const list = uiAdapter.get('processList');
+      if (!footer || !list) return;
+
+      const visible = state.processes
+        .slice()
+        .sort((a, b) => a.startedAt - b.startedAt)
+        .filter(p => p.status === 'running' || Date.now() - (p.completedAt || Date.now()) < this.cleanupDelay * 2);
+
+      if (!visible.length) {
+        renderSafe(list, '');
+        const exportBtn = uiAdapter.get('batchExportButton');
+        const legacyProgress = uiAdapter.get('#qa-legacy-progress');
+        const keepFooter = exportBtn && !exportBtn.classList.contains('qm-hidden');
+        if (legacyProgress) legacyProgress.classList.toggle('qm-hidden', !keepFooter);
+        footer.classList.toggle('is-hidden', !keepFooter);
+        return;
+      }
+
+      footer.classList.remove('is-hidden');
+      const html = visible.map(p => {
+        const statusClass = p.status === 'complete' ? 'is-complete' : p.status === 'error' ? 'is-error' : p.status === 'cancelled' ? 'is-cancelled' : 'is-running';
+        const cancelHtml = p.cancelable && p.status === 'running'
+          ? `<button type="button" class="process-cancel" data-process-cancel="${escapeHtml(p.id)}">Batal</button>`
+          : '';
+        return `
+          <div class="process-row ${statusClass}" data-process-id="${escapeHtml(p.id)}">
+            <div class="process-label" title="${escapeHtml(p.label)}">${escapeHtml(p.label)}</div>
+            <div class="process-track" title="Klik untuk lihat detail log">
+              <div class="process-fill" style="width:${Math.round(p.percent)}%"></div>
+              <div class="process-message">${escapeHtml(p.message || '')}</div>
+            </div>
+            <div class="process-percent">${Math.round(p.percent)}%</div>
+            ${cancelHtml}
+          </div>
+        `;
+      }).join('');
+      renderSafe(list, html);
+    },
+
+    track(label, handler, options = {}) {
+      return function trackedHandler(...args) {
+        const id = ProcessRunner.start(label, {
+          ...options,
+          message: options.message || 'Memulai...',
+          onCancel: options.onCancel || (() => {
+            state.cancelRequested = true;
+            state.hadirCancelRequested = true;
+            if (state.activeAbortController) state.activeAbortController.abort();
+          })
+        });
+        const previousContext = ProcessRunner.activeContextId;
+        ProcessRunner.activeContextId = id;
+        try {
+          const result = handler.apply(this, args);
+          if (result && typeof result.then === 'function') {
+            return result
+              .then(value => {
+                const process = ProcessRunner.get(id);
+                if (process && process.status === 'running' && state.legacyProgressProcessId !== id && state.globalProgressProcessId !== id) {
+                  ProcessRunner.complete(id);
+                }
+                return value;
+              })
+              .catch(err => {
+                ProcessRunner.fail(id, err?.message || 'Gagal');
+                throw err;
+              })
+              .finally(() => {
+                ProcessRunner.activeContextId = previousContext;
+              });
+          }
+
+          setTimeout(() => {
+            const process = ProcessRunner.get(id);
+            if (process && process.status === 'running' && state.legacyProgressProcessId !== id && state.globalProgressProcessId !== id) {
+              ProcessRunner.complete(id);
+            }
+          }, options.instantDelay || 900);
+          return result;
+        } catch (err) {
+          ProcessRunner.fail(id, err?.message || 'Gagal');
+          throw err;
+        } finally {
+          if (!handler || !(handler.constructor && handler.constructor.name === 'AsyncFunction')) {
+            ProcessRunner.activeContextId = previousContext;
+          }
+        }
+      };
+    }
+  };
+
   const UI = {
     resultTimeout: null,
 
@@ -8895,68 +9216,60 @@
     },
 
     showGlobalLoader(title, initialMsg, allowCancel = false) {
-      const existing = uiAdapter.get('globalLoader');
-      if (existing) existing.remove();
+      const processId = ProcessRunner.activeContextId || state.globalProgressProcessId || ProcessRunner.start(title, {
+        message: initialMsg,
+        cancelable: allowCancel,
+        onCancel: () => {
+          state.cancelRequested = true;
+          if (state.activeAbortController) state.activeAbortController.abort();
+        }
+      });
+      state.globalProgressProcessId = processId;
+      state.activeProcessId = processId;
+      ProcessRunner.update(processId, {
+        label: title,
+        message: initialMsg,
+        cancelable: allowCancel
+      });
 
       state.batchLogs = []; // Clear logs on new process
       const logBody = uiAdapter.get('logBody');
       if (logBody) renderSafe(logBody, '');
 
-      const cancelBtnHtml = allowCancel
-        ? `<div class="qm-loader-footer">
-             <button id="qm-global-cancel-btn" class="qm-btn" style="width: 100%; padding: 6px 12px; font-size: 11px; height: auto;">Batalkan Proses</button>
-           </div>`
-        : '';
-
-      document.body.insertAdjacentHTML('beforeend', `
-        <div id="qm-global-loader" class="${state.theme === 'dark' ? 'qm-dark' : ''}">
-          <div class="qm-loader-header">
-            <div class="qm-spinner qm-spinner-dark qm-loader-spinner-size" style="width: 24px; height: 24px; border-width: 3px;"></div>
-            <div class="qm-loader-body">
-              <div class="qm-loader-title">${escapeHtml(title)}</div>
-              <div id="qm-global-loader-text" class="qm-loader-text">${escapeHtml(initialMsg)}</div>
-            </div>
-          </div>
-          <div class="qm-progress-container" title="Klik untuk lihat detail log">
-            <div id="qm-global-loader-bar" class="qm-progress-bar"></div>
-          </div>
-          ${cancelBtnHtml}
-        </div>
-      `);
-
       pushLog(`Memulai proses: ${title} - ${initialMsg}`);
     },
 
     setGlobalProgress(pct, msg, silent = false) {
+      const processId = ProcessRunner.activeContextId || state.globalProgressProcessId || ProcessRunner.current() || ProcessRunner.start('Process', { message: msg || 'Memproses...' });
       if (msg) {
-        const textEl = uiAdapter.get('globalLoaderText');
-        if (textEl) textEl.textContent = msg;
+        ProcessRunner.update(processId, { message: msg, percent: pct });
         if (!silent) pushLog(msg);
+      } else {
+        ProcessRunner.update(processId, { percent: pct });
       }
-      const barEl = uiAdapter.get('globalLoaderBar');
-      if (barEl) barEl.style.width = pct + '%';
     },
 
     hideGlobalLoader(delay = 800) {
+      const processId = ProcessRunner.activeContextId || state.globalProgressProcessId;
       setTimeout(() => {
-        const loader = uiAdapter.get('globalLoader');
-        if (loader) {
-          loader.classList.add('qm-loader-hiding');
-          setTimeout(() => loader.remove(), 300);
-        }
+        if (processId) ProcessRunner.complete(processId);
+        if (state.globalProgressProcessId === processId) state.globalProgressProcessId = null;
       }, delay);
     },
 
     startProgress(label, total = 0) {
-      if (els.footer) {
-        els.footer.classList.remove('is-hidden');
-      }
-      if (els.progressStatus) {
-        els.progressStatus.textContent = label;
-      }
-      if (els.progressFill) {
-        els.progressFill.style.width = '0%';
-      }
+      const processId = ProcessRunner.activeContextId || ProcessRunner.start(label, {
+        message: label,
+        cancelable: true,
+        onCancel: () => {
+          state.hadirCancelRequested = true;
+          state.cancelRequested = true;
+          if (state.activeAbortController) state.activeAbortController.abort();
+        }
+      });
+      state.legacyProgressProcessId = processId;
+      state.activeProcessId = processId;
+      ProcessRunner.update(processId, { label, message: label, percent: 0 });
 
       if (total > 0 && typeof total === 'number' && total < 100) {
         // total is item count, we will use updateProgress to manually drive it
@@ -8969,12 +9282,10 @@
         this._progressInterval = setInterval(() => {
           p += step;
           if (p > 100) p = 100;
-          if (els.progressFill) els.progressFill.style.width = p + '%';
+          ProcessRunner.update(processId, { percent: p });
           if (p >= 100) {
             clearInterval(this._progressInterval);
-            setTimeout(() => {
-              if (els.footer) els.footer.classList.add('is-hidden');
-            }, 600);
+            ProcessRunner.complete(processId, label);
           }
         }, 100);
       }
@@ -8983,22 +9294,15 @@
     updateProgress(current, total, statusText) {
       if (this._progressInterval) clearInterval(this._progressInterval);
       const pct = total > 0 ? Math.round((current / total) * 100) : 0;
-      if (els.progressFill) {
-        els.progressFill.style.width = pct + '%';
-      }
-      if (els.progressStatus) {
-        els.progressStatus.textContent = statusText || `Memproses... ${current}/${total}`;
-      }
+      const processId = ProcessRunner.activeContextId || state.legacyProgressProcessId || ProcessRunner.current() || ProcessRunner.start('Process', { message: statusText || 'Memproses...' });
+      ProcessRunner.update(processId, { percent: pct, message: statusText || `Memproses... ${current}/${total}` });
     },
 
     endProgress() {
       if (this._progressInterval) clearInterval(this._progressInterval);
-      if (els.progressFill) {
-        els.progressFill.style.width = '100%';
-      }
-      setTimeout(() => {
-        if (els.footer) els.footer.classList.add('is-hidden');
-      }, 600);
+      const processId = ProcessRunner.activeContextId || state.legacyProgressProcessId;
+      if (processId) ProcessRunner.complete(processId);
+      if (state.legacyProgressProcessId === processId) state.legacyProgressProcessId = null;
     },
 
     renderHistory() {
@@ -9109,9 +9413,9 @@
    * ============================================================ */
 
   function initJkChangeEvents() {
-    on('click', '#qm-btn-KK-update', function () {
+    on('click', '#qm-btn-KK-update', trackedAction('Update Kalender Kerja', function () {
       handleUpdateKKMaster(panelReaders.distribusiKk());
-    });
+    }, { cancelable: true }));
 
     let globalDebounce;
     on('input', '#qm-input-distribusi-nrp, #qm-dist-KK-nrp, #qm-input-distribusi-subsi-nrp, #qm-input-nrp', function () {
@@ -9529,7 +9833,7 @@
     const nrp = String(input?.nrp || '').trim();
     if (!nrp) { uiAdapter.alert('Harap isi NRP.'); return; }
 
-    const useDistribusi = !!input?.useDistribusi;
+    const useDistribusi = true;
     const jk = String(input?.jk || '').trim();
     const date = String(input?.date || '').trim();
     const dateEnd = String(input?.dateEnd || '').trim();
@@ -9788,7 +10092,7 @@
     const nrp = String(input?.nrp || '').trim();
     if (!nrp) { uiAdapter.alert('Gagal mendeteksi NRP. Pastikan Anda berada di halaman profile atau tabel kehadiran.'); return; }
 
-    const useDistribusi = !!input?.useDistribusi;
+    const useDistribusi = true;
     const jk = String(input?.jk || '').trim();
     const tglAwal = String(input?.tglAwal || '').trim();
     const tglAkhir = String(input?.tglAkhir || '').trim();
@@ -11451,18 +11755,22 @@
     state.activeTab = pane;
   }
 
+  function trackedAction(label, handler, options = {}) {
+    return ProcessRunner.track(label, handler, options);
+  }
+
   const UI_EVENT_BINDINGS = Object.freeze([
     { event: 'click', selector: '#qm-fab', handler: togglePanel },
     { event: 'click', selector: '#qm-btn-close-header', handler: closePanel },
-    { event: 'click', selector: '#qm-btn-check', handler() { CEK_NRP.runLookup(panelReaders.lookup()); } },
-    { event: 'click', selector: '#qm-btn-karyawan-search', handler() { CEK_NRP.searchByQuery(panelReaders.karyawanSearch()); } },
-    { event: 'click', selector: '#qm-btn-spkl-batch', handler: SPKL.startBatchProcess },
-    { event: 'click', selector: '#qm-btn-spkl-many-nrp', handler: SPKL.startManyNrpBatch },
-    { event: 'click', selector: '#qm-btn-spkl-page-cek', handler() { SPKL.checkByDateRange(panelReaders.spklCheck()); } },
-    { event: 'click', selector: '#qm-btn-spkl-online-cek', handler() { SPKL.openOnlineForDate(panelReaders.spklOnline()); } },
-    { event: 'click', selector: '#qm-btn-hadir-check', handler() { KEHADIRAN.checkByRange(panelReaders.attendanceCheck()); } },
+    { event: 'click', selector: '#qm-btn-check', handler: trackedAction('Cek NRP', function () { CEK_NRP.runLookup(panelReaders.lookup()); }) },
+    { event: 'click', selector: '#qm-btn-karyawan-search', handler: trackedAction('Cari Karyawan', function () { CEK_NRP.searchByQuery(panelReaders.karyawanSearch()); }) },
+    { event: 'click', selector: '#qm-btn-spkl-batch', handler: trackedAction('SPKL Per NRP', SPKL.startBatchProcess, { cancelable: true }) },
+    { event: 'click', selector: '#qm-btn-spkl-many-nrp', handler: trackedAction('SPKL Banyak NRP', SPKL.startManyNrpBatch, { cancelable: true }) },
+    { event: 'click', selector: '#qm-btn-spkl-page-cek', handler: trackedAction('Cek SPKL', function () { SPKL.checkByDateRange(panelReaders.spklCheck()); }) },
+    { event: 'click', selector: '#qm-btn-spkl-online-cek', handler: trackedAction('Cek SPKL Online', function () { SPKL.openOnlineForDate(panelReaders.spklOnline()); }) },
+    { event: 'click', selector: '#qm-btn-hadir-check', handler: trackedAction('Check Kehadiran', function () { KEHADIRAN.checkByRange(panelReaders.attendanceCheck()); }) },
     {
-      event: 'click', selector: '#qm-btn-hadir-reset', handler() {
+      event: 'click', selector: '#qm-btn-hadir-reset', handler: trackedAction('Reset Kehadiran', function () {
         state.attendanceCheck = createEmptyAttendanceCheck();
         const nrpInput = document.getElementById('qm-input-hadir-check-nrp');
         const startInput = document.getElementById('qm-input-hadir-check-start-date');
@@ -11472,16 +11780,16 @@
         if (endInput) endInput.value = '';
         const resultDiv = document.getElementById('qm-hadir-check-result');
         if (resultDiv) resultDiv.innerHTML = '';
-      }
+      })
     },
-    { event: 'click', selector: '#qm-btn-hadir-proses', handler() { KEHADIRAN.submitSingle(panelReaders.attendanceInput()); } },
-    { event: 'click', selector: '#qm-btn-hadir-bulan-proses', handler: KEHADIRAN.startBulanBatch },
-    { event: 'click', selector: '#qm-btn-hadir-many-proses', handler: KEHADIRAN.startManyNrpBatch },
-    { event: 'click', selector: '#qm-btn-distribusi-proses', handler() { DISTRIBUSI.submitJkChange(panelReaders.distribusiJk()); } },
-    { event: 'click', selector: '#qm-btn-distribusi-subsi-proses', handler() { DISTRIBUSI.submitSubsi(panelReaders.distribusiSubsi()); } },
-    { event: 'click', selector: '#qm-btn-show-logs', handler: handleShowLogs },
-    { event: 'click', selector: '#qm-btn-clear-logs', handler: handleClearLogs },
-    { event: 'click', selector: '#qm-btn-export-logs', handler: handleExportLogs },
+    { event: 'click', selector: '#qm-btn-hadir-proses', handler: trackedAction('Input Kehadiran', function () { KEHADIRAN.submitSingle(panelReaders.attendanceInput()); }, { cancelable: true }) },
+    { event: 'click', selector: '#qm-btn-hadir-bulan-proses', handler: trackedAction('Automasi Kehadiran Bulanan', KEHADIRAN.startBulanBatch, { cancelable: true }) },
+    { event: 'click', selector: '#qm-btn-hadir-many-proses', handler: trackedAction('Kehadiran Banyak NRP', KEHADIRAN.startManyNrpBatch, { cancelable: true }) },
+    { event: 'click', selector: '#qm-btn-distribusi-proses', handler: trackedAction('Distribusi Per NRP', function () { DISTRIBUSI.submitJkChange(panelReaders.distribusiJk()); }, { cancelable: true }) },
+    { event: 'click', selector: '#qm-btn-distribusi-subsi-proses', handler: trackedAction('Distribusi Per Subsi', function () { DISTRIBUSI.submitSubsi(panelReaders.distribusiSubsi()); }, { cancelable: true }) },
+    { event: 'click', selector: '#qm-btn-show-logs', handler: trackedAction('Lihat Log Aktivitas', handleShowLogs) },
+    { event: 'click', selector: '#qm-btn-clear-logs', handler: trackedAction('Clear Logs', handleClearLogs) },
+    { event: 'click', selector: '#qm-btn-export-logs', handler: trackedAction('Export Logs', handleExportLogs) },
     { event: 'change', selector: '#qm-config-debug-mode', handler: handleDebugToggle },
     {
       event: 'click', selector: '#qm-btn-hadir-cancel', handler() {
@@ -11510,7 +11818,14 @@
       }
     },
     {
-      event: 'click', selector: '.qm-progress-container', handler() {
+      event: 'click', selector: '.process-cancel', handler(e) {
+        e.stopPropagation();
+        const id = this.getAttribute('data-process-cancel');
+        if (id) ProcessRunner.cancel(id);
+      }
+    },
+    {
+      event: 'click', selector: '.qm-progress-container, .process-track', handler() {
         activatePane('config');
         const container = uiAdapter.get('logContainer');
         const btn = uiAdapter.get('showLogsButton');
@@ -11608,8 +11923,8 @@
         KEHADIRAN.closeBatchEdit();
       }
     },
-    { event: 'click', selector: '#qm-btn-spkl-edit-save', handler() { SPKL.processBatchEdit(panelReaders.spklInlineEdit()); } },
-    { event: 'click', selector: '#qm-btn-hadir-edit-save', handler() { KEHADIRAN.processBatchEdit(panelReaders.hadirInlineEdit()); } },
+    { event: 'click', selector: '#qm-btn-spkl-edit-save', handler: trackedAction('Simpan Edit SPKL', function () { SPKL.processBatchEdit(panelReaders.spklInlineEdit()); }, { cancelable: true }) },
+    { event: 'click', selector: '#qm-btn-hadir-edit-save', handler: trackedAction('Simpan Edit Kehadiran', function () { KEHADIRAN.processBatchEdit(panelReaders.hadirInlineEdit()); }, { cancelable: true }) },
     {
       event: 'change', selector: '#qm-hadir-batch-cb-all', handler() {
         const isChecked = this.checked;
@@ -11663,7 +11978,7 @@
     { event: 'click', selector: '.qm-tab', handler: handleTabClick },
     { event: 'click', selector: '.qm-karyawan-detail-btn', handler() { CEK_NRP.toggleDetail(this.dataset.key || ''); } },
     { event: 'click', selector: '.qm-karyawan-edit-btn', handler() { CEK_NRP.toggleEditor(this.dataset.key || ''); } },
-    { event: 'click', selector: '.qm-karyawan-save-btn', handler() { CEK_NRP.saveEditor(panelReaders.karyawanSave(this.dataset.key || '')); } },
+    { event: 'click', selector: '.qm-karyawan-save-btn', handler: trackedAction('Simpan Data Karyawan', function () { CEK_NRP.saveEditor(panelReaders.karyawanSave(this.dataset.key || '')); }, { cancelable: true }) },
     {
       event: 'click', selector: '.qm-group-header-card', handler() {
         const group = this.dataset.group;
@@ -11675,7 +11990,7 @@
       }
     },
     {
-      event: 'click', selector: '#qm-btn-karyawan-reset', handler() {
+      event: 'click', selector: '#qm-btn-karyawan-reset', handler: trackedAction('Reset Cari Karyawan', function () {
         state.karyawanResults = [];
         state.karyawanQuery = '';
         state.karyawanActivePanel = null;
@@ -11683,7 +11998,7 @@
         const input = document.getElementById('qm-input-karyawan-search');
         if (input) input.value = '';
         renderKaryawanResults();
-      }
+      })
     },
     {
       event: 'click', selector: '.qm-directory-item', handler(e) {
@@ -11707,13 +12022,13 @@
         }
       }
     },
-    { event: 'click', selector: '.qm-fix-dot', handler: handleFixDotClick },
-    { event: 'click', selector: '.qm-btn-fix-pill', handler: handleFixDotClick },
+    { event: 'click', selector: '.qm-fix-dot', handler: trackedAction('Fix Anomali', handleFixDotClick, { cancelable: true }) },
+    { event: 'click', selector: '.qm-btn-fix-pill', handler: trackedAction('Fix SPKL', handleFixDotClick, { cancelable: true }) },
     {
-      event: 'click', selector: '#qm-btn-batch-check', handler() {
+      event: 'click', selector: '#qm-btn-batch-check', handler: trackedAction('Proses Batch Cek NRP', function () {
         if (this.dataset.running) ANOMALI.cancelBatchCheck();
         else ANOMALI.startBatchCheck();
-      }
+      }, { cancelable: true })
     },
     {
       event: 'mouseover', selector: '#qm-btn-batch-check', handler() {
@@ -11729,12 +12044,12 @@
         this.textContent = 'Memproses...';
       }
     },
-    { event: 'click', selector: '#qm-btn-batch-clear', handler: ANOMALI.clearBatchResults },
-    { event: 'click', selector: '#qm-btn-export-batch', handler: ANOMALI.exportBatchResults },
-    { event: 'click', selector: '.qm-batch-nrp-link', handler: ANOMALI.handleBatchNrpClick },
-    { event: 'click', selector: '.qm-batch-fix-btn', handler: ANOMALI.handleBatchFixClick },
+    { event: 'click', selector: '#qm-btn-batch-clear', handler: trackedAction('Hapus Batch', ANOMALI.clearBatchResults) },
+    { event: 'click', selector: '#qm-btn-export-batch', handler: trackedAction('Export Batch', ANOMALI.exportBatchResults) },
+    { event: 'click', selector: '.qm-batch-nrp-link', handler: trackedAction('Buka NRP Batch', ANOMALI.handleBatchNrpClick) },
+    { event: 'click', selector: '.qm-batch-fix-btn', handler: trackedAction('Fix Batch', ANOMALI.handleBatchFixClick, { cancelable: true }) },
     {
-      event: 'click', selector: '.qm-btn-barcode-delete', handler: async function () {
+      event: 'click', selector: '.qm-btn-barcode-delete', handler: trackedAction('Hapus Barcode', async function () {
         const url = this.dataset.url;
         if (!url || !uiAdapter.confirm('Hapus data barcode ini?')) return;
 
@@ -11751,7 +12066,7 @@
           btn.disabled = false;
           btn.textContent = originalText;
         }
-      }
+      }, { cancelable: true })
     },
     {
       event: 'click', selector: '.qm-batch-group-header', handler() {
@@ -11837,9 +12152,9 @@
         else document.body.classList.remove('enlarged');
       }
     },
-    { event: 'click', selector: '#qm-btn-theme-light', handler() { UI.applyTheme('light'); } },
-    { event: 'click', selector: '#qm-btn-theme-dark', handler() { UI.applyTheme('dark'); } },
-    { event: 'click', selector: '#qm-btn-record-shortcut', handler: handleRecordShortcut },
+    { event: 'click', selector: '#qm-btn-theme-light', handler: trackedAction('Tema Terang', function () { UI.applyTheme('light'); }) },
+    { event: 'click', selector: '#qm-btn-theme-dark', handler: trackedAction('Tema Gelap', function () { UI.applyTheme('dark'); }) },
+    { event: 'click', selector: '#qm-btn-record-shortcut', handler: trackedAction('Ubah Shortcut', handleRecordShortcut) },
     { event: 'click', selector: '.button-menu-mobile, .open-left, #sidebar-menu', handler() { manualSidebarOverride = true; } }
   ]);
 
