@@ -9,13 +9,13 @@
 // @grant        GM_addStyle
 // @grant        GM_getValue
 // @grant        GM_setValue
-// @run-at       document-idle
+// @run-at       document-end
 // @noframes
 // ==/UserScript==
 
 (function () {
   'use strict';
-
+  if (window.self !== window.top) return;
 
   /* ============================================================
    * 0. CONSTANTS
@@ -177,8 +177,8 @@
   /** URL route constants. */
   const ROUTES = Object.freeze({
     BASE: 'https://hris.kti.co.id',
-    KARYAWAN_SEARCH: (nrp) => `https://hris.kti.co.id/karyawan?kode_bagian=&kode_seksi=&kode_group=&status_karyawan=A&s=${nrp}`,
-    KARYAWANOS_SEARCH: (nrp) => `https://hris.kti.co.id/karyawanoutsource?kode_bagian=&kode_seksi=&kode_group=&status_karyawan=A&s=${nrp}`,
+    KARYAWAN_SEARCH: (nrp) => `https://hris.kti.co.id/karyawan?kode_bagian=&kode_seksi=&kode_group=&status_karyawan=S&s=${nrp}`,
+    KARYAWANOS_SEARCH: (nrp) => `https://hris.kti.co.id/karyawanoutsource?kode_bagian=&kode_seksi=&kode_group=&status_karyawan=S&s=${nrp}`,
     KARYAWAN_GENERAL: (id) => `https://hris.kti.co.id/karyawan/general/${id}`,
     KARYAWAN_PROFILE: (id) => `https://hris.kti.co.id/karyawan/profile/${id}`,
     KARYAWAN_EDIT: (id) => `https://hris.kti.co.id/karyawan/editgeneral/${id}`,
@@ -301,25 +301,28 @@
   }
 
   function isCurrentPageOutsource() {
-    const path = getCurrentPath();
-    return path.includes('kkwt') || path.includes('outsource') || path.includes('os');
+    const path = getCurrentPath().toLowerCase();
+    return path.includes('kkwt') || path.includes('outsource') || path.endsWith('os') || path.includes('os/');
   }
 
   function isOutsourceNrp(nrp) {
     if (!nrp) return false;
-    const cached = sessionStorage.getItem('qm_is_os_' + nrp);
+    const cleanNrp = String(nrp).trim();
+    if (cleanNrp.length === 4) return false; // 4-digit NRP is strictly regular/internal employee!
+
+    const cached = sessionStorage.getItem('qm_is_os_' + cleanNrp);
     if (cached !== null) return cached === 'true';
 
     // Fallback: check if active page context matches
     const ctx = getPageContext();
-    if (ctx.nrp === nrp) {
+    if (ctx.nrp === cleanNrp) {
       const isOS = isCurrentPageOutsource();
-      sessionStorage.setItem('qm_is_os_' + nrp, isOS ? 'true' : 'false');
+      sessionStorage.setItem('qm_is_os_' + cleanNrp, isOS ? 'true' : 'false');
       return isOS;
     }
 
     // Default fallback
-    return String(nrp || '').length === 8;
+    return cleanNrp.length === 8;
   }
 
   function getCurrentQueryParams() {
@@ -914,6 +917,68 @@
     return routeByNrp(nrp, ROUTES.ABSEN_BARCODE_ADD, ROUTES.ABSEN_BARCODE_OS_ADD);
   }
 
+  /** Run a task inside a hidden same-origin iframe with proper lifecycle management. */
+  function runInHiddenIframe(url, taskFn, onComplete, onError) {
+    const iframe = document.createElement('iframe');
+    iframe.style.display = 'none';
+    iframe.src = url;
+    document.body.appendChild(iframe);
+
+    const cleanup = () => {
+      if (iframe.parentNode) {
+        iframe.parentNode.removeChild(iframe);
+      }
+    };
+
+    const timeoutId = setTimeout(() => {
+      cleanup();
+      if (onError) onError(new Error('Koneksi halaman Timeout (15s)'));
+    }, 15000);
+
+    iframe.onload = () => {
+      try {
+        const doc = iframe.contentDocument || iframe.contentWindow.document;
+        const win = iframe.contentWindow;
+
+        // Detect if we have navigated away from the form after submit (meaning success/complete)
+        const isCompletePath = !doc.getElementById('btnTambah') && !doc.getElementById('submit');
+        if (isCompletePath) {
+          clearTimeout(timeoutId);
+          cleanup();
+          if (onComplete) onComplete({ success: true });
+          return;
+        }
+
+        // Wait a short moment for page scripts (jQuery, selectpicker) to bind
+        setTimeout(() => {
+          taskFn(doc, win, iframe)
+            .then(result => {
+              if (result && result.done) {
+                clearTimeout(timeoutId);
+                cleanup();
+                if (onComplete) onComplete(result);
+              }
+            })
+            .catch(err => {
+              clearTimeout(timeoutId);
+              cleanup();
+              if (onError) onError(err);
+            });
+        }, 600);
+      } catch (e) {
+        clearTimeout(timeoutId);
+        cleanup();
+        if (onError) onError(e);
+      }
+    };
+
+    iframe.onerror = (e) => {
+      clearTimeout(timeoutId);
+      cleanup();
+      if (onError) onError(e);
+    };
+  }
+
   /* ============================================================
    * 5. API LAYER
    * ============================================================ */
@@ -1069,34 +1134,95 @@
 
   function findEmployeeDetailLink(doc, nrp) {
     let detailUrl = '';
+    const cleanNrp = String(nrp || '').trim();
+    if (!cleanNrp) return '';
+
     const rows = doc.querySelectorAll('table tbody tr');
-    rows.forEach(function (row) {
-      if (row.textContent.includes(nrp)) {
+    Logger.debug(`[findEmployeeDetailLink] Mencari NRP: ${cleanNrp}, total baris tabel: ${rows.length}`);
+
+    rows.forEach(function (row, idx) {
+      const text = row.textContent;
+      const match = text.includes(cleanNrp);
+      Logger.debug(`[findEmployeeDetailLink] Baris #${idx + 1} text content contains NRP? ${match} (Row text: "${text.replace(/\s+/g, ' ').slice(0, 100)}")`);
+      if (match) {
         const links = Array.from(row.querySelectorAll('a'));
-        // Prioritize links that look like detail buttons or contain 'Detail'
-        const btn = links.find(a => {
+        Logger.debug(`[findEmployeeDetailLink] Menemukan ${links.length} tautan pada baris #${idx + 1}`);
+
+        // 1. Prioritize links that look like detail buttons (with 'Detail' text or standard classes)
+        let btn = links.find(a => {
           const txt = a.textContent.trim();
-          const cls = a.className;
+          const cls = a.className || '';
           const href = a.getAttribute('href') || '';
-          const isGenLink = href.includes('karyawan/general/') || href.includes('karyawanoutsource/general/');
-          if (!isGenLink) return false;
+          const isGenLink = href.includes('karyawan/general/') || href.includes('karyawanoutsource/general/') ||
+            href.includes('karyawan/profile/') || href.includes('karyawanoutsource/profile/') ||
+            href.includes('karyawan/editgeneral/') || href.includes('karyawanoutsource/editgeneral/');
           const id = extractEmployeeIdFromUrl(href);
-          return isValidEmployeeId(id) && (txt.includes('Detail') || cls.includes('btn-info') || cls.includes('btn-primary'));
+          const valid = isValidEmployeeId(id);
+          Logger.debug(`[findEmployeeDetailLink] Prioritas check: href="${href}", id="${id}", valid=${valid}, txt="${txt}", cls="${cls}"`);
+          return isGenLink && valid && (txt.includes('Detail') || cls.includes('btn-info') || cls.includes('btn-primary'));
         });
-        if (btn && btn.getAttribute('href')) detailUrl = btn.getAttribute('href');
+
+        // 2. Fallback: Accept ANY link in the matching row that points to employee pages
+        if (!btn) {
+          btn = links.find(a => {
+            const href = a.getAttribute('href') || '';
+            const isGenLink = href.includes('karyawan/general/') || href.includes('karyawanoutsource/general/') ||
+              href.includes('karyawan/profile/') || href.includes('karyawanoutsource/profile/') ||
+              href.includes('karyawan/editgeneral/') || href.includes('karyawanoutsource/editgeneral/');
+            const id = extractEmployeeIdFromUrl(href);
+            const valid = isValidEmployeeId(id);
+            Logger.debug(`[findEmployeeDetailLink] Fallback row check: href="${href}", id="${id}", valid=${valid}`);
+            return isGenLink && valid;
+          });
+        }
+
+        if (btn) {
+          detailUrl = btn.getAttribute('href') || '';
+          Logger.info(`[findEmployeeDetailLink] Ditemukan detailUrl di baris: ${detailUrl}`);
+        }
       }
     });
+
     if (!detailUrl) {
       const allLinks = Array.from(doc.querySelectorAll('a'));
-      const fallback = allLinks.find(a => {
+      Logger.debug(`[findEmployeeDetailLink] detailUrl tidak ditemukan di baris. Memeriksa semua ${allLinks.length} tautan dokumen...`);
+
+      // 3. Fallback to all links in document that look like detail buttons
+      let fallback = allLinks.find(a => {
+        const txt = a.textContent.trim();
+        const cls = a.className || '';
         const href = a.getAttribute('href') || '';
-        const isGenLink = href.includes('karyawan/general/') || href.includes('karyawanoutsource/general/');
+        const isGenLink = href.includes('karyawan/general/') || href.includes('karyawanoutsource/general/') ||
+          href.includes('karyawan/profile/') || href.includes('karyawanoutsource/profile/') ||
+          href.includes('karyawan/editgeneral/') || href.includes('karyawanoutsource/editgeneral/');
         const isReport = href.includes('rekap') || href.includes('laporan') || href.includes('pembayaran');
-        if (!isGenLink || isReport) return false;
         const id = extractEmployeeIdFromUrl(href);
-        return isValidEmployeeId(id) && (a.textContent.includes('Detail') || a.classList.contains('btn-info'));
+        const valid = isValidEmployeeId(id);
+        const matched = isGenLink && !isReport && valid && (txt.includes('Detail') || cls.includes('btn-info') || cls.includes('btn-primary'));
+        if (matched) Logger.debug(`[findEmployeeDetailLink] Fallback doc button matched: href="${href}"`);
+        return matched;
       });
-      if (fallback) detailUrl = fallback.getAttribute('href');
+
+      // 4. Absolute fallback: Accept ANY link in the document that points to employee pages
+      if (!fallback) {
+        fallback = allLinks.find(a => {
+          const href = a.getAttribute('href') || '';
+          const isGenLink = href.includes('karyawan/general/') || href.includes('karyawanoutsource/general/') ||
+            href.includes('karyawan/profile/') || href.includes('karyawanoutsource/profile/') ||
+            href.includes('karyawan/editgeneral/') || href.includes('karyawanoutsource/editgeneral/');
+          const isReport = href.includes('rekap') || href.includes('laporan') || href.includes('pembayaran');
+          const id = extractEmployeeIdFromUrl(href);
+          const valid = isValidEmployeeId(id);
+          const matched = isGenLink && !isReport && valid;
+          if (matched) Logger.debug(`[findEmployeeDetailLink] Fallback doc any matched: href="${href}"`);
+          return matched;
+        });
+      }
+
+      if (fallback) {
+        detailUrl = fallback.getAttribute('href') || '';
+        Logger.info(`[findEmployeeDetailLink] Ditemukan detailUrl di fallback dokumen: ${detailUrl}`);
+      }
     }
     return detailUrl;
   }
@@ -1238,38 +1364,84 @@
 
   /** Unified employee data fetcher with sessionStorage cache. */
   async function fetchEmployee(nrp, knownId = null, knownIsOS = null) {
+    Logger.info(`[fetchEmployee] Memulai fetch untuk NRP: ${nrp}, knownId: ${knownId}, knownIsOS: ${knownIsOS}`);
     const cached = readEmployeeCache(nrp);
     if (cached) {
       if (!knownId || cached.id === knownId) {
+        Logger.info(`[fetchEmployee] Menggunakan data cache untuk NRP: ${nrp}`, cached);
         return { found: true, ...cached };
       } else {
+        Logger.warn(`[fetchEmployee] ID yang diminta (${knownId}) tidak cocok dengan cache (${cached.id}). Menghapus cache.`);
         clearEmployeeCache(nrp);
       }
     }
-    
+
     let id = knownId;
     let isOS = knownIsOS;
 
     if (!id) {
-      const urls = employeeUrlSet(nrp);
-      isOS = urls.isOS;
-      let searchDoc, detailUrl;
+      const internalUrl = ROUTES.KARYAWAN_SEARCH(nrp);
+      const outsourceUrl = ROUTES.KARYAWANOS_SEARCH(nrp);
+      let detailUrl = '';
+      let foundIsOS = false;
 
-      // Retry logic for NRP search (Bug Fix 1)
+      Logger.info(`[fetchEmployee] Melakukan pencarian ganda (paralel). Internal: ${internalUrl} | Outsource: ${outsourceUrl}`);
+
+      // We will perform the dual search up to 3 times in case of temporary network glitches or blank loads.
       for (let attempt = 1; attempt <= 3; attempt++) {
         try {
-          const html = await hrisFetch(urls.searchUrl);
-          searchDoc = parseHTML(html);
-          detailUrl = findEmployeeDetailLink(searchDoc, nrp);
-          if (detailUrl) break;
+          Logger.debug(`[fetchEmployee] Pencarian ganda attempt #${attempt}...`);
+          const [internalHtml, outsourceHtml] = await Promise.all([
+            hrisFetch(internalUrl).catch(e => {
+              Logger.warn(`[fetchEmployee] Gagal fetch internal pada attempt #${attempt}: ${e.message}`);
+              return '';
+            }),
+            hrisFetch(outsourceUrl).catch(e => {
+              Logger.warn(`[fetchEmployee] Gagal fetch outsource pada attempt #${attempt}: ${e.message}`);
+              return '';
+            })
+          ]);
+
+          if (internalHtml) {
+            const doc = parseHTML(internalHtml);
+            const link = findEmployeeDetailLink(doc, nrp);
+            if (link) {
+              detailUrl = link;
+              foundIsOS = false;
+              Logger.info(`[fetchEmployee] Karyawan ditemukan di database Internal pada attempt #${attempt}: ${detailUrl}`);
+              break;
+            }
+          }
+
+          if (outsourceHtml) {
+            const doc = parseHTML(outsourceHtml);
+            const link = findEmployeeDetailLink(doc, nrp);
+            if (link) {
+              detailUrl = link;
+              foundIsOS = true;
+              Logger.info(`[fetchEmployee] Karyawan ditemukan di database Outsource pada attempt #${attempt}: ${detailUrl}`);
+              break;
+            }
+          }
         } catch (e) {
-          if (attempt === 3) throw e;
+          Logger.warn(`[fetchEmployee] Mismatch/error pada pencarian ganda attempt #${attempt}: ${e.message}`);
         }
-        if (attempt < 3) await new Promise(r => setTimeout(r, 500 * attempt));
+
+        if (attempt < 3) {
+          Logger.warn(`[fetchEmployee] Karyawan belum ditemukan pada attempt #${attempt}. Mencoba kembali setelah jeda...`);
+          await new Promise(r => setTimeout(r, 800 * attempt));
+        }
       }
 
-      if (!detailUrl) return { found: false };
+      if (!detailUrl) {
+        Logger.error(`[fetchEmployee] Karyawan NRP ${nrp} tidak ditemukan di database Internal maupun Outsource setelah 3 kali pencarian ganda.`);
+        return { found: false };
+      }
+
+      isOS = foundIsOS;
+      sessionStorage.setItem('qm_is_os_' + nrp, isOS ? 'true' : 'false');
       id = extractEmployeeIdFromUrl(detailUrl);
+      Logger.info(`[fetchEmployee] Berhasil mengekstrak ID: ${id} dari detailUrl: ${detailUrl}. Tipe Karyawan: ${isOS ? 'Outsource' : 'Internal'}`);
     } else {
       // If we provided an ID but not isOS, try to guess
       if (isOS === null) {
@@ -1960,6 +2132,7 @@
   const state = {
     isOpen: false,
     loading: false,
+    hadirCancelRequested: false,
     history: [],
     maxHistory: 8,
     anomalyRunId: 0,
@@ -3087,11 +3260,11 @@
             const rk = item.rekaps || { otb: 0, otl: 0, ota: 0, otp: 0, keterangan: {} };
             const otValues = `B: ${rk.otb.toFixed(1)}<br>L: ${rk.otl.toFixed(1)}<br>A: ${rk.ota.toFixed(1)}<br>P: ${rk.otp.toFixed(1)}`;
 
-            const ketKeys = ['CT', 'CH', 'SD', 'I', 'IS', 'IA', 'A'];
+            const ketKeys = ['CT', 'CH', 'SD', 'IJ', 'IS', 'IA', 'AB'];
             const ketStr = ketKeys.map(k => `${k}: ${rk.keterangan[k] || 0}`).join('<br>');
 
-            lemburHtml = `<div class="qm-text-xs qm-font-mono" style="color: var(--qm-olive);">${otValues}</div>`;
-            ketHtml = `<div class="qm-text-xs qm-font-mono" style="color: var(--qm-stone); opacity: 0.8;">${ketStr}</div>`;
+            lemburHtml = `<div class="qm-text-m qm-font-mono" style="color: var(--qm-olive);">${otValues}</div>`;
+            ketHtml = `<div class="qm-text-m qm-font-mono" style="color: var(--qm-stone); opacity: 0.8;">${ketStr}</div>`;
           }
 
           html += `<tr class="qm-batch-group-row ${bagSafeId} ${sekSafeId} qm-batch-item-row qm-table-row">`;
@@ -3602,14 +3775,16 @@
     const detailHtml = sortedDates.length === 0
       ? '<div class="qm-hadir-check-detail-empty">Tidak ada baris barcode pada rentang tanggal ini.</div>'
       : `
-        <div class="qm-hadir-table-container">
-          <table class="qm-hadir-table">
+        <div class="qm-hadir-table-container" style="overflow-x: auto; margin-top: 8px;">
+          <table class="qm-hadir-table" style="width: 100%; border-collapse: collapse; text-align: left;">
             <thead>
-              <tr>
-                <th style="width: 30px;"></th>
-                <th style="width: 80px;">Tanggal</th>
-                <th>Masuk</th>
-                <th>Keluar</th>
+              <tr style="height: 38px; border-top: 1px solid var(--color-border); border-bottom: 1.5px solid var(--color-border); background: transparent;">
+                <th style="width: 48px; min-width: 48px; max-width: 48px; padding: 0 8px; text-align: center; vertical-align: middle; height: 38px;">
+                  <input type="checkbox" id="qm-hadir-batch-cb-all" style="cursor: pointer; width: 16px; height: 16px; margin: 0; vertical-align: middle; accent-color: var(--color-accent-strong);">
+                </th>
+                <th style="width: 130px; min-width: 130px; max-width: 130px; padding: 0 8px; font-size: 10px; font-weight: 700; color: var(--color-text-muted); text-transform: uppercase; letter-spacing: 0.08em; vertical-align: middle; height: 38px; white-space: nowrap;">TANGGAL</th>
+                <th style="width: 110px; min-width: 110px; max-width: 110px; padding: 0 8px; font-size: 10px; font-weight: 700; color: var(--color-text-muted); text-transform: uppercase; letter-spacing: 0.08em; vertical-align: middle; height: 38px;">MASUK</th>
+                <th style="width: 110px; min-width: 110px; max-width: 110px; padding: 0 8px; font-size: 10px; font-weight: 700; color: var(--color-text-muted); text-transform: uppercase; letter-spacing: 0.08em; vertical-align: middle; height: 38px;">KELUAR</th>
               </tr>
             </thead>
             <tbody>
@@ -3619,20 +3794,20 @@
         const k = group.keluar;
 
         const renderTime = (entry) => {
-          if (!entry) return '<span class="qm-text-muted qm-font-xs">-</span>';
-          const isDelete = (entry.actions || []).some(a => /hapus|delete/i.test(a.text));
-          const deleteBtn = isDelete
-            ? `<button type="button" class="qm-btn-text qm-text-danger qm-btn-barcode-delete" data-url="${toAbsoluteHrisUrl((entry.actions.find(a => /hapus|delete/i.test(a.text))).href)}" style="margin-left: 4px; font-size: 10px;">&times;</button>`
-            : '';
-          return `<span class="qm-font-mono">${escapeHtml(entry.time || '-')}</span>${deleteBtn}`;
+          if (!entry) return '<span style="color: var(--color-text-soft); font-weight: 500; font-size: 12.5px;">-</span>';
+          return `<span class="qm-font-mono" style="font-size: 12.5px; color: var(--color-text); font-weight: 500;">${escapeHtml(entry.time || '-')}</span>`;
         };
 
         return `
-                  <tr>
-                    <td><input type="checkbox" class="qm-hadir-batch-cb" data-indices="${group.indices.join(',')}"></td>
-                    <td><span style="font-size: var(--qm-font-xs);">${escapeHtml(dateStr)}</span></td>
-                    <td>${renderTime(m)}</td>
-                    <td>${renderTime(k)}</td>
+                  <tr style="height: 48px; border-bottom: 1px solid var(--color-border); transition: background-color 0.15s ease;" class="qm-hadir-row-tr">
+                    <td style="width: 48px; min-width: 48px; max-width: 48px; padding: 0 8px; text-align: center; vertical-align: middle; height: 48px;">
+                      <input type="checkbox" class="qm-hadir-batch-cb" data-indices="${group.indices.join(',')}" style="cursor: pointer; width: 16px; height: 16px; margin: 0; vertical-align: middle; accent-color: var(--color-accent-strong);">
+                    </td>
+                    <td style="width: 130px; min-width: 130px; max-width: 130px; padding: 0 8px; vertical-align: middle; height: 48px; white-space: nowrap;">
+                      <span style="font-size: 12.5px; font-weight: 700; color: var(--color-text);">${escapeHtml(dateStr)}</span>
+                    </td>
+                    <td style="width: 110px; min-width: 110px; max-width: 110px; padding: 0 8px; vertical-align: middle; height: 48px;">${renderTime(m)}</td>
+                    <td style="width: 110px; min-width: 110px; max-width: 110px; padding: 0 8px; vertical-align: middle; height: 48px;">${renderTime(k)}</td>
                   </tr>
                 `;
       }).join('')}
@@ -3642,29 +3817,22 @@
       `;
 
     uiAdapter.html('attendanceCheckResult', `
-      <div class="qm-hadir-check-card">
-        <div class="qm-hadir-check-summary">
-          <div class="qm-hadir-check-head">
-            <div>
-              <div class="qm-hadir-check-title" style="font-size: var(--qm-font-m);">
-                ${escapeHtml(emp.nama || summary.nrp)}
-                <span class="qm-text-muted qm-ml-s qm-font-normal" style="font-size: var(--qm-font-s);">${escapeHtml(summary.nrp)}</span>
-                <span class="qm-text-muted qm-ml-m qm-font-normal" style="font-size: var(--qm-font-xs); border-left: 1px solid rgba(0,0,0,0.1); padding-left: 10px;">
-                  ${escapeHtml(emp.bagian || '-')} • ${escapeHtml(emp.seksi || '-')} • ${escapeHtml(emp.group || '-')}
-                </span>
-              </div>
+      <div class="qm-hadir-check-card" style="margin-top: 12px; padding: 18px 20px !important; background: var(--color-surface-strong) !important; border: 1px solid var(--color-border) !important; border-radius: 12px !important; box-shadow: var(--shadow-card) !important;">
+        <div class="qm-hadir-check-summary" style="margin-bottom: 16px;">
+          <div class="qm-hadir-check-head qm-flex qm-items-center qm-justify-between" style="width: 100%; flex-wrap: nowrap; gap: 16px;">
+            <div class="qm-flex qm-items-center qm-gap-s" style="flex-wrap: wrap; flex: 1; min-width: 0;">
+              <span class="qm-font-bold qm-uppercase" style="font-size: 14px; color: var(--color-text); letter-spacing: 0.02em;">${escapeHtml(emp.nama || summary.nrp)}</span>
+              <span style="color: var(--color-text-soft); font-size: 12.5px; font-weight: 500;">${escapeHtml(summary.nrp)}</span>
+              <span style="color: var(--color-text-soft); font-size: 12.5px; font-weight: 500;">
+                ${[emp.bagian, emp.seksi, emp.group].filter(Boolean).join(' / ') || '-'}
+              </span>
             </div>
-            <span class="qm-badge ${statusClass}">${escapeHtml(statusLabel)}</span>
+            <div style="flex-shrink: 0;">
+              <button type="button" class="qm-btn-premium-primary" id="qm-btn-hadir-batch-edit" style="padding: 6px 20px !important; font-size: 11px !important; border-radius: 8px !important; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; box-shadow: var(--shadow-button) !important; height: 32px; display: inline-flex; align-items: center; justify-content: center; min-width: 100px;">Proses</button>
+            </div>
           </div>
         </div>
         <div class="qm-hadir-check-detail">
-          <div class="qm-flex qm-justify-between qm-items-center qm-mb-s" style="padding-bottom: 4px; border-bottom: 1px solid var(--qm-border-warm);">
-            <div class="qm-flex qm-items-center">
-              <input type="checkbox" id="qm-hadir-batch-cb-all" class="qm-mr-s">
-              <label for="qm-hadir-batch-cb-all" class="qm-hadir-check-detail-title qm-m-0 qm-cursor-pointer">PILIH SEMUA</label>
-            </div>
-            <button type="button" class="qm-btn qm-btn-primary qm-btn-sm" id="qm-btn-hadir-batch-edit" style="padding: 2px 8px; font-size: 10px;">Edit Terpilih</button>
-          </div>
           ${detailHtml}
         </div>
       </div>
@@ -3718,8 +3886,8 @@
       const mTime = masukCell.querySelector('.qm-font-mono')?.textContent.trim() || '';
       const kTime = keluarCell.querySelector('.qm-font-mono')?.textContent.trim() || '';
 
-      masukCell.innerHTML = `<input type="time" class="qm-hadir-inline-input qm-input" value="${mTime.includes(':') ? mTime.substring(0, 5) : ''}" data-prev="${mTime}" style="width: 85px; padding: 2px; height: 24px; font-size: 11px;">`;
-      keluarCell.innerHTML = `<input type="time" class="qm-hadir-inline-input qm-input" value="${kTime.includes(':') ? kTime.substring(0, 5) : ''}" data-prev="${kTime}" style="width: 85px; padding: 2px; height: 24px; font-size: 11px;">`;
+      masukCell.innerHTML = `<input type="time" class="qm-hadir-inline-input qm-input" value="${mTime.includes(':') ? mTime.substring(0, 5) : ''}" data-prev="${mTime}" style="width: 85px; padding: 2px 6px; height: 24px; font-size: 11.5px; border-radius: 6px !important; border: 1px solid var(--color-border-strong) !important; background: var(--color-surface-strong) !important; text-align: center; box-sizing: border-box;">`;
+      keluarCell.innerHTML = `<input type="time" class="qm-hadir-inline-input qm-input" value="${kTime.includes(':') ? kTime.substring(0, 5) : ''}" data-prev="${kTime}" style="width: 85px; padding: 2px 6px; height: 24px; font-size: 11.5px; border-radius: 6px !important; border: 1px solid var(--color-border-strong) !important; background: var(--color-surface-strong) !important; text-align: center; box-sizing: border-box;">`;
     } else {
       if (row.dataset.originalMasuk) masukCell.innerHTML = row.dataset.originalMasuk;
       if (row.dataset.originalKeluar) keluarCell.innerHTML = row.dataset.originalKeluar;
@@ -4209,7 +4377,7 @@
               <label for="qm-spkl-batch-cb-all" class="qm-hadir-check-detail-title qm-m-0 qm-cursor-pointer" style="font-size: 11px; letter-spacing: 0.05em;">PILIH SEMUA SPKL</label>
             </div>
             <div class="qm-flex qm-items-center qm-gap-s">
-              <button type="button" class="qm-btn qm-btn-primary qm-btn-sm" id="qm-btn-spkl-batch-edit" style="padding: 2px 8px; font-size: 10px;">Edit Terpilih</button>
+              <button type="button" class="qm-btn-premium-primary" id="qm-btn-spkl-batch-edit" style="padding: 4px 10px !important; font-size: 10px !important; border-radius: 6px !important;">Edit Terpilih</button>
               <a href="${spklListUrl(summary.nrp, uiAdapter.getValue('spklPageMonth') || (new Date().getMonth() + 1), new Date().getFullYear())}" target="_blank" class="qm-text-primary qm-font-xs" style="text-decoration: underline;">Buka Halaman Penuh</a>
             </div>
           </div>
@@ -5592,8 +5760,6 @@
       return;
     }
 
-    createAutomationFlow('hadir-batch-many', window.location.href, { date: dateVal, status: statusVal });
-
     const nrps = raw.split(/[,\n\s]+/).map(v => v.trim()).filter(Boolean);
     const int = [], out = [], inv = [];
     for (const nrp of nrps) {
@@ -5607,112 +5773,108 @@
       return;
     }
 
-    const batchState = {
-      date: dateVal,
-      jam: jamVal,
-      status: statusVal,
-      internal: int,
-      outsource: out,
-      indexes: { internal: 0, outsource: 0 }
+    const totalNrps = int.length + out.length;
+    state.hadirCancelRequested = false;
+    UI.startProgress('Memproses Banyak NRP...', totalNrps);
+    const cancelBtn = uiAdapter.get('#qm-btn-hadir-cancel');
+    if (cancelBtn) cancelBtn.classList.remove('qm-hidden');
+
+    let processedCount = 0;
+
+    const processGroup = async (groupKind, nrpList) => {
+      if (nrpList.length === 0) return;
+
+      const targetUrl = getAbsenCreateUrlByKind(groupKind);
+
+      return new Promise((resolve, reject) => {
+        runInHiddenIframe(
+          targetUrl,
+          async (doc, win, iframe) => {
+            if (state.hadirCancelRequested) {
+              throw new Error('Dibatalkan oleh pengguna');
+            }
+
+            const tEl = doc.querySelector("#tanggal");
+            const nEl = doc.querySelector("#nrp_input");
+            const jEl = doc.querySelector("#jam");
+            const sEl = doc.querySelector("#status");
+            const tbBtn = doc.querySelector("#btnTambah");
+            const sbBtn = doc.querySelector("#submit");
+
+            if (!tEl || !nEl || !jEl || !sEl || !tbBtn || !sbBtn) {
+              throw new Error('Elemen form di halaman input tidak lengkap.');
+            }
+
+            for (let i = 0; i < nrpList.length; i++) {
+              if (state.hadirCancelRequested) {
+                throw new Error('Dibatalkan oleh pengguna');
+              }
+
+              const nrp = nrpList[i];
+              processedCount++;
+              UI.updateProgress(processedCount, totalNrps, `Batch Kehadiran: ${nrp} (${processedCount}/${totalNrps})`);
+
+              setField(tEl, dateVal, ['change']);
+              setField(nEl, nrp, ['input', 'change']);
+              setField(jEl, jamVal, ['change']);
+              setField(sEl, statusVal, ['change']);
+
+              if (win.jQuery && win.jQuery(sEl).selectpicker) {
+                win.jQuery(sEl).selectpicker('refresh');
+              }
+
+              await new Promise(r => setTimeout(r, 600));
+              if (state.hadirCancelRequested) throw new Error('Dibatalkan oleh pengguna');
+              tbBtn.click();
+              await new Promise(r => setTimeout(r, 1200));
+            }
+
+            if (state.hadirCancelRequested) {
+              throw new Error('Dibatalkan oleh pengguna');
+            }
+            sbBtn.click();
+
+            return { done: false };
+          },
+          () => {
+            resolve();
+          },
+          (err) => {
+            reject(err);
+          }
+        );
+      });
     };
 
-    sessionStorage.setItem(STORAGE.HADIR_BATCH, JSON.stringify(batchState));
+    try {
+      if (int.length > 0) {
+        await processGroup('internal', int);
+      }
+      if (out.length > 0) {
+        await processGroup('outsource', out);
+      }
 
-    const current = absenCreatePageKind();
-    const target = (int.length > 0 ? "internal" : "outsource");
-
-    if (current !== target) {
-      UI.showResult('success', 'Mengalihkan...', 'Pindah ke halaman input ' + target + '.');
-      const targetUrl = getAbsenCreateUrlByKind(target);
-      setTimeout(() => { window.location.href = targetUrl; }, 1000);
-    } else {
-      _processHadirManyNrpPage(target, batchState);
-    }
-  }
-
-  async function _processHadirManyNrpPage(route, s) {
-    const tEl = document.querySelector("#tanggal");
-    const nEl = document.querySelector("#nrp_input");
-    const jEl = document.querySelector("#jam");
-    const sEl = document.querySelector("#status");
-    const tbBtn = document.querySelector("#btnTambah");
-    const sbBtn = document.querySelector("#submit");
-
-    if (!tEl || !nEl || !jEl || !sEl || !tbBtn || !sbBtn) {
-      alert("Elemen form tidak lengkap. Pastikan berada di halaman input yang benar.");
-      return;
-    }
-
-    const list = s[route];
-    let idx = s.indexes[route];
-
-    UI.showGlobalLoader('Batch Kehadiran', 'Memulai...');
-
-    for (; idx < list.length; idx++) {
-      const nrp = list[idx];
-      UI.setGlobalProgress((idx / list.length) * 100, `Batch Kehadiran: ${nrp}`);
-
-      setField(tEl, s.date, ['change']);
-      setField(nEl, nrp, ['input', 'change']);
-      setField(jEl, s.jam, ['change']);
-      setField(sEl, s.status, ['change']);
-
-      await new Promise(r => setTimeout(r, 600));
-      tbBtn.click();
-
-      s.indexes[route] = idx + 1;
-      sessionStorage.setItem(STORAGE.HADIR_BATCH, JSON.stringify(s));
-      await new Promise(r => setTimeout(r, 1200));
-    }
-
-    const nextR = (function (st) {
-      if (st.indexes.internal < st.internal.length) return "internal";
-      if (st.indexes.outsource < st.outsource.length) return "outsource";
-      return null;
-    })(s);
-
-    if (!nextR) {
-      sessionStorage.removeItem(STORAGE.HADIR_BATCH);
-      UI.setGlobalProgress(100, 'Selesai!');
-      const activeFlow = getAutomationFlow();
-      if (activeFlow && activeFlow.type === 'hadir-batch-many') {
-        markAutomationFlowFinished(activeFlow.id);
+      if (cancelBtn) cancelBtn.classList.add('qm-hidden');
+      UI.updateProgress(totalNrps, totalNrps, 'Selesai!');
+      setTimeout(() => {
+        UI.endProgress();
+        UI.showResult('success', 'Batch Kehadiran Selesai', `Berhasil memproses ${totalNrps} NRP.`);
+        KEHADIRAN.checkByRange(panelReaders.attendanceCheck());
+      }, 600);
+    } catch (e) {
+      if (cancelBtn) cancelBtn.classList.add('qm-hidden');
+      UI.endProgress();
+      const errMsg = e.message || 'Terjadi kesalahan.';
+      if (errMsg === 'Dibatalkan oleh pengguna') {
+        UI.showResult('info', 'Dibatalkan', 'Otomasi batch kehadiran dihentikan oleh pengguna.');
       } else {
-        sessionStorage.setItem(STORAGE.AUTO_FINISHED, 'true');
-      }
-    } else {
-      sessionStorage.setItem(STORAGE.HADIR_BATCH, JSON.stringify(s));
-      const targetUrl = getAbsenCreateUrlByKind(nextR);
-      window.location.href = targetUrl;
-      return;
-    }
-    sbBtn.click();
-  }
-
-  function checkHadirBatchResume() {
-    const st = JSON.parse(sessionStorage.getItem(STORAGE.HADIR_BATCH) || "null");
-    if (st) {
-      const current = absenCreatePageKind();
-
-      const pRoute = (function (s) {
-        if (current && s.indexes[current] < s[current].length) return current;
-        if (s.indexes.internal < s.internal.length) return "internal";
-        if (s.indexes.outsource < s.outsource.length) return "outsource";
-        return null;
-      })(st);
-
-      if (pRoute) {
-        if (current === pRoute) {
-          setTimeout(() => {
-            _processHadirManyNrpPage(pRoute, st);
-          }, 1500);
-        } else {
-          const targetUrl = getAbsenCreateUrlByKind(pRoute);
-          window.location.href = targetUrl;
-        }
+        UI.showResult('danger', 'Otomasi Batch Gagal', errMsg);
       }
     }
   }
+
+  async function _processHadirManyNrpPage(route, s) { }
+  function checkHadirBatchResume() { }
 
   async function runHadirBulanBatch() {
     const elNrp = document.getElementById("qm-input-hadir-bulan-nrp");
@@ -5739,8 +5901,6 @@
       return;
     }
 
-    UI.showGlobalLoader('Kalender Disiapkan', 'Menghitung hari kerja...');
-
     const liburBulanIni = LIBUR_NASIONAL_2026[BULAN] || [];
     const hariValid = [];
     const jumlahHariSeBulan = new Date(TAHUN, BULAN, 0).getDate();
@@ -5757,7 +5917,6 @@
 
     if (hariValid.length === 0) {
       UI.showResult('warning', 'Tidak Ada Hari Kerja', 'Bulan ini tidak memiliki hari kerja valid.');
-      UI.hideGlobalLoader();
       return;
     }
 
@@ -5769,89 +5928,89 @@
       antrean.push({ waktu: `${TAHUN}-${bulanStr}-${tglStr}T${jamKeluar}`, status: "0", label: "Keluar" });
     });
 
-    sessionStorage.setItem('qm_auto_hadir_bulan_active', 'true');
-    sessionStorage.setItem('qm_auto_hadir_bulan_nrp', NRP);
-    sessionStorage.setItem('qm_auto_hadir_bulan_antrean', JSON.stringify(antrean));
-    createAutomationFlow('hadir-bulan', window.location.href, { nrp: NRP, bulan: BULAN, tahun: TAHUN });
+    state.hadirCancelRequested = false;
+    UI.startProgress('Memproses Automasi Bulanan...', antrean.length);
+    const cancelBtn = uiAdapter.get('#qm-btn-hadir-cancel');
+    if (cancelBtn) cancelBtn.classList.remove('qm-hidden');
 
-    const targetURL = absenAddUrl(NRP);
+    const targetUrl = absenAddUrl(NRP);
 
-    UI.setGlobalProgress(100, 'Berhasil! Mengalihkan...');
-    setTimeout(() => {
-      window.location.href = targetURL;
-    }, 1200);
+    runInHiddenIframe(
+      targetUrl,
+      async (doc, win, iframe) => {
+        if (state.hadirCancelRequested) {
+          throw new Error('Dibatalkan oleh pengguna');
+        }
+
+        const inputNrp = doc.getElementById('nrp_input');
+        const inputTanggal = doc.getElementById('tanggal');
+        const inputStatus = doc.getElementById('status');
+        const btnTambah = doc.getElementById('btnTambah');
+        const btnSubmit = doc.getElementById('submit');
+
+        if (!inputNrp || !inputTanggal || !inputStatus || !btnTambah || !btnSubmit) {
+          throw new Error('Elemen form di halaman input tidak lengkap.');
+        }
+
+        for (let i = 0; i < antrean.length; i++) {
+          if (state.hadirCancelRequested) {
+            throw new Error('Dibatalkan oleh pengguna');
+          }
+
+          const aksi = antrean[i];
+          UI.updateProgress(i + 1, antrean.length, `Menyuntikkan: ${aksi.label} | ${aksi.waktu.split('T')[0]} (${i + 1}/${antrean.length})`);
+
+          setField(inputNrp, NRP, ['input', 'change']);
+          setField(inputTanggal, aksi.waktu, ['input', 'change']);
+          setField(inputStatus, aksi.status, ['change']);
+
+          if (win.jQuery && win.jQuery(inputStatus).selectpicker) {
+            win.jQuery(inputStatus).selectpicker('refresh');
+          }
+
+          await new Promise(r => setTimeout(r, 600));
+          if (state.hadirCancelRequested) throw new Error('Dibatalkan oleh pengguna');
+          btnTambah.click();
+          await new Promise(r => setTimeout(r, 1200));
+        }
+
+        if (state.hadirCancelRequested) {
+          throw new Error('Dibatalkan oleh pengguna');
+        }
+        btnSubmit.click();
+
+        return { done: false };
+      },
+      (res) => {
+        if (cancelBtn) cancelBtn.classList.add('qm-hidden');
+        UI.updateProgress(antrean.length, antrean.length, 'Selesai!');
+        setTimeout(() => {
+          UI.endProgress();
+          UI.showResult('success', 'Automasi Bulanan Selesai', `Berhasil memproses ${antrean.length / 2} hari kerja.`);
+          KEHADIRAN.checkByRange(panelReaders.attendanceCheck());
+        }, 600);
+      },
+      (err) => {
+        if (cancelBtn) cancelBtn.classList.add('qm-hidden');
+        UI.endProgress();
+        const errMsg = err.message || 'Terjadi kesalahan.';
+        if (errMsg === 'Dibatalkan oleh pengguna') {
+          UI.showResult('info', 'Dibatalkan', 'Automasi bulanan kehadiran dihentikan oleh pengguna.');
+        } else {
+          UI.showResult('danger', 'Automasi Bulanan Gagal', errMsg);
+        }
+      }
+    );
   }
 
-  async function checkHadirBulanResume() {
-    if (sessionStorage.getItem('qm_auto_hadir_bulan_active') !== 'true') return;
-
-    const NRP = sessionStorage.getItem('qm_auto_hadir_bulan_nrp');
-    const antrean = JSON.parse(sessionStorage.getItem('qm_auto_hadir_bulan_antrean') || "[]");
-
-    if (!NRP || antrean.length === 0) {
-      sessionStorage.removeItem('qm_auto_hadir_bulan_active');
-      return;
-    }
-
-    // Check if we are on the correct page
-    const isAddPage = isBarcodeAddPagePath();
-    if (!isAddPage) return;
-
-    UI.showGlobalLoader('Automasi Berjalan', `Sisa data: ${antrean.length / 2} hari`);
-
-    const inputNrp = document.getElementById('nrp_input');
-    const inputTanggal = document.getElementById('tanggal');
-    const inputStatus = document.getElementById('status');
-    const btnTambah = document.getElementById('btnTambah');
-
-    if (!inputNrp || !inputTanggal || !inputStatus || !btnTambah) {
-      Logger.warn('Elemen form tidak ditemukan untuk resume automasi.');
-      return;
-    }
-
-    // Start processing the queue
-    for (let i = 0; i < antrean.length; i++) {
-      const aksi = antrean[i];
-      UI.setGlobalProgress((i / antrean.length) * 100, `Menyuntikkan: ${aksi.label} | ${aksi.waktu.split('T')[0]}`);
-
-      setField(inputNrp, NRP, ['input', 'change']);
-      setField(inputTanggal, aksi.waktu, ['input', 'change']);
-      setField(inputStatus, aksi.status, ['change']);
-
-      if (window.jQuery && window.jQuery(inputStatus).selectpicker) {
-        window.jQuery(inputStatus).selectpicker('refresh');
-      }
-
-      await new Promise(r => setTimeout(r, 500));
-      btnTambah.click();
-      await new Promise(r => setTimeout(r, 1000));
-    }
-
-    sessionStorage.removeItem('qm_auto_hadir_bulan_active');
-    sessionStorage.removeItem('qm_auto_hadir_bulan_nrp');
-    sessionStorage.removeItem('qm_auto_hadir_bulan_antrean');
-
-    UI.setGlobalProgress(100, 'Selesai! Menyimpan...');
-    const btnSubmit = document.getElementById('submit');
-    if (btnSubmit) {
-      const activeFlow = getAutomationFlow();
-      if (activeFlow && activeFlow.type === 'hadir-bulan') {
-        markAutomationFlowFinished(activeFlow.id);
-      } else {
-        sessionStorage.setItem(STORAGE.AUTO_FINISHED, 'true');
-      }
-      setTimeout(() => btnSubmit.click(), 500);
-    } else {
-      UI.hideGlobalLoader(1500);
-      alert(`[Quick Menu] Automasi Selesai!\n- NRP: ${NRP}\n- Total dieksekusi: ${antrean.length} baris.\nSilakan klik Simpan secara manual.`);
-    }
-  }
+  async function checkHadirBulanResume() { }
 
   /* ============================================================
    * 11. UI LAYER
    * ============================================================ */
 
   GM_addStyle(`
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
 
 :root {
   --font-sans: "Plus Jakarta Sans", "Segoe UI", sans-serif;
@@ -5891,6 +6050,40 @@
   --space-12: 48px;
   --panel-max-width: 820px;
   --transition-fast: 180ms ease;
+
+  /* Theme Dynamic Hover & Backdrops */
+  --color-surface-hover: rgba(255, 255, 255, 0.6);
+  --color-icon-hover: rgba(255, 255, 255, 0.7);
+  --color-footer-bg: rgba(255, 255, 255, 0.4);
+  --color-btn-hover: #f5f2ec;
+}
+
+/* Dark Theme Overrides - Cozy, Warm Obsidian Dark Mode */
+.qm-dark {
+  --color-surface: rgba(26, 23, 20, 0.95);
+  --color-surface-strong: #23201d;
+  --color-surface-soft: #1e1b18;
+  --color-border: rgba(243, 240, 234, 0.12);
+  --color-border-strong: rgba(243, 240, 234, 0.2);
+  --color-text: #f3f0ea;
+  --color-text-muted: #c5beb5;
+  --color-text-soft: #8e867b;
+  --color-accent: rgba(183, 215, 235, 0.15);
+  --color-accent-strong: #73a1c0;
+  --shadow-panel: 0 24px 64px rgba(10, 8, 6, 0.5), 0 4px 12px rgba(10, 8, 6, 0.3);
+  --shadow-card: 0 1px 0 rgba(255, 255, 255, 0.05) inset, 0 0 0 1px rgba(243, 240, 234, 0.1);
+  --color-tag-red-bg: rgba(229, 57, 53, 0.15);
+  --color-tag-red-text: #ff8a80;
+  --color-tag-orange-bg: rgba(245, 124, 0, 0.15);
+  --color-tag-orange-text: #ffcc80;
+  --color-tag-violet-bg: rgba(117, 103, 216, 0.2);
+  --color-tag-violet-text: #b39ddb;
+  --color-tag-blue-bg: rgba(74, 141, 194, 0.2);
+  --color-tag-blue-text: #90caf9;
+  --color-surface-hover: rgba(255, 255, 255, 0.06);
+  --color-icon-hover: rgba(255, 255, 255, 0.08);
+  --color-footer-bg: rgba(0, 0, 0, 0.25);
+  --color-btn-hover: rgba(255, 255, 255, 0.06);
 }
 
 #qa-shell {
@@ -5900,10 +6093,15 @@
 #qa-shell * {
   box-sizing: border-box;
   font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
 }
 
 #qa-shell button,
-#qa-shell input {
+#qa-shell input,
+#qa-shell select,
+#qa-shell textarea {
   font: inherit;
   margin: 0;
 }
@@ -5914,6 +6112,281 @@
   color: inherit;
   cursor: pointer;
   padding: 0;
+}
+
+/* Typography & Layout Utilities */
+.qm-flex { display: flex !important; }
+.qm-flex-1 { flex: 1 1 0% !important; }
+.qm-items-center { align-items: center !important; }
+.qm-justify-between { justify-content: space-between !important; }
+.qm-gap-xs { gap: 4px !important; }
+.qm-gap-s { gap: 8px !important; }
+.qm-gap-m { gap: 12px !important; }
+.qm-gap-l { gap: 16px !important; }
+.qm-block { display: block !important; }
+.qm-inline-flex { display: inline-flex !important; }
+
+/* Spacing Utilities */
+.qm-m-0 { margin: 0 !important; }
+.qm-mt-s { margin-top: var(--space-2, 8px) !important; }
+.qm-mt-m { margin-top: var(--space-3, 12px) !important; }
+.qm-mt-l { margin-top: var(--space-4, 16px) !important; }
+.qm-mt-xl { margin-top: var(--space-6, 24px) !important; }
+.qm-mb-xs { margin-bottom: 4px !important; }
+.qm-mb-s { margin-bottom: var(--space-2, 8px) !important; }
+.qm-mb-m { margin-bottom: var(--space-3, 12px) !important; }
+.qm-mb-l { margin-bottom: var(--space-4, 16px) !important; }
+.qm-ml-s { margin-left: var(--space-2, 8px) !important; }
+.qm-ml-m { margin-left: var(--space-3, 12px) !important; }
+.qm-ml-l { margin-left: var(--space-4, 16px) !important; }
+.qm-p-m { padding: var(--space-4, 16px) !important; }
+
+/* Font Utilities */
+.qm-font-normal { font-weight: 400 !important; }
+.qm-font-semibold { font-weight: 600 !important; }
+.qm-font-bold { font-weight: 700 !important; }
+.qm-font-mono { font-family: SFMono-Regular, Consolas, "Liberation Mono", Menlo, Courier, monospace !important; }
+.qm-text-xs { font-size: 0.75rem !important; }
+.qm-text-s { font-size: 0.85rem !important; }
+.qm-text-m { font-size: 1rem !important; }
+.qm-text-muted { color: var(--color-text-muted) !important; }
+.qm-text-blue { color: var(--color-tag-blue-text, #4a8dc2) !important; }
+.qm-text-teal { color: #0d9488 !important; }
+.qm-text-danger { color: var(--color-tag-red-text, #d16258) !important; }
+.qm-text-center { text-align: center !important; }
+.qm-uppercase { text-transform: uppercase !important; }
+.qm-lh-1-3 { line-height: 1.3 !important; }
+
+/* Card & Element Base Styles */
+.qm-card {
+  background: var(--color-surface-strong, #ffffff) !important;
+  border: 1px solid var(--color-border) !important;
+  border-radius: var(--radius-card, 12px) !important;
+  padding: 16px var(--space-5, 20px) !important;
+  box-shadow: var(--shadow-card) !important;
+  transition: all var(--transition-fast, 180ms ease) !important;
+}
+.qm-card:hover {
+  box-shadow: 0 4px 12px rgba(52, 43, 33, 0.05) !important;
+}
+.qm-bg-parchment { background: var(--color-surface-soft, #faf7f2) !important; }
+.qm-rounded-m { border-radius: var(--radius-card, 12px) !important; }
+.qm-border { border: 1px solid var(--color-border) !important; }
+
+/* Input, Textarea, Select Form Controls Styles */
+.qm-input, .qm-textarea {
+  width: 100%;
+  padding: 10px 14px;
+  background: var(--color-surface-strong, #ffffff) !important;
+  border: 1px solid var(--color-border) !important;
+  border-radius: var(--radius-pill, 10px) !important;
+  color: var(--color-text) !important;
+  outline: none !important;
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.02) !important;
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast) !important;
+}
+.qm-input:focus, .qm-textarea:focus {
+  border-color: var(--color-accent-strong) !important;
+  box-shadow: 0 0 0 3px rgba(183, 215, 235, 0.3), inset 0 1px 2px rgba(0, 0, 0, 0.02) !important;
+}
+.qm-textarea {
+  resize: vertical !important;
+  min-height: 80px !important;
+}
+.qm-textarea-mono {
+  font-family: SFMono-Regular, Consolas, "Liberation Mono", Menlo, Courier, monospace !important;
+}
+
+.qm-select {
+  width: 100%;
+  padding: 10px 14px;
+  background: var(--color-surface-strong, #ffffff) !important;
+  border: 1px solid var(--color-border) !important;
+  border-radius: var(--radius-pill, 10px) !important;
+  color: var(--color-text) !important;
+  outline: none !important;
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.02) !important;
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast) !important;
+  appearance: none !important;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 24 24' stroke='%236f675d' stroke-width='2'%3E%3Cpath stroke-linecap='round' stroke-linejoin='round' d='M19 9l-7 7-7-7'%3E%3C/path%3E%3C/svg%3E") !important;
+  background-repeat: no-repeat !important;
+  background-position: right 14px center !important;
+  background-size: 16px !important;
+  padding-right: 40px !important;
+}
+.qm-select:focus {
+  border-color: var(--color-accent-strong) !important;
+  box-shadow: 0 0 0 3px rgba(183, 215, 235, 0.3) !important;
+}
+
+/* Button Styles */
+.qm-btn {
+  padding: 10px 20px;
+  font-size: 0.95rem;
+  font-weight: 600;
+  border-radius: var(--radius-pill, 10px);
+  cursor: pointer;
+  border: none;
+  transition: transform 0.15s, opacity 0.15s, box-shadow 0.15s;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: var(--color-surface-soft);
+  color: var(--color-text-muted);
+  border: 1px solid var(--color-border);
+}
+.qm-btn:hover {
+  background: var(--color-btn-hover);
+}
+.qm-btn:active {
+  transform: scale(0.97);
+}
+.qm-btn-primary {
+  background: var(--color-accent-strong) !important;
+  color: #1a5276 !important;
+  border: 1px solid rgba(0, 0, 0, 0.04) !important;
+}
+.qm-btn-primary:hover {
+  opacity: 0.92 !important;
+  box-shadow: 0 4px 12px rgba(183, 215, 235, 0.3) !important;
+}
+.qm-btn-text {
+  background: transparent !important;
+  border: none !important;
+  color: var(--color-text-muted) !important;
+  padding: 4px 8px !important;
+  font-weight: 600 !important;
+  box-shadow: none !important;
+  border-radius: 6px !important;
+}
+.qm-btn-text:hover {
+  background: rgba(0, 0, 0, 0.04) !important;
+  color: var(--color-text) !important;
+}
+
+/* Theme Selector Segment Controller Styles */
+.qm-theme-btn {
+  flex: 1;
+  padding: 10px 16px;
+  font-size: 0.9rem;
+  font-weight: 600;
+  border-radius: var(--radius-pill, 10px);
+  border: 1px solid var(--color-border);
+  background: var(--color-surface-soft);
+  color: var(--color-text-muted);
+  text-align: center;
+  transition: all var(--transition-fast);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+.qm-theme-btn:hover {
+  background: var(--color-btn-hover);
+  color: var(--color-text);
+}
+.qm-theme-btn.active {
+  background: var(--color-accent-strong) !important;
+  color: #1a5276 !important;
+  border-color: rgba(0, 0, 0, 0.04) !important;
+  box-shadow: 0 4px 12px rgba(183, 215, 235, 0.2) !important;
+}
+.qm-dark .qm-theme-btn.active {
+  background: var(--color-accent-strong) !important;
+  color: #1a2e3b !important;
+  box-shadow: 0 4px 12px rgba(115, 161, 192, 0.25) !important;
+}
+
+/* Premium Global Frosted Loader Overlay Styles */
+#qm-global-loader {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  width: 340px;
+  background: var(--color-surface);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--color-border-strong);
+  border-radius: 16px;
+  box-shadow: var(--shadow-panel);
+  padding: 16px;
+  z-index: 10000000;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  transition: opacity 0.3s ease, transform 0.3s ease;
+}
+#qm-global-loader.qm-loader-hiding {
+  opacity: 0;
+  transform: translateY(20px) scale(0.95);
+}
+.qm-loader-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.qm-loader-body {
+  flex: 1;
+  min-width: 0;
+}
+.qm-loader-title {
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: var(--color-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.qm-loader-text {
+  font-size: 0.8rem;
+  color: var(--color-text-muted);
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.qm-progress-container {
+  height: 6px;
+  background: var(--color-surface-soft);
+  border-radius: 3px;
+  overflow: hidden;
+  border: 1px solid var(--color-border);
+  cursor: pointer;
+}
+.qm-progress-bar {
+  height: 100%;
+  width: 0%;
+  background: var(--color-accent-strong);
+  transition: width 0.2s ease;
+}
+.qm-loader-footer {
+  border-top: 1px solid var(--color-border);
+  padding-top: 12px;
+}
+
+/* Spinner Styles */
+.qm-spinner {
+  display: inline-block !important;
+  width: 16px !important;
+  height: 16px !important;
+  border: 2px solid rgba(0,0,0,0.1) !important;
+  border-left-color: currentColor !important;
+  border-radius: 50% !important;
+  animation: qm-spin 0.8s linear infinite !important;
+  vertical-align: middle !important;
+}
+.qm-spinner-xs {
+  width: 12px !important;
+  height: 12px !important;
+  border-width: 1.5px !important;
+}
+.qm-spinner-dark {
+  border-color: rgba(75, 63, 47, 0.15) !important;
+  border-left-color: var(--color-text) !important;
+}
+@keyframes qm-spin {
+  to { transform: rotate(360deg) !important; }
 }
 
 .qa-wrapper {
@@ -5947,6 +6420,13 @@
   transform-origin: center;
   pointer-events: auto;
   will-change: transform, opacity;
+  cursor: grab;
+}
+
+.command-menu.is-dragging {
+  cursor: grabbing !important;
+  user-select: none !important;
+  -webkit-user-select: none !important;
 }
 
 .search-bar,
@@ -6179,7 +6659,7 @@
   padding: 0 16px;
 }
 
-.progress-bar-track { 
+.progress-bar-track {
   flex: 1;
   height: 28px;
   position: relative;
@@ -6189,7 +6669,7 @@
   overflow: hidden;
 }
 
-.progress-bar-fill { 
+.progress-bar-fill {
   height: 100%;
   background: var(--color-accent-strong);
   width: 0%;
@@ -6340,10 +6820,10 @@
   text-transform: capitalize;
 }
 
-.status-active { background: #E3F2FD; color: #1976D2; }
-.status-warning { background: #FFF3E0; color: #F57C00; }
-.status-error { background: #FFEBEE; color: #D32F2F; }
-.status-neutral { background: #F5F5F5; color: #616161; }
+.status-active { background: var(--color-tag-blue-bg); color: var(--color-tag-blue-text); }
+.status-warning { background: var(--color-tag-orange-bg); color: var(--color-tag-orange-text); }
+.status-error { background: var(--color-tag-red-bg); color: var(--color-tag-red-text); }
+.status-neutral { background: var(--color-border); color: var(--color-text-muted); }
 
 .qm-batch-item-row:hover td {
   background: var(--color-surface-soft);
@@ -6357,8 +6837,8 @@
   align-items: center;
   justify-content: center;
 }
-.expanded .qm-accordion-chevron { 
-  transform: rotate(180deg); 
+.expanded .qm-accordion-chevron {
+  transform: rotate(180deg);
 }
 
 .qm-batch-group-header, .qm-batch-seksi-header {
@@ -6500,6 +6980,117 @@
   }
 }
 
+.qm-premium-pane {
+  padding: 24px 32px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  height: 100%;
+  overflow-y: auto;
+  box-sizing: border-box;
+}
+
+.qm-premium-scroll {
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 8px;
+  box-sizing: border-box;
+}
+
+.qm-premium-card {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin: 0;
+  padding: 20px !important;
+  box-sizing: border-box;
+}
+
+.qm-premium-card-title {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: var(--color-text);
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.qm-premium-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.qm-premium-form-grid.is-three {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.qm-premium-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 24px;
+  align-items: start;
+}
+
+.qm-premium-grid .qm-card {
+  min-width: 0;
+}
+
+.qm-settings-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  align-items: start;
+}
+
+.qm-settings-card-wide {
+  grid-column: 1 / -1;
+}
+
+.qm-toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-surface-soft);
+}
+
+.qm-process-note {
+  font-size: 0.82rem;
+  line-height: 1.5;
+  color: var(--color-text-muted);
+  background: var(--color-surface-soft);
+  border: 1px dashed var(--color-border);
+  border-radius: 8px;
+  padding: 12px;
+}
+
+@media (max-width: 768px) {
+  .qm-premium-pane {
+    padding: 16px 20px 20px;
+    overflow-y: auto;
+  }
+
+  .qm-premium-pane .qm-karyawan-split-layout {
+    height: auto;
+    overflow: visible;
+  }
+
+  .qm-premium-pane .qm-premium-scroll {
+    overflow: visible;
+    padding-right: 0;
+  }
+
+  .qm-premium-grid,
+  .qm-settings-grid,
+  .qm-premium-form-grid,
+  .qm-premium-form-grid.is-three {
+    grid-template-columns: 1fr;
+  }
+}
+
 /* Premium Forms & Input Elements */
 .qm-form-group {
   display: flex;
@@ -6625,7 +7216,7 @@
   text-decoration: none !important;
 }
 .qm-btn-premium-secondary:hover {
-  background: #eee !important;
+  background: var(--color-border) !important;
   opacity: 0.9 !important;
 }
 .qm-btn-premium-secondary:active {
@@ -6634,9 +7225,9 @@
 
 .qm-btn-premium-danger {
   padding: 10px 24px !important;
-  background: #FFF5F5 !important;
-  color: #E53935 !important;
-  border: 1px solid #FFCDD2 !important;
+  background: var(--color-tag-red-bg) !important;
+  color: var(--color-tag-red-text) !important;
+  border: 1px solid var(--color-tag-red-text) !important;
   border-radius: 8px !important;
   font-weight: 600 !important;
   font-size: 0.95rem !important;
@@ -6648,11 +7239,11 @@
   text-decoration: none !important;
 }
 .qm-btn-premium-danger:hover {
-  background: #FFEBEB !important;
-  border-color: #EF9A9A !important;
+  opacity: 0.95 !important;
+  box-shadow: 0 0 0 3px rgba(229, 57, 53, 0.15) !important;
 }
 .qm-btn-premium-danger:active {
-  background: #FFCDD2 !important;
+  opacity: 0.8 !important;
 }
 
 /* Premium Collapsible Group Headers */
@@ -6673,18 +7264,18 @@
   box-shadow: 0 2px 4px rgba(0,0,0,0.02) !important;
 }
 .qm-preview-cards:hover {
-  background: #f0ede8 !important;
+  background: var(--color-border) !important;
   box-shadow: 0 4px 8px rgba(0,0,0,0.05) !important;
 }
 
 /* Scrollable Detail & Editor Panels */
 .qm-karyawan-panel {
-  
+
   padding-right: 8px !important;
 }
 /* Premium Live Preview Card */
 .qm-premium-preview-card {
-  background: linear-gradient(135deg, #ffffff 0%, #faf8f5 100%);
+  background: linear-gradient(135deg, var(--color-surface-strong) 0%, var(--color-surface-soft) 100%);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-card);
   padding: 12px 16px;
@@ -6700,8 +7291,8 @@
   width: 48px;
   height: 48px;
   border-radius: 50%;
-  background: #e1f5fe;
-  color: #0288d1;
+  background: var(--color-tag-blue-bg);
+  color: var(--color-tag-blue-text);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -6745,7 +7336,7 @@
 }
 
 .qm-directory-item {
-  background: #ffffff;
+  background: var(--color-surface-strong);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-card);
   padding: 12px 16px;
@@ -6759,12 +7350,12 @@
 
 .qm-directory-item:hover {
   border-color: var(--color-border-strong);
-  background: #faf8f5;
+  background: var(--color-surface-soft);
 }
 
 .qm-directory-item.active {
   border-color: var(--color-accent-strong);
-  background: #e7f4ff;
+  background: var(--color-tag-blue-bg);
 }
 
 .qm-directory-avatar {
@@ -6800,60 +7391,95 @@
   margin: 0 0 12px 0;
 }
 
+/* Premium Attendance Grid Layout */
+.qm-attendance-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 20px;
+  width: 100%;
+}
+
+@media (max-width: 768px) {
+  .qm-attendance-grid {
+    grid-template-columns: 1fr;
+    gap: 16px;
+  }
+}
+
+/* Custom styles for qm-hadir-row-tr and hover effects */
+.qm-hadir-row-tr:hover {
+  background-color: var(--color-surface-soft) !important;
+}
+.qm-btn-barcode-delete {
+  background: transparent !important;
+  color: var(--color-text-soft) !important;
+  border-radius: 50% !important;
+  font-weight: bold !important;
+  transition: all 0.15s ease !important;
+}
+.qm-btn-barcode-delete:hover {
+  background-color: var(--color-tag-red-bg) !important;
+  color: var(--color-tag-red-text) !important;
+}
 `);
 
   /** Claude-style Spike Mark SVG (4-spoke radial). */
   const SPIKE_SVG = `<svg class="qm-spike-mark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round"><line x1="12" y1="4" x2="12" y2="20"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="6.34" y1="6.34" x2="17.66" y2="17.66"/><line x1="6.34" y1="17.66" x2="17.66" y2="6.34"/></svg>`;
 
-  const VIEW_CEK_NRP = `<div id="qm-pane-cek-nrp" class="qm-pane" style="padding: 24px 32px; display: flex; flex-direction: column; gap: 32px;">
-    <!-- Single Check Group -->
-    <div>
-      <h3 style="margin: 0 0 16px 0; font-size: 1.05rem; font-weight: 700; color: var(--color-text);">Pencarian Tunggal</h3>
+  const VIEW_CEK_NRP = `<div id="qm-pane-cek-nrp" class="qm-pane" style="padding: 24px 32px; display: flex; flex-direction: column; gap: 24px; box-sizing: border-box;">
+    <!-- Top Row: Grid containing 2 Cards -->
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 24px; align-items: stretch;">
       
-      <div style="display: flex; gap: 16px; margin-bottom: 16px;">
-        <div style="flex: 1;">
-          <label style="display:block; font-size:0.85rem; font-weight:600; color:var(--color-text-muted); margin-bottom:8px;">Bulan</label>
-          <select id="qm-input-bulan" style="width:100%; padding:10px 14px; border:1px solid var(--color-border); border-radius:8px; font-size:1rem; background:transparent; color:var(--color-text); outline:none; transition: border-color 0.2s;"></select>
+      <!-- Single Check Card -->
+      <div class="qm-card" style="display: flex; flex-direction: column; gap: 16px; margin: 0; padding: 20px; box-sizing: border-box;">
+        <h3 style="margin: 0; font-size: 1.05rem; font-weight: 700; color: var(--color-text);">Pencarian Tunggal</h3>
+
+        <div style="display: flex; gap: 16px;">
+          <div style="flex: 1;">
+            <label style="display:block; font-size:0.85rem; font-weight:600; color:var(--color-text-muted); margin-bottom:8px;">Bulan</label>
+            <select id="qm-input-bulan" class="qm-select" style="width:100%; padding:10px 14px; border:1px solid var(--color-border); border-radius:8px; font-size:1rem; background:transparent; color:var(--color-text); outline:none; transition: border-color 0.2s;"></select>
+          </div>
+          <div style="flex: 1;">
+            <label style="display:block; font-size:0.85rem; font-weight:600; color:var(--color-text-muted); margin-bottom:8px;">Tahun</label>
+            <select id="qm-input-tahun" class="qm-select" style="width:100%; padding:10px 14px; border:1px solid var(--color-border); border-radius:8px; font-size:1rem; background:transparent; color:var(--color-text); outline:none; transition: border-color 0.2s;"></select>
+          </div>
         </div>
-        <div style="flex: 1;">
-          <label style="display:block; font-size:0.85rem; font-weight:600; color:var(--color-text-muted); margin-bottom:8px;">Tahun</label>
-          <select id="qm-input-tahun" style="width:100%; padding:10px 14px; border:1px solid var(--color-border); border-radius:8px; font-size:1rem; background:transparent; color:var(--color-text); outline:none; transition: border-color 0.2s;"></select>
+
+        <div>
+          <label style="display:block; font-size:0.85rem; font-weight:600; color:var(--color-text-muted); margin-bottom:8px;">NRP</label>
+          <input id="qm-input-nrp" class="qm-input" type="text" placeholder="Masukkan 4/8 digit NRP" maxlength="8" autocomplete="off" spellcheck="false" style="width:100%; padding:10px 14px; border:1px solid var(--color-border); border-radius:8px; font-size:1rem; background:transparent; color:var(--color-text); outline:none; transition: border-color 0.2s;">
+        </div>
+
+        <div style="margin-top: auto; padding-top: 8px;">
+          <button id="qm-btn-check" type="button" class="qm-btn-premium-primary" style="width: 100%;">Cek NRP</button>
+        </div>
+
+        <div id="qm-result" style="display: none; margin-top: 16px;">
+          <div id="qm-result-title"></div>
+          <div id="qm-result-body"></div>
+        </div>
+        <div id="qm-history" style="margin-top: 16px;"></div>
+      </div>
+
+      <!-- Batch Check Card -->
+      <div class="qm-card" style="display: flex; flex-direction: column; gap: 16px; margin: 0; padding: 20px; box-sizing: border-box;">
+        <h3 style="margin: 0; font-size: 1.05rem; font-weight: 700; color: var(--color-text);">Pencarian Massal</h3>
+        
+        <div style="flex: 1; display: flex; flex-direction: column; gap: 8px;">
+          <label style="display:block; font-size:0.85rem; font-weight:600; color:var(--color-text-muted);">Daftar NRP</label>
+          <textarea id="qm-input-multi-nrp" class="qm-textarea" placeholder="Pisahkan dengan enter atau koma" style="width:100%; flex: 1; min-height: 100px; padding:10px 14px; border:1px solid var(--color-border); border-radius:8px; font-size:1rem; background:transparent; color:var(--color-text); outline:none; transition: border-color 0.2s; resize: none; box-sizing: border-box;"></textarea>
+        </div>
+
+        <div style="display: flex; gap: 12px; margin-top: auto; padding-top: 8px;">
+          <button id="qm-btn-batch-check" type="button" class="qm-btn-premium-secondary" style="flex: 1;">Proses Batch</button>
+          <button id="qm-btn-batch-clear" type="button" class="qm-btn-premium-danger" style="flex: 1;">Hapus Batch</button>
         </div>
       </div>
 
-      <div style="margin-bottom: 24px;">
-        <label style="display:block; font-size:0.85rem; font-weight:600; color:var(--color-text-muted); margin-bottom:8px;">NRP</label>
-        <input id="qm-input-nrp" type="text" placeholder="Masukkan 4/8 digit NRP" maxlength="8" autocomplete="off" spellcheck="false" style="width:100%; padding:10px 14px; border:1px solid var(--color-border); border-radius:8px; font-size:1rem; background:transparent; color:var(--color-text); outline:none; transition: border-color 0.2s;">
-      </div>
-
-      <div style="display: flex; gap: 12px;">
-        <button id="qm-btn-check" type="button" class="qm-btn-premium-primary">Cek NRP</button>
-      </div>
-
-      <div id="qm-result" style="display: none; margin-top: 16px;">
-        <div id="qm-result-title"></div>
-        <div id="qm-result-body"></div>
-      </div>
-      <div id="qm-history" style="margin-top: 16px;"></div>
     </div>
 
-    <hr style="border: 0; border-top: 1px solid var(--color-border); margin: 0;">
-
-    <!-- Batch Check Group -->
-    <div>
-      <h3 style="margin: 0 0 16px 0; font-size: 1.05rem; font-weight: 700; color: var(--color-text);">Pencarian Massal</h3>
-      <div style="margin-bottom: 24px;">
-        <label style="display:block; font-size:0.85rem; font-weight:600; color:var(--color-text-muted); margin-bottom:8px;">Daftar NRP</label>
-        <textarea id="qm-input-multi-nrp" placeholder="Pisahkan dengan enter atau koma" rows="4" style="width:100%; padding:10px 14px; border:1px solid var(--color-border); border-radius:8px; font-size:1rem; background:transparent; color:var(--color-text); outline:none; transition: border-color 0.2s; resize: vertical;"></textarea>
-      </div>
-
-      <div style="display: flex; gap: 12px;">
-        <button id="qm-btn-batch-check" type="button" class="qm-btn-premium-secondary">Proses Batch</button>
-        <button id="qm-btn-batch-clear" type="button" class="qm-btn-premium-danger">Hapus Batch</button>
-      </div>
-
-      <div id="qm-batch-results" style="margin-top: 16px; outline: none;" tabindex="-1"></div>
-    </div>
+    <!-- Bottom Section: Batch Results Table -->
+    <div id="qm-batch-results" style="outline: none;" tabindex="-1"></div>
   </div>`;
   const VIEW_CEK_KARY = `<div id="qm-pane-cek-kary" class="qm-pane" style="padding: 16px 24px 24px; display: flex; flex-direction: column; height: 100%; overflow: hidden; box-sizing: border-box;">
     <div class="qm-karyawan-split-layout">
@@ -6861,12 +7487,12 @@
       <div style="display: flex; flex-direction: column; gap: 12px; height: 100%; overflow-y: auto; padding-right: 8px; box-sizing: border-box; min-height: 0;">
         <div class="qm-card" style="padding: 16px 20px; display: flex; flex-direction: column; gap: 12px; flex-shrink: 0;">
           <h3 style="margin: 0; font-size: 1.1rem; font-weight: 600; color: var(--color-text);">Cari Data Personal</h3>
-          
+
           <div class="qm-form-group" style="margin-bottom: 0;">
             <label class="qm-form-label" style="font-size: 0.8rem; margin-bottom: 4px;">NRP atau Nama Karyawan</label>
             <input id="qm-input-karyawan-search" type="text" class="qm-premium-input" placeholder="e.g. 80001234 atau Jane Cooper" autocomplete="off" spellcheck="false" style="padding: 8px 12px; font-size: 0.9rem;">
           </div>
-          
+
           <div class="qm-button-row" style="gap: 8px;">
             <button id="qm-btn-karyawan-search" type="button" class="qm-btn-premium-primary" style="flex:1; padding: 8px 16px !important; font-size: 0.9rem !important;">Cari Karyawan</button>
             <button id="qm-btn-karyawan-reset" type="button" class="qm-btn-premium-secondary" style="flex:1; padding: 8px 16px !important; font-size: 0.9rem !important;">Reset</button>
@@ -6879,7 +7505,7 @@
           </div>
         </div>
       </div>
-      
+
       <!-- Right Column: Results Directory -->
       <div style="display: flex; flex-direction: column; gap: 12px; height: 100%; overflow-y: auto; padding-right: 8px; box-sizing: border-box; min-height: 0;">
         <h3 id="qm-karyawan-directory-title" class="qm-section-header" style="margin: 0; font-size: 1.1rem; font-weight: 600; color: var(--color-text); padding-bottom: 4px; text-transform: none; letter-spacing: normal;">Hasil Pencarian</h3>
@@ -6887,193 +7513,210 @@
       </div>
     </div>
   </div>`;
-  const VIEW_SPKL = `<div id="qm-pane-spkl" class="qm-pane">
-        <div class="qm-pane-header">
-          ${SPIKE_SVG}
-          <h6 class="qm-serif">SPKL</h6>
-        </div>
-        <div class="qm-w-full">
-          <div class="qm-card qm-mb-m">
-            <h6 class="qm-section-title qm-mb-m qm-text-s">${SPIKE_SVG} Cek SPKL</h6>
-            <div class="qm-flex qm-gap-m qm-mb-m">
-              <div class="qm-flex-1">
-                <label class="qm-field-label">NRP</label>
-                <input id="qm-spkl-page-nrp" type="text" placeholder="NRP" maxlength="8" autocomplete="off" class="qm-input">
-              </div>
-              <div class="qm-flex-1">
-                <label class="qm-field-label">Start Date</label>
-                <input id="qm-spkl-page-start-date" type="date" class="qm-input">
-              </div>
-              <div class="qm-flex-1">
-                <label class="qm-field-label">End Date</label>
-                <input id="qm-spkl-page-end-date" type="date" class="qm-input">
-              </div>
-            </div>
-            <button id="qm-btn-spkl-page-cek" type="button" class="qm-btn qm-btn-primary">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-              Cek SPKL
-            </button>
-            <div id="qm-spkl-result"></div>
-          </div>
 
-          <div class="qm-card qm-mb-m">
-            <h6 class="qm-section-title qm-mb-m qm-text-s">${SPIKE_SVG} SPKL Online</h6>
-            <div class="qm-flex qm-gap-m qm-mb-m">
-              <div class="qm-flex-1">
-                <label class="qm-field-label">NRP</label>
-                <input id="qm-spkl-online-nrp" type="text" placeholder="NRP" maxlength="8" autocomplete="off" class="qm-input">
-              </div>
-              <div class="qm-flex-1">
-                <label class="qm-field-label">Tanggal</label>
-                <input id="qm-spkl-online-date" type="date" class="qm-input">
-              </div>
-            </div>
-            <button id="qm-btn-spkl-online-cek" type="button" class="qm-btn qm-btn-primary">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-              Cek SPKL Online
-            </button>
-          </div>
-
-          <div class="qm-card qm-mb-m qm-info-box">
-            <h6 class="qm-section-title qm-mb-s qm-text-s">${SPIKE_SVG} Referensi Kode OT</h6>
-            <div style="font-size:11px; line-height:1.6">
-              <b>1:</b> BIASA | <b>2:</b> LONG | <b>3:</b> NONSTOP | <b>4:</b> AWAL<br> <b>5A/B/C:</b> NOREST | <b>6:</b> STANDBY | <b>7:</b> LAIN | <b>OT:</b> OVERTIME
-            </div>
-          </div>
-
-          <div class="qm-card qm-mb-m">
-            <h6 class="qm-section-title qm-mb-m qm-text-s">${SPIKE_SVG} Per NRP</h6>
-            <div class="qm-mb-m">
+  const VIEW_SPKL = `<div id="qm-pane-spkl" class="qm-pane qm-premium-pane">
+    <div class="qm-karyawan-split-layout">
+      <div class="qm-premium-scroll" style="display: flex; flex-direction: column; gap: 12px;">
+        <div class="qm-card qm-premium-card">
+          <h3 class="qm-premium-card-title">Cek SPKL</h3>
+          <div class="qm-premium-form-grid is-three">
+            <div>
               <label class="qm-field-label">NRP</label>
-              <input id="qm-fix-spkl-nrp" type="text" placeholder="NRP (4 atau 8 digit)" maxlength="8" autocomplete="off" class="qm-input">
+              <input id="qm-spkl-page-nrp" type="text" placeholder="NRP" maxlength="8" autocomplete="off" class="qm-input">
             </div>
-            <div class="qm-flex qm-gap-m qm-mb-m">
-              <div class="qm-flex-1">
-                <label class="qm-field-label">Bulan</label>
-                <select id="qm-fix-spkl-bulan" class="qm-select qm-font-semibold"></select>
-              </div>
-              <div class="qm-flex-1">
-                <label class="qm-field-label">Tahun</label>
-                <select id="qm-fix-spkl-tahun" class="qm-select qm-font-semibold"></select>
-              </div>
+            <div>
+              <label class="qm-field-label">Start Date</label>
+              <input id="qm-spkl-page-start-date" type="date" class="qm-input">
             </div>
-            <div class="qm-mb-m">
-              <label class="qm-field-label">Data Tanggal-KodeOT</label>
-              <textarea id="qm-fix-spkl-data" placeholder="Contoh: 2-1, 5-OT, 10-3" rows="2" class="qm-textarea qm-textarea-mono"></textarea>
+            <div>
+              <label class="qm-field-label">End Date</label>
+              <input id="qm-spkl-page-end-date" type="date" class="qm-input">
             </div>
-            <div id="qm-fix-spkl-ot7-box" class="qm-mb-m qm-ot7-box qm-hidden">
-              <div class="qm-flex qm-gap-m qm-mb-m">
-                <div class="qm-flex-1">
-                  <label class="qm-field-label qm-field-label-normal">Jam Awal</label>
-                  <input id="qm-fix-spkl-jam-awal" type="time" class="qm-input qm-field-time">
-                </div>
-                <div class="qm-flex-1">
-                  <label class="qm-field-label qm-field-label-normal">Jam Akhir</label>
-                  <input id="qm-fix-spkl-jam-akhir" type="time" class="qm-input qm-field-time">
-                </div>
+          </div>
+          <button id="qm-btn-spkl-page-cek" type="button" class="qm-btn-premium-primary" style="width: 100%;">Cek SPKL</button>
+        </div>
+
+        <div class="qm-card qm-premium-card">
+          <h3 class="qm-premium-card-title">SPKL Online</h3>
+          <div class="qm-premium-form-grid">
+            <div>
+              <label class="qm-field-label">NRP</label>
+              <input id="qm-spkl-online-nrp" type="text" placeholder="NRP" maxlength="8" autocomplete="off" class="qm-input">
+            </div>
+            <div>
+              <label class="qm-field-label">Tanggal</label>
+              <input id="qm-spkl-online-date" type="date" class="qm-input">
+            </div>
+          </div>
+          <button id="qm-btn-spkl-online-cek" type="button" class="qm-btn-premium-primary" style="width: 100%;">Cek SPKL Online</button>
+        </div>
+
+        <div class="qm-card qm-premium-card">
+          <h3 class="qm-premium-card-title">Per NRP</h3>
+          <div>
+            <label class="qm-field-label">NRP</label>
+            <input id="qm-fix-spkl-nrp" type="text" placeholder="NRP (4 atau 8 digit)" maxlength="8" autocomplete="off" class="qm-input">
+          </div>
+          <div class="qm-premium-form-grid">
+            <div>
+              <label class="qm-field-label">Bulan</label>
+              <select id="qm-fix-spkl-bulan" class="qm-select qm-font-semibold"></select>
+            </div>
+            <div>
+              <label class="qm-field-label">Tahun</label>
+              <select id="qm-fix-spkl-tahun" class="qm-select qm-font-semibold"></select>
+            </div>
+          </div>
+          <div>
+            <label class="qm-field-label">Data Tanggal-KodeOT</label>
+            <textarea id="qm-fix-spkl-data" placeholder="Contoh: 2-1, 5-OT, 10-3" rows="2" class="qm-textarea qm-textarea-mono"></textarea>
+          </div>
+          <div id="qm-fix-spkl-ot7-box" class="qm-ot7-box qm-hidden">
+            <div class="qm-premium-form-grid" style="margin-bottom: 16px;">
+              <div>
+                <label class="qm-field-label qm-field-label-normal">Jam Awal</label>
+                <input id="qm-fix-spkl-jam-awal" type="time" class="qm-input qm-field-time">
               </div>
               <div>
-                <label class="qm-field-label qm-field-label-normal">Shift</label>
-                <select id="qm-fix-spkl-shift" class="qm-select qm-field-shift">
-                  <option value="1">SHIFT I</option>
-                  <option value="2">SHIFT II</option>
-                  <option value="3">SHIFT III</option>
-                  <option value="4">LONG SHIFT I</option>
-                  <option value="5">LONG SHIFT II</option>
-                </select>
+                <label class="qm-field-label qm-field-label-normal">Jam Akhir</label>
+                <input id="qm-fix-spkl-jam-akhir" type="time" class="qm-input qm-field-time">
               </div>
             </div>
-            <button id="qm-btn-spkl-batch" type="button" class="qm-btn qm-btn-primary">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="18" x2="12" y2="12"/><line x1="9" y1="15" x2="15" y2="15"/></svg>
-              Proses Per NRP
-            </button>
+            <div>
+              <label class="qm-field-label qm-field-label-normal">Shift</label>
+              <select id="qm-fix-spkl-shift" class="qm-select qm-field-shift">
+                <option value="1">SHIFT I</option>
+                <option value="2">SHIFT II</option>
+                <option value="3">SHIFT III</option>
+                <option value="4">LONG SHIFT I</option>
+                <option value="5">LONG SHIFT II</option>
+              </select>
+            </div>
           </div>
+          <button id="qm-btn-spkl-batch" type="button" class="qm-btn-premium-primary" style="width: 100%;">Proses Per NRP</button>
+        </div>
 
-          <div class="qm-card">
-            <h6 class="qm-section-title qm-mb-m qm-text-s">${SPIKE_SVG} Banyak NRP</h6>
-            <div class="qm-mb-m">
-              <label class="qm-field-label">Daftar NRP</label>
-              <textarea id="qm-fix-many-nrps" placeholder="Daftar NRP (pisahkan koma atau baris)" rows="2" class="qm-textarea qm-textarea-mono"></textarea>
+        <div class="qm-card qm-premium-card">
+          <h3 class="qm-premium-card-title">Banyak NRP</h3>
+          <div>
+            <label class="qm-field-label">Daftar NRP</label>
+            <textarea id="qm-fix-many-nrps" placeholder="Daftar NRP (pisahkan koma atau baris)" rows="2" class="qm-textarea qm-textarea-mono"></textarea>
+          </div>
+          <div class="qm-premium-form-grid">
+            <div>
+              <label class="qm-field-label">Tanggal</label>
+              <input id="qm-fix-many-date" type="date" class="qm-input">
             </div>
-            <div class="qm-flex qm-gap-m qm-mb-m">
-              <div class="qm-flex-1">
-                <label class="qm-field-label">Tanggal</label>
-                <input id="qm-fix-many-date" type="date" class="qm-input">
-              </div>
-              <div class="qm-flex-1">
-                <label class="qm-field-label">Jenis OT</label>
-                <select id="qm-fix-many-ot" class="qm-select qm-font-semibold">
-                  <option value="1">OT BIASA</option>
-                  <option value="2">LONG SHIFT</option>
-                  <option value="3">NON STOP</option>
-                  <option value="4">OT AWAL</option>
-                  <option value="5A">NO REST (AWAL)</option>
-                  <option value="5B">NO REST (TENGAH)</option>
-                  <option value="5C">NO REST (AKHIR)</option>
-                  <option value="6">STANDBY</option>
-                  <option value="7">LAIN-LAIN</option>
-                  <option value="OT">OVERTIME</option>
-                </select>
-              </div>
+            <div>
+              <label class="qm-field-label">Jenis OT</label>
+              <select id="qm-fix-many-ot" class="qm-select qm-font-semibold">
+                <option value="1">OT BIASA</option>
+                <option value="2">LONG SHIFT</option>
+                <option value="3">NON STOP</option>
+                <option value="4">OT AWAL</option>
+                <option value="5A">NO REST (AWAL)</option>
+                <option value="5B">NO REST (TENGAH)</option>
+                <option value="5C">NO REST (AKHIR)</option>
+                <option value="6">STANDBY</option>
+                <option value="7">LAIN-LAIN</option>
+                <option value="OT">OVERTIME</option>
+              </select>
             </div>
-            <div id="qm-fix-many-ot7-box" class="qm-mb-m qm-ot7-box qm-hidden">
-              <div class="qm-flex qm-gap-m qm-mb-m">
-                <div class="qm-flex-1">
-                  <label class="qm-field-label qm-field-label-normal">Jam Awal</label>
-                  <input id="qm-fix-many-jam-awal" type="time" class="qm-input qm-field-time">
-                </div>
-                <div class="qm-flex-1">
-                  <label class="qm-field-label qm-field-label-normal">Jam Akhir</label>
-                  <input id="qm-fix-many-jam-akhir" type="time" class="qm-input qm-field-time">
-                </div>
+          </div>
+          <div id="qm-fix-many-ot7-box" class="qm-ot7-box qm-hidden">
+            <div class="qm-premium-form-grid" style="margin-bottom: 16px;">
+              <div>
+                <label class="qm-field-label qm-field-label-normal">Jam Awal</label>
+                <input id="qm-fix-many-jam-awal" type="time" class="qm-input qm-field-time">
               </div>
               <div>
-                <label class="qm-field-label qm-field-label-normal">Shift</label>
-                <select id="qm-fix-many-shift" class="qm-select qm-field-shift">
-                  <option value="1">SHIFT I</option>
-                  <option value="2">SHIFT II</option>
-                  <option value="3">SHIFT III</option>
-                  <option value="4">LONG SHIFT I</option>
-                  <option value="5">LONG SHIFT II</option>
-                </select>
+                <label class="qm-field-label qm-field-label-normal">Jam Akhir</label>
+                <input id="qm-fix-many-jam-akhir" type="time" class="qm-input qm-field-time">
               </div>
             </div>
-            <button id="qm-btn-spkl-many-nrp" type="button" class="qm-btn qm-btn-primary">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
-              Proses Banyak NRP
-            </button>
-          </div>
-        </div>
-      </div>`;
-  const VIEW_KEHADIRAN = `<div id="qm-pane-kehadiran" class="qm-pane">
-        <div class="qm-pane-header">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
-          <h6>Kehadiran</h6>
-        </div>
-        <div class="qm-w-full">
-          <div class="qm-card qm-mb-m">
-            <h6 class="qm-section-title qm-mb-m qm-text-s">Check NRP</h6>
-            <div class="qm-flex qm-gap-m qm-mb-m">
-              <div class="qm-flex-1">
-                <label class="qm-field-label">NRP</label>
-                <input id="qm-input-hadir-check-nrp" type="text" placeholder="NRP" maxlength="8" autocomplete="off" class="qm-input">
-              </div>
-              <div class="qm-flex-1">
-                <label class="qm-field-label">Start date</label>
-                <input id="qm-input-hadir-check-start-date" type="date" class="qm-input">
-              </div>
-              <div class="qm-flex-1">
-                <label class="qm-field-label">End date</label>
-                <input id="qm-input-hadir-check-end-date" type="date" class="qm-input">
-              </div>
+            <div>
+              <label class="qm-field-label qm-field-label-normal">Shift</label>
+              <select id="qm-fix-many-shift" class="qm-select qm-field-shift">
+                <option value="1">SHIFT I</option>
+                <option value="2">SHIFT II</option>
+                <option value="3">SHIFT III</option>
+                <option value="4">LONG SHIFT I</option>
+                <option value="5">LONG SHIFT II</option>
+              </select>
             </div>
-            <button id="qm-btn-hadir-check" type="button" class="qm-btn qm-btn-primary">Check</button>
-            <div id="qm-hadir-check-result" class="qm-mt-m"></div>
           </div>
+          <button id="qm-btn-spkl-many-nrp" type="button" class="qm-btn-premium-primary" style="width: 100%;">Proses Banyak NRP</button>
+        </div>
+      </div>
 
-          <div class="qm-card qm-mb-m">
-            <h6 class="qm-section-title qm-mb-m qm-text-s">👥 Per NRP</h6>
-            <div class="qm-flex qm-gap-m qm-mb-m">
+      <div class="qm-premium-scroll" style="display: flex; flex-direction: column; gap: 12px;">
+        <div class="qm-card qm-premium-card" style="flex-shrink: 0;">
+          <h3 class="qm-premium-card-title">Hasil Cek SPKL</h3>
+          <div id="qm-spkl-result">
+            <div class="qm-hadir-check-detail-empty">Silakan lakukan pengecekan SPKL terlebih dahulu.</div>
+          </div>
+        </div>
+
+        <div class="qm-card qm-premium-card qm-info-box">
+          <h3 class="qm-premium-card-title">Referensi Kode OT</h3>
+          <div class="qm-process-note" style="font-size: 0.78rem;">
+            <b>1:</b> BIASA | <b>2:</b> LONG | <b>3:</b> NONSTOP | <b>4:</b> AWAL<br>
+            <b>5A/B/C:</b> NOREST | <b>6:</b> STANDBY | <b>7:</b> LAIN | <b>OT:</b> OVERTIME
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>`;
+
+  const VIEW_KEHADIRAN = `<div id="qm-pane-kehadiran" class="qm-pane" style="padding: 24px 32px; display: flex; flex-direction: column; gap: 24px; box-sizing: border-box;">
+    <!-- Top Row: Grid containing Left & Right Columns -->
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 24px; align-items: stretch;">
+      
+      <!-- Left Column: Kehadiran check & check result -->
+      <div style="display: flex; flex-direction: column; gap: 24px;">
+        
+        <!-- Card 1: Kehadiran -->
+        <div class="qm-card" style="display: flex; flex-direction: column; gap: 16px; margin: 0; padding: 20px; box-sizing: border-box;">
+          <div>
+            <label class="qm-field-label">NRP</label>
+            <input id="qm-input-hadir-check-nrp" type="text" placeholder="Masukkan 4/8 digit NRP" maxlength="8" autocomplete="off" class="qm-input">
+          </div>
+          
+          <div class="qm-flex qm-gap-m">
+            <div class="qm-flex-1">
+              <label class="qm-field-label">Start date</label>
+              <input id="qm-input-hadir-check-start-date" type="date" class="qm-input">
+            </div>
+            <div class="qm-flex-1">
+              <label class="qm-field-label">End date</label>
+              <input id="qm-input-hadir-check-end-date" type="date" class="qm-input">
+            </div>
+          </div>
+          
+          <div class="qm-flex qm-gap-m" style="box-sizing: border-box; width: 100%;">
+            <button id="qm-btn-hadir-check" type="button" class="qm-btn-premium-primary" style="flex: 2;">Check</button>
+            <button id="qm-btn-hadir-reset" type="button" class="qm-btn-premium-secondary" style="flex: 1;">Reset</button>
+          </div>
+        </div>
+
+        <!-- Left Column Result Container (Below Card 1) -->
+        <div id="qm-hadir-check-result" style="outline: none;" tabindex="-1"></div>
+
+      </div>
+
+      <!-- Right Column: 3 Automation Cards -->
+      <div style="display: flex; flex-direction: column; gap: 16px;">
+        
+        <!-- Card 2: Kehadiran Per NRP -->
+        <div class="qm-card" style="margin: 0; padding: 0; box-sizing: border-box; overflow: hidden;">
+          <div class="qm-collapsible-card-header qm-flex qm-items-center qm-justify-between qm-cursor-pointer" style="padding: 16px 20px; user-select: none;">
+            <h6 class="qm-section-title qm-m-0 qm-text-s" style="font-weight: 700;">👥 Kehadiran Per NRP</h6>
+            <span class="qm-accordion-chevron" style="transition: transform 0.2s ease; display: inline-flex; align-items: center; justify-content: center; color: var(--color-text-muted);">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>
+            </span>
+          </div>
+          <div class="qm-card-content qm-hidden" style="display: flex; flex-direction: column; gap: 16px; padding: 0 20px 20px 20px;">
+            <div class="qm-flex qm-gap-m">
               <div class="qm-flex-1">
                 <label class="qm-field-label">NRP</label>
                 <input id="qm-input-hadir-nrp" type="text" placeholder="NRP" maxlength="8" autocomplete="off" class="qm-input">
@@ -7083,7 +7726,8 @@
                 <input id="qm-input-hadir-tanggal" type="date" class="qm-input">
               </div>
             </div>
-            <div class="qm-flex qm-gap-m qm-mb-m">
+            
+            <div class="qm-flex qm-gap-m">
               <div class="qm-flex-1">
                 <label class="qm-field-label">Jam</label>
                 <input id="qm-input-hadir-jam" type="time" class="qm-input">
@@ -7097,13 +7741,59 @@
                 </select>
               </div>
             </div>
-            <button id="qm-btn-hadir-proses" type="button" class="qm-btn qm-btn-primary">Proses</button>
+            
+            <button id="qm-btn-hadir-proses" type="button" class="qm-btn-premium-primary" style="width: 100%;">Proses</button>
           </div>
+        </div>
 
-          <!-- SECTION: Per NRP Satu Bulan -->
-          <div class="qm-card qm-mb-m">
-            <h6 class="qm-section-title qm-mb-m qm-text-s">📅 Per NRP satu bulan</h6>
-            <div class="qm-flex qm-gap-m qm-mb-m">
+        <!-- Card 3: Kehadiran banyak NRP -->
+        <div class="qm-card" style="margin: 0; padding: 0; box-sizing: border-box; overflow: hidden;">
+          <div class="qm-collapsible-card-header qm-flex qm-items-center qm-justify-between qm-cursor-pointer" style="padding: 16px 20px; user-select: none;">
+            <h6 class="qm-section-title qm-m-0 qm-text-s" style="font-weight: 700;">👥 Kehadiran banyak NRP</h6>
+            <span class="qm-accordion-chevron" style="transition: transform 0.2s ease; display: inline-flex; align-items: center; justify-content: center; color: var(--color-text-muted);">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>
+            </span>
+          </div>
+          <div class="qm-card-content qm-hidden" style="display: flex; flex-direction: column; gap: 16px; padding: 0 20px 20px 20px;">
+            <div style="flex: 1; display: flex; flex-direction: column; gap: 8px;">
+              <label class="qm-field-label">Daftar NRP</label>
+              <textarea id="qm-input-hadir-many-nrps" placeholder="Pisahkan dengan enter atau koma" rows="3" class="qm-textarea qm-textarea-mono" style="resize: none;"></textarea>
+            </div>
+            
+            <div class="qm-flex qm-gap-m">
+              <div class="qm-flex-1">
+                <label class="qm-field-label">Tanggal</label>
+                <input id="qm-input-hadir-many-tanggal" type="date" class="qm-input">
+              </div>
+              <div class="qm-flex-1">
+                <label class="qm-field-label">Jam</label>
+                <input id="qm-input-hadir-many-jam" type="time" class="qm-input">
+              </div>
+            </div>
+            
+            <div>
+              <label class="qm-field-label">Status</label>
+              <select id="qm-input-hadir-many-status" class="qm-select">
+                <option value="">Pilih</option>
+                <option value="1">Masuk</option>
+                <option value="0">Keluar</option>
+              </select>
+            </div>
+            
+            <button id="qm-btn-hadir-many-proses" type="button" class="qm-btn-premium-primary" style="width: 100%;">Proses Banyak NRP</button>
+          </div>
+        </div>
+
+        <!-- Card 4: Kehadiran Per NRP satu bulan -->
+        <div class="qm-card" style="margin: 0; padding: 0; box-sizing: border-box; overflow: hidden;">
+          <div class="qm-collapsible-card-header qm-flex qm-items-center qm-justify-between qm-cursor-pointer" style="padding: 16px 20px; user-select: none;">
+            <h6 class="qm-section-title qm-m-0 qm-text-s" style="font-weight: 700;">📅 Kehadiran Per satu bulan</h6>
+            <span class="qm-accordion-chevron" style="transition: transform 0.2s ease; display: inline-flex; align-items: center; justify-content: center; color: var(--color-text-muted);">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>
+            </span>
+          </div>
+          <div class="qm-card-content qm-hidden" style="display: flex; flex-direction: column; gap: 16px; padding: 0 20px 20px 20px;">
+            <div class="qm-flex qm-gap-m">
               <div class="qm-flex-1">
                 <label class="qm-field-label">NRP</label>
                 <input id="qm-input-hadir-bulan-nrp" type="text" placeholder="NRP" maxlength="8" autocomplete="off" class="qm-input">
@@ -7126,7 +7816,8 @@
                 </select>
               </div>
             </div>
-            <div class="qm-flex qm-gap-m qm-mb-m">
+            
+            <div class="qm-flex qm-gap-m">
               <div class="qm-flex-1">
                 <label class="qm-field-label">Hari Kerja</label>
                 <select id="qm-input-hadir-bulan-hari" class="qm-select">
@@ -7139,7 +7830,8 @@
                 <input id="qm-input-hadir-bulan-thn" type="text" value="2026" class="qm-input" readonly>
               </div>
             </div>
-            <div class="qm-flex qm-gap-m qm-mb-m">
+            
+            <div class="qm-flex qm-gap-m">
               <div class="qm-flex-1">
                 <label class="qm-field-label">Jam Masuk</label>
                 <input id="qm-input-hadir-bulan-masuk" type="time" value="07:00" class="qm-input qm-field-time">
@@ -7149,234 +7841,218 @@
                 <input id="qm-input-hadir-bulan-keluar" type="time" value="15:00" class="qm-input qm-field-time">
               </div>
             </div>
-            <button id="qm-btn-hadir-bulan-proses" type="button" class="qm-btn qm-btn-primary">Mulai Automasi</button>
-          </div>
-
-          <div class="qm-card">
-            <h6 class="qm-section-title qm-mb-m qm-text-s">👥 Banyak NRP</h6>
-            <!-- NRP List -->
-            <div class="qm-mb-m">
-              <textarea id="qm-input-hadir-many-nrps" placeholder="Daftar NRP (pisahkan koma atau baris)" rows="2" class="qm-textarea qm-textarea-mono"></textarea>
-            </div>
-            <div class="qm-flex qm-gap-m qm-mb-m">
-              <div class="qm-flex-1">
-                <label class="qm-field-label">Tanggal</label>
-                <input id="qm-input-hadir-many-tanggal" type="date" class="qm-input">
-              </div>
-              <div class="qm-flex-1">
-                <label class="qm-field-label">Jam</label>
-                <input id="qm-input-hadir-many-jam" type="time" class="qm-input">
-              </div>
-            </div>
-            <div class="qm-mb-m">
-              <label class="qm-field-label">Status</label>
-              <select id="qm-input-hadir-many-status" class="qm-select">
-                <option value="">Pilih</option>
-                <option value="1">Masuk</option>
-                <option value="0">Keluar</option>
-              </select>
-            </div>
-            <button id="qm-btn-hadir-many-proses" type="button" class="qm-btn qm-btn-primary">Proses Banyak NRP</button>
+            
+            <button id="qm-btn-hadir-bulan-proses" type="button" class="qm-btn-premium-primary" style="width: 100%;">Mulai Automasi</button>
           </div>
         </div>
-      </div>`;
-  const VIEW_DISTRIBUSI = `<div id="qm-pane-distribusi" class="qm-pane">
-        <div class="qm-pane-header">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="17 1 21 5 17 9"></polyline><path d="M3 11V9a4 4 0 0 1 4-4h14"></path><polyline points="7 23 3 19 7 15"></polyline><path d="M21 13v2a4 4 0 0 1-4 4H3"></path></svg>
-          <h6>Distribusi</h6>
-        </div>
-        <div class="qm-w-full">
-          <div class="qm-card qm-mb-m">
-            <h6 class="qm-section-title qm-mb-m qm-text-s">🏢 Per Subsi</h6>
 
-            <div id="qm-dist-subsi-jk-container" class="qm-mb-m">
+      </div>
+
+    </div>
+  </div>`;
+  const VIEW_DISTRIBUSI = `<div id="qm-pane-distribusi" class="qm-pane qm-premium-pane">
+    <div class="qm-premium-grid">
+      <div class="qm-card qm-premium-card">
+        <h3 class="qm-premium-card-title">Per Subsi</h3>
+
+        <div>
+          <label class="qm-field-label">Jam Kerja</label>
+          <div id="qm-dist-subsi-jk-container">
+            <div class="qm-flex qm-items-center qm-gap-s qm-text-muted qm-text-xs">
+              <span class="qm-spinner qm-spinner-dark" style="width:12px;height:12px"></span>
+              <span>Memuat opsi Jam Kerja...</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="qm-premium-form-grid">
+          <div>
+            <label class="qm-field-label">Tanggal Awal</label>
+            <input id="qm-input-distribusi-subsi-tgl-awal" type="date" class="qm-input">
+          </div>
+          <div>
+            <label class="qm-field-label">Tanggal Akhir</label>
+            <input id="qm-input-distribusi-subsi-tgl-akhir" type="date" class="qm-input">
+          </div>
+        </div>
+
+        <div class="qm-premium-form-grid">
+          <div>
+            <label class="qm-field-label">Bagian</label>
+            <select id="qm-input-distribusi-subsi-bagian" class="qm-select">
+              <option value="">Pilih Bagian</option>
+            </select>
+          </div>
+          <div>
+            <label class="qm-field-label">Seksi</label>
+            <select id="qm-input-distribusi-subsi-seksi" class="qm-select">
+              <option value="">Pilih Seksi</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="qm-premium-form-grid">
+          <div>
+            <label class="qm-field-label">Grup</label>
+            <select id="qm-input-distribusi-subsi-grup" class="qm-select">
+              <option value="">Pilih Grup</option>
+            </select>
+          </div>
+          <div>
+            <label class="qm-field-label">Shift</label>
+            <select id="qm-input-distribusi-subsi-shift" class="qm-select">
+              <option value="">Pilih Shift</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="qm-toggle-row">
+          <input type="checkbox" id="qm-dist-subsi-use-distribusi" class="qm-config-checkbox" checked>
+          <label for="qm-dist-subsi-use-distribusi" class="qm-field-label qm-m-0 qm-cursor-pointer qm-select-none qm-field-label-normal" style="font-size:12px; font-weight:600">On Background</label>
+        </div>
+
+        <button id="qm-btn-distribusi-subsi-proses" type="button" class="qm-btn-premium-primary" style="width: 100%; margin-top: auto;">Proses Per Subsi</button>
+      </div>
+
+      <div class="qm-card qm-premium-card">
+        <h3 class="qm-premium-card-title">Per NRP</h3>
+
+        <div class="qm-premium-form-grid">
+          <div>
+            <label class="qm-field-label">NRP</label>
+            <input id="qm-input-distribusi-nrp" type="text" placeholder="NRP" maxlength="8" autocomplete="off" class="qm-input">
+          </div>
+          <div>
+            <label class="qm-field-label">Jam Kerja</label>
+            <div id="qm-dist-jk-options-container">
               <div class="qm-flex qm-items-center qm-gap-s qm-text-muted qm-text-xs">
                 <span class="qm-spinner qm-spinner-dark" style="width:12px;height:12px"></span>
-                <span>Memuat opsi Jam Kerja...</span>
+                <span>Memuat opsi...</span>
               </div>
             </div>
-
-            <div class="qm-flex qm-gap-m qm-mb-m">
-              <div class="qm-flex-1">
-                <label class="qm-field-label">Tanggal Awal</label>
-                <input id="qm-input-distribusi-subsi-tgl-awal" type="date" class="qm-input">
-              </div>
-              <div class="qm-flex-1">
-                <label class="qm-field-label">Tanggal Akhir</label>
-                <input id="qm-input-distribusi-subsi-tgl-akhir" type="date" class="qm-input">
-              </div>
-            </div>
-            <div class="qm-flex qm-gap-m qm-mb-m">
-              <div class="qm-flex-1">
-                <label class="qm-field-label">Bagian</label>
-                <select id="qm-input-distribusi-subsi-bagian" class="qm-select">
-                   <option value="">Pilih Bagian</option>
-                </select>
-              </div>
-              <div class="qm-flex-1">
-                <label class="qm-field-label">Seksi</label>
-                <select id="qm-input-distribusi-subsi-seksi" class="qm-select">
-                   <option value="">Pilih Seksi</option>
-                </select>
-              </div>
-            </div>
-            <div class="qm-flex qm-gap-m qm-mb-m">
-              <div class="qm-flex-1">
-                <label class="qm-field-label">Grup</label>
-                <select id="qm-input-distribusi-subsi-grup" class="qm-select">
-                   <option value="">Pilih Grup</option>
-                </select>
-              </div>
-              <div class="qm-flex-1">
-                <label class="qm-field-label">SHIFT</label>
-                <select id="qm-input-distribusi-subsi-shift" class="qm-select">
-                  <option value="">Pilih Shift</option>
-                </select>
-              </div>
-            </div>
-
-            <div class="qm-flex qm-items-center qm-gap-s qm-mb-m">
-              <input type="checkbox" id="qm-dist-subsi-use-distribusi" class="qm-config-checkbox" checked>
-              <label for="qm-dist-subsi-use-distribusi" class="qm-field-label qm-m-0 qm-cursor-pointer qm-select-none qm-field-label-normal" style="font-size:12px; font-weight:600">On Background</label>
-            </div>
-
-            <button id="qm-btn-distribusi-subsi-proses" type="button" class="qm-btn qm-btn-primary">Proses Per Subsi</button>
-          </div>
-
-          <div class="qm-card qm-mb-m">
-            <h6 class="qm-section-title qm-mb-m qm-text-s">🛠️ Per NRP</h6>
-            <div class="qm-flex qm-gap-m qm-mb-m">
-              <div class="qm-flex-1">
-                <label class="qm-field-label">NRP</label>
-                <input id="qm-input-distribusi-nrp" type="text" placeholder="NRP" maxlength="8" autocomplete="off" class="qm-input">
-              </div>
-              <div class="qm-flex-1">
-                <label class="qm-field-label">Jam Kerja</label>
-                <div id="qm-dist-jk-options-container">
-                  <div class="qm-flex qm-items-center qm-gap-s qm-text-muted qm-text-xs">
-                    <span class="qm-spinner qm-spinner-dark" style="width:12px;height:12px"></span>
-                    <span>Memuat opsi...</span>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div class="qm-flex qm-gap-m qm-mb-m">
-              <div class="qm-flex-1">
-                <label class="qm-field-label">Tanggal Awal</label>
-                <input type="date" id="qm-dist-jk-target-date" class="qm-input">
-              </div>
-              <div class="qm-flex-1">
-                <label class="qm-field-label">Tanggal Akhir</label>
-                <input type="date" id="qm-dist-jk-target-date-end" class="qm-input">
-              </div>
-            </div>
-
-            <div class="qm-mb-m">
-              <label class="qm-field-label">Pilih Shift</label>
-              <select id="qm-dist-jk-target-shift" class="qm-select">
-                <option value="1">Shift 1 (Pagi)</option>
-                <option value="2">Shift 2 (Siang)</option>
-                <option value="3">Shift 3 (Malam)</option>
-              </select>
-            </div>
-
-            <div class="qm-flex qm-items-center qm-gap-s qm-mb-m">
-              <input type="checkbox" id="qm-dist-jk-use-distribusi" class="qm-config-checkbox" checked>
-              <label for="qm-dist-jk-use-distribusi" class="qm-field-label qm-m-0 qm-cursor-pointer qm-select-none qm-field-label-normal" style="font-size:12px; font-weight:600">On Background</label>
-            </div>
-
-            <button id="qm-btn-distribusi-proses" type="button" class="qm-btn qm-btn-primary">Mulai Proses</button>
-          </div>
-
-          <div class="qm-card qm-mb-m">
-            <h6 class="qm-section-title qm-mb-m qm-text-s">📅 Kalender Kerja</h6>
-            <div class="qm-flex qm-gap-m qm-mb-m">
-              <div class="qm-flex-1">
-                <label class="qm-field-label">NRP</label>
-                <input id="qm-dist-KK-nrp" type="text" placeholder="NRP" maxlength="8" autocomplete="off" class="qm-input">
-              </div>
-              <div class="qm-flex-1">
-                <label class="qm-field-label">Periode</label>
-                <input id="qm-dist-KK-date" type="month" class="qm-input">
-              </div>
-            </div>
-
-            <div class="qm-flex qm-gap-m qm-mb-m">
-              <div class="qm-flex-1">
-                <label class="qm-field-label">Bagian</label>
-                <select id="qm-dist-KK-bagian" class="qm-select">
-                  <option value="">Pilih Bagian</option>
-                </select>
-              </div>
-              <div class="qm-flex-1">
-                <label class="qm-field-label">Seksi</label>
-                <select id="qm-dist-KK-seksi" class="qm-select">
-                  <option value="">Pilih Seksi</option>
-                </select>
-              </div>
-            </div>
-
-            <div class="qm-flex qm-gap-m qm-mb-m">
-              <div class="qm-flex-1">
-                <label class="qm-field-label">Grup</label>
-                <select id="qm-dist-KK-grup" class="qm-select">
-                  <option value="">Pilih Grup</option>
-                </select>
-              </div>
-              <div class="qm-flex-1">
-                <label class="qm-field-label">Kode Kalender Kerja</label>
-                <div id="qm-dist-KK-options-container">
-                  <div class="qm-flex qm-items-center qm-gap-s qm-text-muted qm-text-xs">
-                    <span class="qm-spinner qm-spinner-dark" style="width:12px;height:12px"></span>
-                    <span>Memuat opsi...</span>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <button id="qm-btn-KK-update" type="button" class="qm-btn qm-btn-primary">Update Kalender</button>
-          </div>
-        </div>
-      </div>`;
-  const VIEW_SETTINGS = `<div id="qm-pane-config" class="qm-pane">
-        <div class="qm-mb-l">
-          <label class="qm-field-label">Shortcut Akses Cepat</label>
-          <div class="qm-flex qm-gap-m">
-            <input id="qm-input-shortcut" type="text" value="Ctrl+Z" readonly class="qm-input qm-flex-1 qm-text-center qm-font-semibold qm-input-shortcut" />
-            <button id="qm-btn-record-shortcut" class="qm-btn qm-btn-primary qm-btn-record">Ubah</button>
-          </div>
-          <small class="qm-text-muted qm-mt-s qm-block qm-lh-1-3">Klik Ubah, lalu tekan kombinasi tombol keyboard baru untuk menyimpannya.</small>
-        </div>
-
-        <div class="qm-mb-l">
-          <label class="qm-field-label">Tema Tampilan</label>
-          <div class="qm-flex qm-gap-m">
-            <button id="qm-btn-theme-light" class="qm-theme-btn light">☀️ Terang</button>
-            <button id="qm-btn-theme-dark" class="qm-theme-btn dark">🌙 Gelap</button>
           </div>
         </div>
 
-        <div class="qm-flex qm-items-center qm-gap-s qm-mb-m">
+        <div class="qm-premium-form-grid">
+          <div>
+            <label class="qm-field-label">Tanggal Awal</label>
+            <input type="date" id="qm-dist-jk-target-date" class="qm-input">
+          </div>
+          <div>
+            <label class="qm-field-label">Tanggal Akhir</label>
+            <input type="date" id="qm-dist-jk-target-date-end" class="qm-input">
+          </div>
+        </div>
+
+        <div>
+          <label class="qm-field-label">Pilih Shift</label>
+          <select id="qm-dist-jk-target-shift" class="qm-select">
+            <option value="1">Shift 1 (Pagi)</option>
+            <option value="2">Shift 2 (Siang)</option>
+            <option value="3">Shift 3 (Malam)</option>
+          </select>
+        </div>
+
+        <div class="qm-toggle-row">
+          <input type="checkbox" id="qm-dist-jk-use-distribusi" class="qm-config-checkbox" checked>
+          <label for="qm-dist-jk-use-distribusi" class="qm-field-label qm-m-0 qm-cursor-pointer qm-select-none qm-field-label-normal" style="font-size:12px; font-weight:600">On Background</label>
+        </div>
+
+        <button id="qm-btn-distribusi-proses" type="button" class="qm-btn-premium-primary" style="width: 100%; margin-top: auto;">Mulai Proses</button>
+      </div>
+
+      <div class="qm-card qm-premium-card">
+        <h3 class="qm-premium-card-title">Kalender Kerja</h3>
+
+        <div class="qm-premium-form-grid">
+          <div>
+            <label class="qm-field-label">NRP</label>
+            <input id="qm-dist-KK-nrp" type="text" placeholder="NRP" maxlength="8" autocomplete="off" class="qm-input">
+          </div>
+          <div>
+            <label class="qm-field-label">Periode</label>
+            <input id="qm-dist-KK-date" type="month" class="qm-input">
+          </div>
+        </div>
+
+        <div class="qm-premium-form-grid">
+          <div>
+            <label class="qm-field-label">Bagian</label>
+            <select id="qm-dist-KK-bagian" class="qm-select">
+              <option value="">Pilih Bagian</option>
+            </select>
+          </div>
+          <div>
+            <label class="qm-field-label">Seksi</label>
+            <select id="qm-dist-KK-seksi" class="qm-select">
+              <option value="">Pilih Seksi</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="qm-premium-form-grid">
+          <div>
+            <label class="qm-field-label">Grup</label>
+            <select id="qm-dist-KK-grup" class="qm-select">
+              <option value="">Pilih Grup</option>
+            </select>
+          </div>
+          <div>
+            <label class="qm-field-label">Kode Kalender Kerja</label>
+            <div id="qm-dist-KK-options-container">
+              <div class="qm-flex qm-items-center qm-gap-s qm-text-muted qm-text-xs">
+                <span class="qm-spinner qm-spinner-dark" style="width:12px;height:12px"></span>
+                <span>Memuat opsi...</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <button id="qm-btn-KK-update" type="button" class="qm-btn-premium-primary" style="width: 100%; margin-top: auto;">Update Kalender</button>
+      </div>
+    </div>
+  </div>`;
+  const VIEW_SETTINGS = `<div id="qm-pane-config" class="qm-pane qm-premium-pane">
+    <div class="qm-settings-grid">
+      <div class="qm-card qm-premium-card">
+        <h3 class="qm-premium-card-title">Shortcut Akses Cepat</h3>
+        <div class="qm-flex qm-gap-m">
+          <input id="qm-input-shortcut" type="text" value="Ctrl+Z" readonly class="qm-input qm-flex-1 qm-text-center qm-font-semibold qm-input-shortcut" />
+          <button id="qm-btn-record-shortcut" class="qm-btn-premium-primary qm-btn-record" type="button">Ubah</button>
+        </div>
+      </div>
+
+      <div class="qm-card qm-premium-card">
+        <h3 class="qm-premium-card-title">Tema Tampilan</h3>
+        <div class="qm-flex qm-gap-m">
+          <button id="qm-btn-theme-light" class="qm-theme-btn light" type="button">Terang</button>
+          <button id="qm-btn-theme-dark" class="qm-theme-btn dark" type="button">Gelap</button>
+        </div>
+      </div>
+
+      <div class="qm-card qm-premium-card">
+        <h3 class="qm-premium-card-title">Preferensi</h3>
+        <div class="qm-toggle-row">
           <input type="checkbox" id="qm-config-collapse-menu" class="qm-config-checkbox" ${state.alwaysCollapse ? 'checked' : ''}>
           <label for="qm-config-collapse-menu" class="qm-field-label qm-m-0 qm-cursor-pointer qm-select-none">Always collapsed sidebar menu</label>
         </div>
-
-        <div class="qm-flex qm-items-center qm-gap-s qm-mb-l">
+        <div class="qm-toggle-row">
           <input type="checkbox" id="qm-config-debug-mode" class="qm-config-checkbox" ${state.debug ? 'checked' : ''}>
           <label for="qm-config-debug-mode" class="qm-field-label qm-m-0 qm-cursor-pointer qm-select-none">Debug Mode (Console Logs)</label>
         </div>
+      </div>
 
-        <button id="qm-btn-show-logs" class="qm-btn qm-w-full">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right:8px"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
+      <div class="qm-card qm-premium-card">
+        <h3 class="qm-premium-card-title">Log Aktivitas</h3>
+        <button id="qm-btn-show-logs" class="qm-btn-premium-secondary" type="button" style="width: 100%;">
           <span>Lihat Log Aktivitas</span>
         </button>
-        <div id="qm-log-container" class="qm-hidden qm-mt-m">
+        <div id="qm-log-container" class="qm-hidden">
           <div class="qm-log-actions qm-flex qm-justify-between qm-mb-xs">
             <span class="qm-caption qm-text-muted qm-font-xs qm-uppercase" style="letter-spacing:1px">Activity Stream</span>
             <div class="qm-flex qm-gap-s">
-              <button id="qm-btn-export-logs" class="qm-btn-text qm-font-xs" title="Export as Markdown (.md)">Export .md</button>
-              <button id="qm-btn-clear-logs" class="qm-btn-text qm-font-xs qm-text-danger" title="Clear All Logs">Clear</button>
+              <button id="qm-btn-export-logs" class="qm-btn-text qm-font-xs" type="button" title="Export as Markdown (.md)">Export .md</button>
+              <button id="qm-btn-clear-logs" class="qm-btn-text qm-font-xs qm-text-danger" type="button" title="Clear All Logs">Clear</button>
             </div>
           </div>
           <div id="qm-log-body" class="qm-log-body-inline">
@@ -7384,8 +8060,8 @@
           </div>
         </div>
       </div>
-      </div> <!-- End qm-content-area -->
-      </div> <!-- End qm-panel-body -->`;
+    </div>
+  </div>`;
 
   const HTML = `
 <div id="qa-shell">
@@ -7423,6 +8099,7 @@
             <div id="qa-progress-status" class="progress-status-text">Working...</div>
           </div>
           <button id="qm-btn-export-batch" type="button" class="qm-hidden" style="padding: 8px 16px; background: var(--color-accent); color: #1a5276; border: none; border-radius: 8px; font-weight: 700; font-size: 0.85rem; cursor: pointer; white-space: nowrap; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">Export (.xlsx)</button>
+          <button id="qm-btn-hadir-cancel" type="button" class="qm-hidden" style="padding: 8px 16px; background: var(--color-tag-red-bg); color: var(--color-tag-red-text); border: none; border-radius: 8px; font-weight: 700; font-size: 0.85rem; cursor: pointer; white-space: nowrap; margin-left: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">Batal</button>
         </div>
       </footer>
     </main>
@@ -7460,6 +8137,7 @@
   };
 
   let els = {};
+  let isDragging = false;
 
 
 
@@ -7488,11 +8166,24 @@
     if (els.searchIcon) els.searchIcon.innerHTML = ICONS.search;
     if (els.floatingBtn) els.floatingBtn.innerHTML = ICONS.grid;
 
-    const savedPos = JSON.parse(localStorage.getItem('qa-pos') || '{"top":200, "edge":"right"}');
+    const savedPos2D = localStorage.getItem('qa-pos-2d');
     if (els.floatingBtn) {
-      els.floatingBtn.style.top = savedPos.top + 'px';
-      if (savedPos.edge === 'right') els.floatingBtn.style.right = '20px';
-      else els.floatingBtn.style.left = '20px';
+      if (savedPos2D) {
+        const pos = JSON.parse(savedPos2D);
+        els.floatingBtn.style.left = pos.left + 'px';
+        els.floatingBtn.style.top = pos.top + 'px';
+        els.floatingBtn.style.right = 'auto';
+      } else {
+        const savedPos = JSON.parse(localStorage.getItem('qa-pos') || '{"top":200, "edge":"right"}');
+        els.floatingBtn.style.top = savedPos.top + 'px';
+        if (savedPos.edge === 'right') {
+          els.floatingBtn.style.right = '20px';
+          els.floatingBtn.style.left = 'auto';
+        } else {
+          els.floatingBtn.style.left = '20px';
+          els.floatingBtn.style.right = 'auto';
+        }
+      }
       els.floatingBtn.classList.remove('button-is-hidden');
     }
 
@@ -7507,7 +8198,14 @@
   }
 
   function setupEvents() {
-    els.floatingBtn.onclick = toggleMenu;
+    els.floatingBtn.onclick = (e) => {
+      if (isDragging) {
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
+      toggleMenu();
+    };
     els.search.oninput = (e) => syncView(e.target.value);
     els.searchClear.onclick = () => { els.search.value = ''; syncView(''); els.search.focus(); };
     els.backBtn.onclick = () => goBack();
@@ -7541,23 +8239,103 @@
     });
 
     // Drag logic for floating button
-    let isDragging = false, startY, startTop;
+    let startX, startY, startLeft, startTop;
     els.floatingBtn.onpointerdown = (e) => {
-      isDragging = false; startY = e.clientY; startTop = parseInt(els.floatingBtn.style.top);
+      isDragging = false;
+      startX = e.clientX;
+      startY = e.clientY;
+
+      const rect = els.floatingBtn.getBoundingClientRect();
+      startLeft = rect.left;
+      startTop = rect.top;
+
+      els.floatingBtn.style.transition = 'none';
+      els.floatingBtn.style.right = 'auto';
+      els.floatingBtn.style.left = startLeft + 'px';
+      els.floatingBtn.style.top = startTop + 'px';
+
       els.floatingBtn.setPointerCapture(e.pointerId);
       els.floatingBtn.onpointermove = (em) => {
+        const dx = em.clientX - startX;
         const dy = em.clientY - startY;
-        if (Math.abs(dy) > 5) isDragging = true;
-        els.floatingBtn.style.top = Math.max(0, Math.min(window.innerHeight - 50, startTop + dy)) + 'px';
+        if (Math.abs(dx) > 5 || Math.abs(dy) > 5) isDragging = true;
+
+        let newLeft = startLeft + dx;
+        let newTop = startTop + dy;
+
+        newLeft = Math.max(10, Math.min(window.innerWidth - 62, newLeft));
+        newTop = Math.max(10, Math.min(window.innerHeight - 62, newTop));
+
+        els.floatingBtn.style.left = newLeft + 'px';
+        els.floatingBtn.style.top = newTop + 'px';
       };
     };
     els.floatingBtn.onpointerup = (e) => {
       els.floatingBtn.onpointermove = null;
       els.floatingBtn.releasePointerCapture(e.pointerId);
+      els.floatingBtn.style.transition = '';
+
       if (isDragging) {
-        localStorage.setItem('qa-pos', JSON.stringify({ top: parseInt(els.floatingBtn.style.top), edge: els.floatingBtn.style.right ? 'right' : 'left' }));
+        const leftVal = parseInt(els.floatingBtn.style.left) || 0;
+        const topVal = parseInt(els.floatingBtn.style.top) || 0;
+        localStorage.setItem('qa-pos-2d', JSON.stringify({ left: leftVal, top: topVal }));
       }
     };
+
+    // Drag logic for the main Quick Action Menu panel (.command-menu)
+    let isDraggingPanel = false;
+    let panelStartX, panelStartY, panelStartLeft = 0, panelStartTop = 0;
+
+    const handlePointerDown = (e) => {
+      // Avoid dragging when interacting with input elements, buttons, checkboxes, labels, result lists, card headers/contents, etc.
+      if (e.target.closest('input, button, select, a, textarea, [role="button"], label, .qm-config-checkbox, .qm-collapsible-card-header, .quick-action, .result-item, .qm-hadir-row-tr, .qm-btn-premium-primary, .qm-btn-premium-secondary')) return;
+
+      isDraggingPanel = false;
+      panelStartX = e.clientX;
+      panelStartY = e.clientY;
+
+      // Parse current translation from transform style: translate(Xpx, Ypx)
+      const transform = els.menu.style.transform || '';
+      const match = transform.match(/translate\(([-\d.]+)px,\s*([-\d.]+)px\)/);
+      if (match) {
+        panelStartLeft = parseFloat(match[1]);
+        panelStartTop = parseFloat(match[2]);
+      } else {
+        panelStartLeft = 0;
+        panelStartTop = 0;
+      }
+
+      els.menu.style.transition = 'none';
+      els.menu.classList.add('is-dragging');
+      
+      // Prevent browser text selection behavior when dragging
+      e.preventDefault();
+
+      const onPointerMove = (em) => {
+        const dx = em.clientX - panelStartX;
+        const dy = em.clientY - panelStartY;
+        if (Math.abs(dx) > 3 || Math.abs(dy) > 3) isDraggingPanel = true;
+
+        const newX = panelStartLeft + dx;
+        const newY = panelStartTop + dy;
+        els.menu.style.transform = `translate(${newX}px, ${newY}px)`;
+      };
+
+      const onPointerUp = () => {
+        document.removeEventListener('pointermove', onPointerMove);
+        document.removeEventListener('pointerup', onPointerUp);
+        els.menu.style.transition = '';
+        els.menu.classList.remove('is-dragging');
+      };
+
+      document.addEventListener('pointermove', onPointerMove);
+      document.addEventListener('pointerup', onPointerUp);
+    };
+
+    // Listen on the entire panel element for clicking and dragging from anywhere
+    if (els.menu) {
+      els.menu.addEventListener('pointerdown', handlePointerDown);
+    }
   }
 
   function showHomePage() {
@@ -7580,6 +8358,11 @@
       }, 280);
     } else {
       els.menu.classList.add('is-closing');
+
+      if (els.menu) {
+        els.menu.style.transform = '';
+      }
+
       setTimeout(() => {
         els.menuContainer.classList.add('is-hidden');
         els.menu.classList.remove('is-closing');
@@ -9705,7 +10488,6 @@
 
   function openPanel() {
     state.isOpen = true;
-    document.body.classList.add('qm-no-scroll');
     uiAdapter.addClass('panelShell', 'qm-open');
     setTimeout(() => {
       uiAdapter.requestPrimaryFocus();
@@ -9714,8 +10496,10 @@
 
   function closePanel() {
     state.isOpen = false;
-    document.body.classList.remove('qm-no-scroll');
     uiAdapter.removeClass('panelShell', 'qm-open');
+    if (els.menu) {
+      els.menu.style.transform = '';
+    }
   }
 
   function togglePanel() {
@@ -10133,13 +10917,72 @@
       return;
     }
 
-    createAutomationFlow('hadir-single', window.location.href, { nrp, tgl, status });
-
-    const data = { nrp, tgl, jam, status };
-    sessionStorage.setItem(STORAGE.INPUT_HADIR, JSON.stringify(data));
+    state.hadirCancelRequested = false;
+    UI.startProgress('Memproses Kehadiran...', 1);
+    const cancelBtn = uiAdapter.get('#qm-btn-hadir-cancel');
+    if (cancelBtn) cancelBtn.classList.remove('qm-hidden');
 
     const targetUrl = absenCreateUrl(nrp);
-    uiAdapter.openUrl(targetUrl, '_blank');
+
+    runInHiddenIframe(
+      targetUrl,
+      async (doc, win, iframe) => {
+        if (state.hadirCancelRequested) {
+          throw new Error('Dibatalkan oleh pengguna');
+        }
+
+        const elTgl = doc.getElementById('tanggal');
+        const elNrp = doc.getElementById('nrp_input');
+        const elJam = doc.getElementById('jam');
+        const elStatus = doc.getElementById('status');
+        const btnTambah = doc.getElementById('btnTambah');
+        const btnSubmit = doc.getElementById('submit');
+
+        if (!elTgl || !elNrp || !elJam || !elStatus || !btnTambah || !btnSubmit) {
+          throw new Error('Elemen form di halaman input tidak lengkap.');
+        }
+
+        setField(elTgl, tgl, ['change']);
+        setField(elNrp, nrp, ['input', 'change']);
+        setField(elJam, jam, ['change']);
+        setField(elStatus, status, ['change']);
+
+        if (win.jQuery && win.jQuery(elStatus).selectpicker) {
+          win.jQuery(elStatus).selectpicker('refresh');
+        }
+
+        UI.updateProgress(0.3, 1, `Menambahkan NRP ${nrp}...`);
+        await new Promise(r => setTimeout(r, 600));
+        if (state.hadirCancelRequested) throw new Error('Dibatalkan oleh pengguna');
+        btnTambah.click();
+
+        UI.updateProgress(0.7, 1, `Mengirim data NRP ${nrp}...`);
+        await new Promise(r => setTimeout(r, 800));
+        if (state.hadirCancelRequested) throw new Error('Dibatalkan oleh pengguna');
+        btnSubmit.click();
+
+        return { done: false };
+      },
+      (res) => {
+        if (cancelBtn) cancelBtn.classList.add('qm-hidden');
+        UI.updateProgress(1, 1, 'Kehadiran berhasil disimpan!');
+        setTimeout(() => {
+          UI.endProgress();
+          UI.showResult('success', 'Kehadiran Berhasil', `Data kehadiran NRP ${nrp} berhasil dimasukkan.`);
+          KEHADIRAN.checkByRange(panelReaders.attendanceCheck());
+        }, 600);
+      },
+      (err) => {
+        if (cancelBtn) cancelBtn.classList.add('qm-hidden');
+        UI.endProgress();
+        const errMsg = err.message || 'Terjadi kesalahan.';
+        if (errMsg === 'Dibatalkan oleh pengguna') {
+          UI.showResult('info', 'Dibatalkan', 'Proses input kehadiran dihentikan.');
+        } else {
+          UI.showResult('danger', 'Gagal Input', errMsg);
+        }
+      }
+    );
   }
 
   function handleDistribusi(input = panelReaders.distribusiJk()) {
@@ -10295,11 +11138,11 @@
   }
 
   function getPrimaryCardButton(card) {
-    const buttons = Array.from(card.querySelectorAll('button.qm-btn'))
+    const buttons = Array.from(card.querySelectorAll('button.qm-btn, button.qm-btn-premium-primary, button.qm-premium-btn-primary'))
       .filter(btn => !btn.disabled && !btn.classList.contains('qm-hidden'));
     if (buttons.length === 0) return null;
 
-    return buttons.find(btn => btn.classList.contains('qm-btn-primary') || btn.classList.contains('qm-btn-success')) || buttons[0];
+    return buttons.find(btn => btn.classList.contains('qm-btn-primary') || btn.classList.contains('qm-btn-premium-primary') || btn.classList.contains('qm-premium-btn-primary') || btn.classList.contains('qm-btn-success')) || buttons[0];
   }
 
   function initKeyboardNavigation() {
@@ -10618,6 +11461,19 @@
     { event: 'click', selector: '#qm-btn-spkl-page-cek', handler() { SPKL.checkByDateRange(panelReaders.spklCheck()); } },
     { event: 'click', selector: '#qm-btn-spkl-online-cek', handler() { SPKL.openOnlineForDate(panelReaders.spklOnline()); } },
     { event: 'click', selector: '#qm-btn-hadir-check', handler() { KEHADIRAN.checkByRange(panelReaders.attendanceCheck()); } },
+    {
+      event: 'click', selector: '#qm-btn-hadir-reset', handler() {
+        state.attendanceCheck = createEmptyAttendanceCheck();
+        const nrpInput = document.getElementById('qm-input-hadir-check-nrp');
+        const startInput = document.getElementById('qm-input-hadir-check-start-date');
+        const endInput = document.getElementById('qm-input-hadir-check-end-date');
+        if (nrpInput) nrpInput.value = '';
+        if (startInput) startInput.value = '';
+        if (endInput) endInput.value = '';
+        const resultDiv = document.getElementById('qm-hadir-check-result');
+        if (resultDiv) resultDiv.innerHTML = '';
+      }
+    },
     { event: 'click', selector: '#qm-btn-hadir-proses', handler() { KEHADIRAN.submitSingle(panelReaders.attendanceInput()); } },
     { event: 'click', selector: '#qm-btn-hadir-bulan-proses', handler: KEHADIRAN.startBulanBatch },
     { event: 'click', selector: '#qm-btn-hadir-many-proses', handler: KEHADIRAN.startManyNrpBatch },
@@ -10627,6 +11483,13 @@
     { event: 'click', selector: '#qm-btn-clear-logs', handler: handleClearLogs },
     { event: 'click', selector: '#qm-btn-export-logs', handler: handleExportLogs },
     { event: 'change', selector: '#qm-config-debug-mode', handler: handleDebugToggle },
+    {
+      event: 'click', selector: '#qm-btn-hadir-cancel', handler() {
+        Logger.info('User cancelled background attendance process');
+        state.hadirCancelRequested = true;
+        UI.updateProgress(0, 100, 'Membatalkan...');
+      }
+    },
     {
       event: 'click', selector: '#qm-global-cancel-btn', handler() {
         Logger.info('User cancelled automation');
@@ -10960,6 +11823,13 @@
       }
     },
     {
+      event: 'click', selector: '.qm-collapsible-card-header', handler() {
+        this.classList.toggle('expanded');
+        const content = this.nextElementSibling;
+        if (content) content.classList.toggle('qm-hidden');
+      }
+    },
+    {
       event: 'change', selector: '#qm-config-collapse-menu', handler() {
         alwaysCollapseMenu = this.checked;
         GM_setValue('qm_always_collapse', alwaysCollapseMenu);
@@ -11144,6 +12014,15 @@
   }
 
   function init() {
+    // Inject Plus Jakarta Sans font
+    if (!document.getElementById('qm-google-font')) {
+      const link = document.createElement('link');
+      link.id = 'qm-google-font';
+      link.rel = 'stylesheet';
+      link.href = 'https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap';
+      document.head.appendChild(link);
+    }
+
     bootstrapDomainState();
     const schemaValid = validateStorageSchema();
     runStartupAutomations();
