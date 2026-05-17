@@ -300,7 +300,25 @@
     return isNaN(d.getTime()) ? null : d;
   }
 
+  function isCurrentPageOutsource() {
+    const path = getCurrentPath();
+    return path.includes('kkwt') || path.includes('outsource') || path.includes('os');
+  }
+
   function isOutsourceNrp(nrp) {
+    if (!nrp) return false;
+    const cached = sessionStorage.getItem('qm_is_os_' + nrp);
+    if (cached !== null) return cached === 'true';
+
+    // Fallback: check if active page context matches
+    const ctx = getPageContext();
+    if (ctx.nrp === nrp) {
+      const isOS = isCurrentPageOutsource();
+      sessionStorage.setItem('qm_is_os_' + nrp, isOS ? 'true' : 'false');
+      return isOS;
+    }
+
+    // Default fallback
     return String(nrp || '').length === 8;
   }
 
@@ -473,7 +491,7 @@
   /** Unified DOM-based sanitization and parsing. */
   function parseHTML(html, fullDoc = false) {
     const doc = new DOMParser().parseFromString(html, 'text/html');
-    const dangerous = doc.querySelectorAll('script,style,link,iframe,object,embed,svg,math');
+    const dangerous = doc.querySelectorAll('script,style,link,iframe,object,embed,math');
     dangerous.forEach(el => el.remove());
     doc.querySelectorAll('*').forEach(el => {
       Array.from(el.attributes).forEach(attr => {
@@ -584,6 +602,11 @@
       if (match) nrp = match[1];
     }
 
+    if (nrp) {
+      const isOS = isCurrentPageOutsource();
+      sessionStorage.setItem('qm_is_os_' + nrp, isOS ? 'true' : 'false');
+    }
+
     const selTahun = document.querySelector('select[name="tahun"]');
     const selBulan = document.querySelector('#bulan');
     const selBagian = document.querySelector('select[name="kode_bagian"]');
@@ -605,6 +628,16 @@
 
 
   /** Read cached employee data from sessionStorage. Returns null if not fully cached. */
+  function isValidEmployeeId(id) {
+    if (!id) return false;
+    const cleanId = String(id).toLowerCase().trim();
+    const invalidKeywords = ['rekap', 'laporan', 'pembayaran', 'detail', 'pembayarandetail'];
+    for (const kw of invalidKeywords) {
+      if (cleanId.includes(kw)) return false;
+    }
+    return /^[a-z0-9]+$/i.test(cleanId);
+  }
+
   function readEmployeeCache(nrp) {
     const jk = sessionStorage.getItem('qm_jk_' + nrp);
     const nama = sessionStorage.getItem('qm_nama_' + nrp);
@@ -612,9 +645,23 @@
     const kk = sessionStorage.getItem('qm_KK_' + nrp);
     const bag = sessionStorage.getItem('qm_bag_' + nrp);
     if (!jk || !nama || !id || !kk || !bag) return null;
+
+    if (!isValidEmployeeId(id)) {
+      clearEmployeeCache(nrp);
+      return null;
+    }
+
+    // Auto-invalidate stale edit URLs that were mistakenly cached as "/edit/"
+    sessionStorage.removeItem('qm_edit_url_' + nrp);
+    const editUrl = employeeEditUrl(nrp, id);
+    if (false) {
+      sessionStorage.removeItem('qm_edit_url_' + nrp);
+      return null; // Force fresh fetch
+    }
+
     return {
       jk, KK: kk, nama, id,
-      editUrl: sessionStorage.getItem('qm_edit_url_' + nrp) || '',
+      editUrl,
       bagian: bag || '',
       seksi: sessionStorage.getItem('qm_sek_' + nrp) || '',
       group: sessionStorage.getItem('qm_grp_' + nrp) || ''
@@ -823,8 +870,17 @@
   }
 
   function extractEmployeeIdFromUrl(url) {
+    if (!url) return '';
+    try {
+      const cleanUrl = String(url).trim();
+      const absoluteUrl = cleanUrl.startsWith('http') ? cleanUrl : 'https://hris.kti.co.id/' + cleanUrl.replace(/^\//, '');
+      const urlObj = new URL(absoluteUrl);
+      const queryId = urlObj.searchParams.get('id');
+      if (queryId) return queryId;
+    } catch (e) { }
+
     const clean = String(url || '');
-    const routeMatch = clean.match(/\/(?:general|profile|editgeneral)\/([^/?#]+)/i);
+    const routeMatch = clean.match(/\/(?:general|profile|editgeneral|edit)\/([^/?#]+)/i);
     if (routeMatch) return routeMatch[1];
     return clean.split('?')[0].split('/').filter(Boolean).pop() || '';
   }
@@ -868,7 +924,10 @@
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), timeout);
     try {
-      const res = await fetch(url, { signal: ctrl.signal });
+      const res = await fetch(url, {
+        signal: ctrl.signal,
+        credentials: 'include'
+      });
       if (!res.ok) throw new Error('HTTP ' + res.status);
       return await res.text();
     } finally {
@@ -889,7 +948,11 @@
         else externalSignal.addEventListener('abort', onExternalAbort, { once: true });
       }
       const { signal: _ignoredSignal, ...restOptions } = options;
-      const response = await fetch(url, { ...restOptions, signal: controller.signal });
+      const response = await fetch(url, {
+        ...restOptions,
+        signal: controller.signal,
+        credentials: 'include'
+      });
       return response;
     } finally {
       clearTimeout(timeoutId);
@@ -1014,14 +1077,25 @@
         const btn = links.find(a => {
           const txt = a.textContent.trim();
           const cls = a.className;
-          return txt.includes('Detail') || cls.includes('btn-info') || cls.includes('btn-primary') || a.getAttribute('href')?.includes('/general/');
+          const href = a.getAttribute('href') || '';
+          const isGenLink = href.includes('karyawan/general/') || href.includes('karyawanoutsource/general/');
+          if (!isGenLink) return false;
+          const id = extractEmployeeIdFromUrl(href);
+          return isValidEmployeeId(id) && (txt.includes('Detail') || cls.includes('btn-info') || cls.includes('btn-primary'));
         });
         if (btn && btn.getAttribute('href')) detailUrl = btn.getAttribute('href');
       }
     });
     if (!detailUrl) {
       const allLinks = Array.from(doc.querySelectorAll('a'));
-      const fallback = allLinks.find(a => (a.textContent.includes('Detail') || a.classList.contains('btn-info')) && a.getAttribute('href'));
+      const fallback = allLinks.find(a => {
+        const href = a.getAttribute('href') || '';
+        const isGenLink = href.includes('karyawan/general/') || href.includes('karyawanoutsource/general/');
+        const isReport = href.includes('rekap') || href.includes('laporan') || href.includes('pembayaran');
+        if (!isGenLink || isReport) return false;
+        const id = extractEmployeeIdFromUrl(href);
+        return isValidEmployeeId(id) && (a.textContent.includes('Detail') || a.classList.contains('btn-info'));
+      });
       if (fallback) detailUrl = fallback.getAttribute('href');
     }
     return detailUrl;
@@ -1163,41 +1237,56 @@
   }
 
   /** Unified employee data fetcher with sessionStorage cache. */
-  async function fetchEmployee(nrp) {
+  async function fetchEmployee(nrp, knownId = null, knownIsOS = null) {
     const cached = readEmployeeCache(nrp);
-    if (cached) return { found: true, ...cached };
-    const urls = employeeUrlSet(nrp);
-    let searchDoc, detailUrl;
-
-    // Retry logic for NRP search (Bug Fix 1)
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      try {
-        const html = await hrisFetch(urls.searchUrl);
-        searchDoc = parseHTML(html);
-        detailUrl = findEmployeeDetailLink(searchDoc, nrp);
-        if (detailUrl) break;
-      } catch (e) {
-        if (attempt === 3) throw e;
+    if (cached) {
+      if (!knownId || cached.id === knownId) {
+        return { found: true, ...cached };
+      } else {
+        clearEmployeeCache(nrp);
       }
-      if (attempt < 3) await new Promise(r => setTimeout(r, 500 * attempt));
+    }
+    
+    let id = knownId;
+    let isOS = knownIsOS;
+
+    if (!id) {
+      const urls = employeeUrlSet(nrp);
+      isOS = urls.isOS;
+      let searchDoc, detailUrl;
+
+      // Retry logic for NRP search (Bug Fix 1)
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          const html = await hrisFetch(urls.searchUrl);
+          searchDoc = parseHTML(html);
+          detailUrl = findEmployeeDetailLink(searchDoc, nrp);
+          if (detailUrl) break;
+        } catch (e) {
+          if (attempt === 3) throw e;
+        }
+        if (attempt < 3) await new Promise(r => setTimeout(r, 500 * attempt));
+      }
+
+      if (!detailUrl) return { found: false };
+      id = extractEmployeeIdFromUrl(detailUrl);
+    } else {
+      // If we provided an ID but not isOS, try to guess
+      if (isOS === null) {
+        isOS = isOutsourceNrp(nrp);
+      }
     }
 
-    if (!detailUrl) return { found: false };
-    const id = detailUrl.split('?')[0].split('/').filter(Boolean).pop();
+    const routeSet = employeeRoutesBySource(isOS);
     const [genHtml, profHtml] = await Promise.all([
-      hrisFetch(urls.buildGeneralUrl(id)),
-      hrisFetch(urls.buildProfileUrl(id))
+      hrisFetch(routeSet.general(id)),
+      hrisFetch(routeSet.profile(id))
     ]);
     const doc = parseHTML(genHtml);
     const profDoc = parseHTML(profHtml);
 
-    // Find Edit General URL from the page buttons
-    let editUrl = '';
-    const editBtn = doc.querySelector('a[href*="editgeneral"]');
-    if (editBtn) {
-      editUrl = editBtn.getAttribute('href');
-      if (!editUrl.startsWith('http')) editUrl = 'https://hris.kti.co.id' + (editUrl.startsWith('/') ? '' : '/') + editUrl;
-    }
+    // Find Edit General/Edit URL from the page buttons
+    const editUrl = routeSet.edit(id);
 
     const emp = {
       found: true,
@@ -1272,16 +1361,28 @@
     if (cells.length === 0) return null;
 
     const links = Array.from(row.querySelectorAll('a[href]'));
-    const detailLink = links.find(link => /\/(general|profile|editgeneral)\//i.test(link.getAttribute('href') || ''))
-      || links.find(link => /detail|profile|edit/i.test(normalizeEmployeeCellText(link)));
+    const detailLink = links.find(link => {
+      const href = link.getAttribute('href') || '';
+      const isGenLink = href.includes('karyawan/general/') || href.includes('karyawanoutsource/general/');
+      if (!isGenLink) return false;
+      const id = extractEmployeeIdFromUrl(href);
+      return isValidEmployeeId(id);
+    }) || links.find(link => {
+      const href = link.getAttribute('href') || '';
+      const id = extractEmployeeIdFromUrl(href);
+      return isValidEmployeeId(id) && /detail|profile|edit/i.test(normalizeEmployeeCellText(link));
+    });
     if (!detailLink) return null;
 
     const href = toAbsoluteHrisUrl(detailLink.getAttribute('href') || '');
     const id = extractEmployeeIdFromUrl(href);
-    if (!id) return null;
+    if (!id || !isValidEmployeeId(id)) return null;
 
     const nrpByHeader = getEmployeeCellValue(cells, headers, ['nrp']);
     const nrp = nrpByHeader || getFirstEmployeeNrp(row.textContent);
+    if (nrp) {
+      sessionStorage.setItem('qm_is_os_' + nrp, isOS ? 'true' : 'false');
+    }
     const nama = getEmployeeCellValue(cells, headers, ['nama', 'name'])
       || normalizeEmployeeCellText(cells[Math.max(0, firstMatchedHeaderIndex(headers, ['nrp']) + 1)]);
     const bagian = getEmployeeCellValue(cells, headers, ['bagian', 'dept', 'departemen']);
@@ -1315,17 +1416,68 @@
 
   async function searchEmployees(query) {
     const trimmed = String(query || '').trim();
-    const targets = /^\d{8}$/.test(trimmed) ? [true] : /^\d{4}$/.test(trimmed) ? [false] : [false, true];
+    if (!trimmed) return [];
+
+    let isRegex = false;
+    let regex = null;
+
+    // Check if the input looks like a regex pattern (has special regex characters)
+    const hasRegexChars = /[\.\*\+\?\^\$\{\}\(\)\|\[\]\\]/.test(trimmed);
+    if (hasRegexChars) {
+      try {
+        regex = new RegExp(trimmed, 'i');
+        isRegex = true;
+      } catch (e) {
+        // Invalid regex, will fallback to plain text matching
+      }
+    }
+
+    // Clean server query: strip non-alphanumeric and special symbols for the HRIS server search
+    // but keep space to allow searching name/terms
+    let serverQuery = trimmed.replace(/[\.\*\+\?\^\$\{\}\(\)\|\[\]\\_\-\/]/g, ' ').replace(/\s+/g, ' ').trim();
+    if (!serverQuery) {
+      serverQuery = trimmed; // fallback if stripped completely
+    }
+
+    // Always query both internal and outsource databases to support partial matches for any query!
+    const targets = [false, true];
+
     const responses = await Promise.all(targets.map(async isOS => {
-      const html = await hrisFetch(employeeSearchUrl(trimmed, isOS));
-      return parseEmployeeSearchResults(parseHTML(html), isOS);
+      try {
+        const html = await hrisFetch(employeeSearchUrl(serverQuery, isOS));
+        return parseEmployeeSearchResults(parseHTML(html), isOS);
+      } catch (e) {
+        Logger.warn(`Gagal mencari karyawan (${isOS ? 'Outsource' : 'Internal'}): ${e.message}`);
+        return [];
+      }
     }));
 
     const map = new Map();
     responses.flat().forEach(item => {
       if (!map.has(item.key)) map.set(item.key, item);
     });
-    return Array.from(map.values());
+
+    let results = Array.from(map.values());
+
+    // Local Regex / Normal Match Filtering to ensure extreme accuracy
+    if (isRegex && regex) {
+      results = results.filter(item => {
+        const targetString = `${item.nrp} ${item.nama} ${item.divisi} ${item.bagian} ${item.group}`.toLowerCase();
+        return regex.test(targetString) || regex.test(item.nrp) || regex.test(item.nama);
+      });
+    } else {
+      // Alphanumeric plain text fallback check: if query has non-alphanumeric removed,
+      // let's ensure we only show items matching the clean terms to match perfectly.
+      const terms = serverQuery.toLowerCase().split(/\s+/).filter(Boolean);
+      if (terms.length > 0) {
+        results = results.filter(item => {
+          const targetString = `${item.nrp} ${item.nama} ${item.divisi} ${item.bagian} ${item.group}`.toLowerCase();
+          return terms.every(term => targetString.includes(term));
+        });
+      }
+    }
+
+    return results;
   }
 
   function getKaryawanPanelMode(key) {
@@ -1359,14 +1511,11 @@
     ];
 
     return `
-      <div class="qm-karyawan-panel">
-        <div class="qm-karyawan-panel-title">Data Profil</div>
-        <div class="qm-karyawan-detail-grid">
+      <div class="qm-karyawan-panel" style="padding: 0 8px 0 4px; border-radius: 4px;">
+        <div style="display: grid; grid-template-columns: 110px 1fr; gap: 6px 8px; font-size: 0.85rem; line-height: 1.4;">
           ${fields.map(([label, value]) => `
-            <div class="qm-karyawan-detail-item">
-              <span>${escapeHtml(label)}</span>
-              <strong>${escapeHtml(value || '-')}</strong>
-            </div>
+            <div style="color: var(--color-text-muted);">${escapeHtml(label)}</div>
+            <div style="font-weight: 600; color: var(--color-text); word-break: break-word;">${escapeHtml(value || '-')}</div>
           `).join('')}
         </div>
       </div>
@@ -1388,27 +1537,33 @@
     const saveDisabled = editor.saving || (editor.jkOptions.length === 0 && editor.kkOptions.length === 0) ? 'disabled' : '';
 
     return `
-      <div class="qm-karyawan-panel" data-key="${escapeHtml(result.key)}">
-        <div class="qm-karyawan-editor-summary">
-          <div class="qm-karyawan-summary-pill"><span>JK Saat Ini</span><strong>${escapeHtml(editor.emp?.jk || '-')}</strong></div>
-          <div class="qm-karyawan-summary-pill"><span>KK Saat Ini</span><strong>${escapeHtml(editor.emp?.KK || '-')}</strong></div>
+      <div class="qm-karyawan-panel" data-key="${escapeHtml(result.key)}" style="padding: 0 4px;">
+        <div style="display: flex; gap: 12px; margin-bottom: 16px;">
+          <div style="flex:1; background: var(--color-surface-soft); padding: 10px 12px; border-radius: 8px; font-size: 0.8rem; border: 1px solid var(--color-border);">
+            <span style="color: var(--color-text-muted); display:block; margin-bottom: 2px;">JK Saat Ini</span>
+            <strong style="font-size: 0.95rem; color: var(--color-text);">${escapeHtml(editor.emp?.jk || '-')}</strong>
+          </div>
+          <div style="flex:1; background: var(--color-surface-soft); padding: 10px 12px; border-radius: 8px; font-size: 0.8rem; border: 1px solid var(--color-border);">
+            <span style="color: var(--color-text-muted); display:block; margin-bottom: 2px;">KK Saat Ini</span>
+            <strong style="font-size: 0.95rem; color: var(--color-text);">${escapeHtml(editor.emp?.KK || '-')}</strong>
+          </div>
         </div>
-        ${editor.notice ? `<div class="qm-karyawan-editor-note qm-text-warning">${escapeHtml(editor.notice)}</div>` : ''}
-        <div class="qm-karyawan-editor-grid">
-          <div class="qm-karyawan-editor-field">
-            <label class="qm-field-label">Jam Kerja</label>
-            <select class="qm-select qm-karyawan-jk-select" data-key="${escapeHtml(result.key)}" ${editor.jkOptions.length === 0 ? 'disabled' : ''}>
+        ${editor.notice ? `<div style="font-size: 0.85rem; color: #d32f2f; margin-bottom: 12px; padding: 8px; background: #ffebee; border-radius: 6px;">${escapeHtml(editor.notice)}</div>` : ''}
+        <div style="display: flex; flex-direction: column; gap: 12px;">
+          <div class="qm-form-group" style="margin-bottom: 0;">
+            <label class="qm-form-label">Jam Kerja Baru</label>
+            <select class="qm-premium-input qm-premium-select qm-karyawan-jk-select" data-key="${escapeHtml(result.key)}" ${editor.jkOptions.length === 0 ? 'disabled' : ''}>
               ${jkOptions || '<option value="">Tidak ada opsi JK</option>'}
             </select>
           </div>
-          <div class="qm-karyawan-editor-field">
-            <label class="qm-field-label">Kalender Kerja</label>
-            <select class="qm-select qm-karyawan-kk-select" data-key="${escapeHtml(result.key)}" ${editor.kkOptions.length === 0 ? 'disabled' : ''}>
+          <div class="qm-form-group" style="margin-bottom: 0;">
+            <label class="qm-form-label">Kalender Kerja Baru</label>
+            <select class="qm-premium-input qm-premium-select qm-karyawan-kk-select" data-key="${escapeHtml(result.key)}" ${editor.kkOptions.length === 0 ? 'disabled' : ''}>
               ${kkOptions || '<option value="">Tidak ada opsi KK</option>'}
             </select>
           </div>
         </div>
-        <button type="button" class="qm-btn qm-btn-primary qm-karyawan-save-btn" data-key="${escapeHtml(result.key)}" ${saveDisabled}>${editor.saving ? 'Menyimpan...' : 'Simpan JK & KK'}</button>
+        <button type="button" class="qm-btn-premium-primary qm-karyawan-save-btn" data-key="${escapeHtml(result.key)}" ${saveDisabled} style="width: 100%; justify-content: center; margin-top: 16px; padding: 10px 24px !important; font-size: 0.95rem !important;">${editor.saving ? 'Menyimpan...' : 'Simpan Perubahan'}</button>
       </div>
     `;
   }
@@ -1420,7 +1575,16 @@
     return '';
   }
 
-  function renderKaryawanResults() {
+  function getInitials(name) {
+    if (!name) return '??';
+    const parts = name.split(' ').filter(Boolean);
+    if (parts.length > 1 && parts[0][0] && parts[1][0]) {
+      return (parts[0][0] + parts[1][0]).toUpperCase();
+    }
+    return name.slice(0, 2).toUpperCase();
+  }
+
+  function renderKaryawanResults(onlyLeftPanel = false) {
     const wrap = uiAdapter.get('karyawanResults');
     const btn = uiAdapter.get('karyawanSearchButton');
     if (!wrap) return;
@@ -1430,58 +1594,181 @@
       btn.textContent = state.karyawanLoading ? 'Mencari...' : 'Cari Karyawan';
     }
 
-    if (state.karyawanLoading) {
-      uiAdapter.html('karyawanResults', '<div class="qm-card qm-karyawan-empty"><div class="qm-flex qm-items-center qm-gap-s"><span class="qm-spinner"></span><span>Mencari data karyawan...</span></div></div>');
-      return;
-    }
+    const previewContainer = document.getElementById('qm-karyawan-live-preview');
+    const directoryTitle = document.getElementById('qm-karyawan-directory-title');
 
-    if (state.karyawanError) {
-      uiAdapter.html('karyawanResults', `<div class="qm-card qm-karyawan-empty qm-text-danger">${escapeHtml(state.karyawanError)}</div>`);
-      return;
-    }
+    if (!onlyLeftPanel) {
+      // 1. Loading State
+      if (state.karyawanLoading) {
+        uiAdapter.html('karyawanResults', '<div class="qm-card qm-karyawan-empty" style="padding: 20px; font-size: 0.85rem; text-align: center; color: var(--color-text-soft); display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%;"><span class="qm-spinner"></span><span>Mencari data karyawan...</span></div>');
+        return;
+      }
 
-    if (!state.karyawanQuery) {
-      uiAdapter.html('karyawanResults', '<div class="qm-card qm-karyawan-empty">Masukkan NRP 4 atau 8 digit, atau nama karyawan untuk mencari data personal dan menampilkan profil atau quick edit JK/KK.</div>');
-      return;
-    }
+      // 2. Error State
+      if (state.karyawanError) {
+        uiAdapter.html('karyawanResults', `<div class="qm-card qm-karyawan-empty qm-text-danger" style="padding: 20px; font-size: 0.85rem; text-align: center; width: 100%;">${escapeHtml(state.karyawanError)}</div>`);
+        return;
+      }
 
-    if (state.karyawanResults.length === 0) {
-      uiAdapter.html('karyawanResults', `<div class="qm-card qm-karyawan-empty">Tidak ada data karyawan yang cocok untuk <strong>${escapeHtml(state.karyawanQuery)}</strong>.</div>`);
-      return;
-    }
+      // 3. Empty Search / No Query State
+      if (!state.karyawanQuery) {
+        if (directoryTitle) directoryTitle.textContent = 'Hasil Pencarian';
+        uiAdapter.html('karyawanResults', '<div class="qm-card qm-karyawan-empty" style="padding: 20px; font-size: 0.85rem; text-align: center; color: var(--color-text-soft); width: 100%;">Gunakan form pencarian untuk menemukan data karyawan.</div>');
 
-    const html = `
-      <div class="qm-karyawan-results-summary">Ditemukan ${state.karyawanResults.length} data untuk <strong>${escapeHtml(state.karyawanQuery)}</strong>.</div>
-      <div class="qm-karyawan-results-list">
-        ${state.karyawanResults.map(result => {
-      const activeMode = getKaryawanPanelMode(result.key);
-      return `
-            <div class="qm-card qm-karyawan-result-card">
-              <div class="qm-karyawan-result-head">
-                <div class="qm-karyawan-identity-card">
-                  <div class="qm-karyawan-result-top">
-                    <span class="qm-karyawan-result-nrp">${escapeHtml(result.nrp || '-')}</span>
-                    <span class="qm-karyawan-source-badge ${result.source === 'outsource' ? 'outsource' : 'internal'}">${escapeHtml(result.sourceLabel)}</span>
-                  </div>
-                  <div class="qm-karyawan-result-name">${escapeHtml(result.nama || 'Nama belum terdeteksi')}</div>
-                  <div class="qm-karyawan-identity-grid">
-                    <div class="qm-karyawan-identity-item"><span>Divisi</span><strong>${escapeHtml(result.bagian || '-')}</strong></div>
-                    <div class="qm-karyawan-identity-item"><span>Seksi</span><strong>${escapeHtml(result.seksi || '-')}</strong></div>
-                    <div class="qm-karyawan-identity-item"><span>Grup</span><strong>${escapeHtml(result.group || '-')}</strong></div>
-                  </div>
-                </div>
-                <div class="qm-karyawan-result-actions">
-                  <button type="button" class="qm-btn qm-btn-primary qm-btn-inline ${activeMode === 'detail' ? 'qm-karyawan-action-active' : ''} qm-karyawan-detail-btn" data-key="${escapeHtml(result.key)}">Detail</button>
-                  <button type="button" class="qm-btn qm-btn-primary qm-btn-inline ${activeMode === 'edit' ? 'qm-karyawan-action-active' : ''} qm-karyawan-edit-btn" data-key="${escapeHtml(result.key)}">Edit HRIS</button>
-                </div>
-              </div>
-              ${renderKaryawanExpandedPanel(result)}
+        const leftPanel = document.getElementById('qm-karyawan-left-panel');
+        if (leftPanel) {
+          leftPanel.innerHTML = `
+            <div style="font-size: 0.85rem; color: var(--color-text-muted); line-height: 1.5; padding: 16px; background: #faf8f5; border-radius: 8px; border: 1px dashed var(--color-border);">
+              Pencarian NRP akan memeriksa database internal & outsource, lalu menampilkan profil detail & quick edit JK/KK.
             </div>
           `;
-    }).join('')}
-      </div>
-    `;
-    uiAdapter.html('karyawanResults', html);
+        }
+        return;
+      }
+
+      // 4. No Results Found State
+      if (state.karyawanResults.length === 0) {
+        if (directoryTitle) directoryTitle.textContent = 'Hasil Pencarian';
+        uiAdapter.html('karyawanResults', `<div class="qm-card qm-karyawan-empty" style="padding: 20px; font-size: 0.85rem; text-align: center; color: var(--color-text-soft); width: 100%;">Tidak ada data karyawan yang cocok untuk <strong>${escapeHtml(state.karyawanQuery)}</strong>.</div>`);
+
+        const leftPanel = document.getElementById('qm-karyawan-left-panel');
+        if (leftPanel) {
+          leftPanel.innerHTML = `
+            <div style="font-size: 0.85rem; color: var(--color-text-muted); line-height: 1.5; padding: 16px; background: #faf8f5; border-radius: 8px; border: 1px dashed var(--color-border);">
+              Pencarian NRP akan memeriksa database internal & outsource, lalu menampilkan profil detail & quick edit JK/KK.
+            </div>
+          `;
+        }
+        return;
+      }
+
+      // 5. Results Loaded State
+      if (directoryTitle) {
+        directoryTitle.textContent = `Hasil Pencarian (${state.karyawanResults.length})`;
+      }
+    }
+
+    // Determine active employee (default to none)
+    if (!state.karyawanActivePanel || !state.karyawanResults.some(r => r.key === state.karyawanActivePanel.key)) {
+      state.karyawanActivePanel = null;
+    }
+
+    const activeKey = state.karyawanActivePanel?.key;
+    const activeResult = activeKey ? findKaryawanResult(activeKey) : null;
+    const activeMode = state.karyawanActivePanel?.mode || 'detail';
+
+    if (onlyLeftPanel) {
+      // Just update active styling on card elements in the DOM without full re-rendering
+      wrap.querySelectorAll('.qm-directory-item').forEach(card => {
+        const key = card.dataset.key;
+        if (key === activeKey) {
+          card.classList.add('active');
+          card.style.borderColor = 'var(--color-accent-strong)';
+          card.style.background = '#f0f8ff';
+          card.style.boxShadow = '0 4px 12px rgba(0,0,0,0.05)';
+        } else {
+          card.classList.remove('active');
+          card.style.borderColor = '';
+          card.style.background = '';
+          card.style.boxShadow = '';
+        }
+      });
+    } else {
+      // B. Group and Render Matching Results List in Directory
+      const internalResults = state.karyawanResults.filter(r => r.source !== 'outsource');
+      const outsourceResults = state.karyawanResults.filter(r => r.source === 'outsource');
+
+      if (!state.karyawanGroupsExpanded) {
+        state.karyawanGroupsExpanded = { internal: false, outsource: false };
+      }
+
+      function renderEmployeeCardHtml(result) {
+        const initials = getInitials(result.nama);
+        const isOS = result.source === 'outsource';
+        const sourceBadge = `<span class="qm-preview-tag ${isOS ? 'tag-red' : 'tag-blue'}" style="font-size: 0.7rem; padding: 2px 8px; border-radius: 12px;">${escapeHtml(result.sourceLabel)}</span>`;
+        const avatarBg = isOS ? '#fdeceb' : '#e1f5fe';
+        const avatarColor = isOS ? '#c62828' : '#0288d1';
+        const isActive = result.key === activeKey;
+        const activeStyle = isActive ? 'border-color: var(--color-accent-strong); background: #f0f8ff; box-shadow: 0 4px 12px rgba(0,0,0,0.05);' : '';
+
+        return `
+          <div class="qm-premium-preview-card qm-directory-item ${isActive ? 'active' : ''}" data-key="${escapeHtml(result.key)}" style="cursor: pointer; width: 100%; transition: all 0.2s; padding: 12px 16px; ${activeStyle}">
+            <div class="qm-preview-avatar" style="background: ${avatarBg}; color: ${avatarColor}; flex-shrink: 0;">${escapeHtml(initials)}</div>
+            <div style="display: flex; flex-direction: column; flex: 1; font-size: 0.85rem; line-height: 1.5; min-width: 0;">
+              <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 6px;">
+                <span class="qm-preview-name" style="font-size: 1rem; color: var(--color-text); line-height: 1.2;">${escapeHtml(result.nama || 'Nama belum terdeteksi')}</span>
+                ${sourceBadge}
+              </div>
+              <div style="color: var(--color-text-muted); display: grid; grid-template-columns: 50px 1fr; gap: 2px;">
+                <span>NRP</span><strong style="color: var(--color-text);">${escapeHtml(result.nrp || '-')}</strong>
+                <span>Divisi</span><strong style="color: var(--color-text);">${escapeHtml(result.bagian || '-')}</strong>
+                <span>Bagian</span><strong style="color: var(--color-text);">${escapeHtml(result.seksi || '-')}</strong>
+                <span>Grup</span><strong style="color: var(--color-text);">${escapeHtml(result.group || '-')}</strong>
+              </div>
+            </div>
+          </div>
+        `;
+      }
+
+      let directoryHtml = '';
+
+      // Render Internal Group
+      if (internalResults.length > 0) {
+        const isExpanded = state.karyawanGroupsExpanded.internal;
+        const chevron = isExpanded ? '▼' : '▶';
+        directoryHtml += `
+          <div class="qm-preview-cards qm-group-header-card" data-group="internal">
+            <span>Internal (${internalResults.length})</span>
+            <span style="font-size: 0.8rem; color: var(--color-text-muted);">${chevron}</span>
+          </div>
+          <div class="qm-group-items-container" style="display: ${isExpanded ? 'flex' : 'none'}; flex-direction: column; gap: 8px; margin-bottom: 16px; width: 100%;">
+            ${internalResults.map(result => renderEmployeeCardHtml(result)).join('')}
+          </div>
+        `;
+      }
+
+      // Render Outsource Group
+      if (outsourceResults.length > 0) {
+        const isExpanded = state.karyawanGroupsExpanded.outsource;
+        const chevron = isExpanded ? '▼' : '▶';
+        directoryHtml += `
+          <div class="qm-preview-cards qm-group-header-card" data-group="outsource">
+            <span>Outsource (${outsourceResults.length})</span>
+            <span style="font-size: 0.8rem; color: var(--color-text-muted);">${chevron}</span>
+          </div>
+          <div class="qm-group-items-container" style="display: ${isExpanded ? 'flex' : 'none'}; flex-direction: column; gap: 8px; margin-bottom: 16px; width: 100%;">
+            ${outsourceResults.map(result => renderEmployeeCardHtml(result)).join('')}
+          </div>
+        `;
+      }
+
+      uiAdapter.html('karyawanResults', directoryHtml);
+    }
+
+    // A. Render Selected Live Preview Data in Left Panel
+    const leftPanel = document.getElementById('qm-karyawan-left-panel');
+    if (leftPanel) {
+      if (activeResult) {
+        leftPanel.innerHTML = `
+          <!-- Mode Toggle Tabs -->
+          <div style="display: flex; gap: 24px; border-bottom: 1px solid var(--color-border); margin-bottom: 16px; padding: 0 4px;">
+            <button type="button" class="qm-tab-btn ${activeMode === 'detail' ? 'active' : ''} qm-karyawan-detail-btn" data-key="${escapeHtml(activeResult.key)}" style="background: none; border: none; font-size: 0.95rem; font-weight: 600; cursor: pointer; padding: 8px 4px; border-bottom: 2px solid ${activeMode === 'detail' ? 'var(--color-text)' : 'transparent'}; color: ${activeMode === 'detail' ? 'var(--color-text)' : 'var(--color-text-muted)'}; transition: all 0.2s;">Detail Profil</button>
+            <button type="button" class="qm-tab-btn ${activeMode === 'edit' ? 'active' : ''} qm-karyawan-edit-btn" data-key="${escapeHtml(activeResult.key)}" style="background: none; border: none; font-size: 0.95rem; font-weight: 600; cursor: pointer; padding: 8px 4px; border-bottom: 2px solid ${activeMode === 'edit' ? 'var(--color-text)' : 'transparent'}; color: ${activeMode === 'edit' ? 'var(--color-text)' : 'var(--color-text-muted)'}; transition: all 0.2s;">Edit HRIS</button>
+          </div>
+
+          <!-- Detail/Editor Expanded Area -->
+          <div id="qm-karyawan-expanded-panel-container" style="width: 100%;">
+            ${renderKaryawanExpandedPanel(activeResult)}
+          </div>
+        `;
+      } else {
+        leftPanel.innerHTML = `
+          <div style="font-size: 0.85rem; color: var(--color-text-muted); line-height: 1.5; padding: 16px; background: #faf8f5; border-radius: 8px; border: 1px dashed var(--color-border); text-align: center;">
+            Klik salah satu karyawan di hasil pencarian untuk melihat Detail Profil atau Edit HRIS.
+          </div>
+        `;
+      }
+    }
   }
 
   async function loadKaryawanDetail(key, nrp, profileUrl) {
@@ -1493,7 +1780,11 @@
       nrp,
       loading: true
     };
-    renderKaryawanResults();
+
+    const isOS = key.startsWith('outsource:');
+    sessionStorage.setItem('qm_is_os_' + nrp, isOS ? 'true' : 'false');
+
+    renderKaryawanResults(true);
 
     try {
       if (!profileUrl) throw new Error('Link profile tidak tersedia.');
@@ -1514,10 +1805,10 @@
       };
     }
 
-    renderKaryawanResults();
+    renderKaryawanResults(true);
   }
 
-  async function loadKaryawanEditor(key, nrp) {
+  async function loadKaryawanEditor(key, nrp, knownId = null, knownIsOS = null) {
     state.karyawanActivePanel = { key, mode: 'edit' };
     resetKaryawanDetail();
     state.karyawanEditor = {
@@ -1526,10 +1817,14 @@
       nrp,
       loading: true
     };
-    renderKaryawanResults();
+
+    const isOS = knownIsOS !== null ? knownIsOS : key.startsWith('outsource:');
+    sessionStorage.setItem('qm_is_os_' + nrp, isOS ? 'true' : 'false');
+
+    renderKaryawanResults(true);
 
     try {
-      const emp = await fetchEmployee(nrp);
+      const emp = await fetchEmployee(nrp, knownId, isOS);
       if (!emp.found) throw new Error('Data karyawan tidak ditemukan.');
 
       const [jkResult, kkResult] = await Promise.allSettled([
@@ -1541,8 +1836,13 @@
       const jkOptions = jkResult.status === 'fulfilled' ? jkResult.value : [];
       const kkOptions = kkResult.status === 'fulfilled' ? kkResult.value : [];
 
-      if (jkResult.status === 'rejected') notices.push(`JK: ${jkResult.reason?.message || 'gagal memuat opsi.'}`);
-      if (kkResult.status === 'rejected') notices.push(`KK: ${kkResult.reason?.message || 'gagal memuat opsi.'}`);
+      if (jkResult.status === 'rejected' && kkResult.status === 'rejected') {
+        clearEmployeeCache(nrp);
+        notices.push("Opsi edit tidak tersedia (Mungkin karyawan outsource atau Anda tidak memiliki akses edit).");
+      } else {
+        if (jkResult.status === 'rejected') notices.push("Gagal memuat opsi Jam Kerja.");
+        if (kkResult.status === 'rejected') notices.push("Gagal memuat opsi Kalender Kerja.");
+      }
 
       updateKaryawanResultCache(key, emp);
       state.karyawanEditor = {
@@ -1555,6 +1855,7 @@
         notice: notices.join(' ')
       };
     } catch (e) {
+      clearEmployeeCache(nrp);
       state.karyawanEditor = {
         ...createEmptyKaryawanEditor(),
         key,
@@ -1563,19 +1864,13 @@
       };
     }
 
-    renderKaryawanResults();
+    renderKaryawanResults(true);
   }
 
   function toggleKaryawanDetail(key) {
     const result = findKaryawanResult(key);
     if (!result || !result.nrp) {
       UI.showResult('warning', 'NRP Tidak Ditemukan', 'Data NRP tidak tersedia untuk melihat detail.');
-      return;
-    }
-
-    if (getKaryawanPanelMode(key) === 'detail') {
-      resetKaryawanPanels();
-      renderKaryawanResults();
       return;
     }
 
@@ -1589,18 +1884,17 @@
       return;
     }
 
-    if (getKaryawanPanelMode(key) === 'edit') {
-      resetKaryawanPanels();
-      renderKaryawanResults();
-      return;
-    }
-
-    loadKaryawanEditor(key, result.nrp);
+    loadKaryawanEditor(key, result.nrp, result.id, result.source === 'outsource');
   }
 
   async function refreshKaryawanEditorAfterSave(key, nrp) {
     clearEmployeeCache(nrp);
-    await loadKaryawanEditor(key, nrp);
+    const result = findKaryawanResult(key);
+    if (result) {
+      await loadKaryawanEditor(key, nrp, result.id, result.source === 'outsource');
+    } else {
+      await loadKaryawanEditor(key, nrp);
+    }
   }
 
   async function handleKaryawanSaveEdit(input) {
@@ -1629,7 +1923,7 @@
     }
 
     state.karyawanEditor = { ...editor, saving: true };
-    renderKaryawanResults();
+    renderKaryawanResults(true);
 
     try {
       if (jkChanged) await saveJkMaster(editor.nrp, nextJk);
@@ -1641,7 +1935,7 @@
       UI.showResult('success', 'Data Diperbarui', `${parts.join(' & ')} NRP ${editor.nrp} berhasil diperbarui.`);
     } catch (e) {
       state.karyawanEditor = { ...editor, saving: false };
-      renderKaryawanResults();
+      renderKaryawanResults(true);
       UI.showResult('danger', 'Gagal Menyimpan', e.message || 'Perubahan JK/KK gagal disimpan.');
     }
   }
@@ -1694,6 +1988,7 @@
     backgroundHeartbeatTimer: null,
     karyawanQuery: '',
     karyawanResults: [],
+    karyawanGroupsExpanded: { internal: false, outsource: false },
     karyawanLoading: false,
     karyawanError: '',
     refreshRunId: 0,
@@ -1849,11 +2144,27 @@
 
   function hasShiftMark(td) {
     if (!td) return false;
+
+    // 1. Check if there is an input element (like a checkbox)
+    const input = td.querySelector('input');
+    if (input) {
+      return input.checked || td.querySelector('input:checked') !== null;
+    }
+
+    // 2. Check text content for checkmark symbols/text
     const text = td.textContent.trim().toLowerCase();
-    if (text !== '' && (text.includes('check') || text.includes('ok') || text.includes('✓') || text.includes('☑') || text.includes('v'))) return true;
-    if (td.querySelector('input:checked')) return true;
+    if (text !== '') {
+      if (text.includes('✓') || text.includes('☑') || text.includes('ok') || text === 'v' || text === 'check' || text === 'checked') {
+        return true;
+      }
+    }
+
+    // 3. Check HTML content for FontAwesome checkmark classes (avoid raw 'check' which matches 'checkbox')
     const html = td.innerHTML.toLowerCase();
-    if (html.includes('check') || html.includes('fa-check') || html.includes('fa-square-check')) return true;
+    if (html.includes('fa-check') || html.includes('fa-square-check') || html.includes('fa-check-square') || html.includes('fa-check-circle')) {
+      return true;
+    }
+
     return false;
   }
 
@@ -1868,7 +2179,9 @@
   /** Count rows marked as libur by CSS classes/colors. */
   function countHolidays(docContext) {
     const root = docContext || document;
-    const trs = root.querySelectorAll('table tbody tr');
+    const trs = Array.from(root.querySelectorAll('table tbody tr')).filter(tr => {
+      return !tr.closest('#qm-panel') && !tr.closest('.command-menu');
+    });
     let total = 0;
 
     trs.forEach(tr => {
@@ -1923,7 +2236,9 @@
     });
 
     const root = docContext || document;
-    const trs = root.querySelectorAll('table tbody tr');
+    const trs = Array.from(root.querySelectorAll('table tbody tr')).filter(tr => {
+      return !tr.closest('#qm-panel') && !tr.closest('.command-menu');
+    });
 
     trs.forEach(tr => {
       const tds = tr.querySelectorAll('td');
@@ -2055,7 +2370,7 @@
         s1PulangAwal = 15.0;
 
         // Support 06.00 - 14.00 model (e.g., NRP 2869)
-        if (adjMsk !== null && adjMsk <= 6.0) s1PulangAwal = 14.0;
+        if (adjMsk !== null && adjMsk <= 6.0 && ctx?.nrp === '2869') s1PulangAwal = 14.0;
       } else {
         s1KeluarLembur = THRESHOLDS.SHIFT1_KLR_LEMBUR_5HR;
         s1Terlambat = THRESHOLDS.SHIFT1_TERLAMBAT_5HR;
@@ -2117,16 +2432,29 @@
     }
 
     const root = doc || document;
-    const trs = root.querySelectorAll('table tbody tr');
+    const trs = Array.from(root.querySelectorAll('table tbody tr')).filter(tr => {
+      return !tr.closest('#qm-panel') && !tr.closest('.command-menu');
+    });
 
-    // Pre-calculate shift counts per date to detect duplicates
-    const dateShiftCounts = {};
+    // Pre-calculate shift counts per date and shift number to detect duplicates
+    const dateShiftCounts = {}; // Key: `${tgl}_${shiftNum}`
     trs.forEach(tr => {
       const tds = tr.querySelectorAll('td');
       if (tds.length < 12 || tr.textContent.toLowerCase().includes('total')) return;
       const tgl = tds[COL.TGL].textContent.trim();
-      const hasChecked = hasShiftMark(tds[COL.SHIFT1]) || hasShiftMark(tds[COL.SHIFT2]) || hasShiftMark(tds[COL.SHIFT3]);
-      if (tgl && hasChecked) dateShiftCounts[tgl] = (dateShiftCounts[tgl] || 0) + 1;
+      if (!tgl) return;
+      if (hasShiftMark(tds[COL.SHIFT1])) {
+        const key = `${tgl}_1`;
+        dateShiftCounts[key] = (dateShiftCounts[key] || 0) + 1;
+      }
+      if (hasShiftMark(tds[COL.SHIFT2])) {
+        const key = `${tgl}_2`;
+        dateShiftCounts[key] = (dateShiftCounts[key] || 0) + 1;
+      }
+      if (hasShiftMark(tds[COL.SHIFT3])) {
+        const key = `${tgl}_3`;
+        dateShiftCounts[key] = (dateShiftCounts[key] || 0) + 1;
+      }
     });
 
     trs.forEach(tr => {
@@ -2144,9 +2472,31 @@
       const { shift1, shift2, shift3, activeShift, mskTime } = shiftInfo;
       const klrTime = parseTimeToDecimal(klrText);
 
+      // Detect multiple checked shifts inside the same row
+      let checkedShiftsCount = 0;
+      if (shift1) checkedShiftsCount++;
+      if (shift2) checkedShiftsCount++;
+      if (shift3) checkedShiftsCount++;
+      if (checkedShiftsCount > 1) {
+        const msg = 'Multi-shift Checked pada baris yang sama';
+        const link = buildKehadiranLink(ctx);
+        flagCell(anomalies, tglText, COL.SHIFT1, msg, link, cekSpklCells, fullDate);
+        flagCell(anomalies, tglText, COL.SHIFT2, msg, link, cekSpklCells, fullDate);
+        flagCell(anomalies, tglText, COL.SHIFT3, msg, link, cekSpklCells, fullDate);
+      }
+
       // Detect multiple rows for same date with checked shifts (Barcode overlap/error)
       const isSaturday = new Date(ctx.tahun, ctx.bulan - 1, parseInt(tglText)).getDay() === 6;
-      if (activeShift && dateShiftCounts[tglText] > 1 && !isHalfDay && !isSaturday) {
+
+      let hasDuplicateActiveShift = false;
+      if (activeShift) {
+        const key = `${tglText}_${activeShift}`;
+        if (dateShiftCounts[key] > 1) {
+          hasDuplicateActiveShift = true;
+        }
+      }
+
+      if (hasDuplicateActiveShift && !isHalfDay && !isSaturday) {
         const barcodeLink = buildKehadiranLink(ctx);
         let msg = 'Duplikasi Shift pada tanggal yang sama';
 
@@ -2191,7 +2541,12 @@
 
       const barcodeLink = buildKehadiranLink(ctx);
 
-      if (!isLibur) {
+      const isSunday = new Date(ctx.tahun, ctx.bulan - 1, parseInt(tglText)).getDay() === 0;
+      const isWeekendRest = (isSaturday || isSunday) && !activeShift && !mskText && !klrText && !ketText;
+
+      if (isWeekendRest) {
+        // Weekend rest day: do not flag Buka Halaman Kehadiran
+      } else if (!isLibur) {
         if (!mskText && !ketText) flagCell(anomalies, tglText, COL.MSK, 'Buka Halaman Kehadiran', barcodeLink, cekSpklCells, fullDate);
         if (!klrText && !ketText) flagCell(anomalies, tglText, COL.KLR, 'Buka Halaman Kehadiran', barcodeLink, cekSpklCells, fullDate);
       } else {
@@ -2311,7 +2666,21 @@
     const prof = startProfile('startBatchAnomalyCheck:init');
 
     state.batchQueue = nrps.map(nrp => ({ nrp, status: 'pending', msg: '' }));
-    state.batchResults = [];
+    state.batchResults = nrps.map(nrp => ({
+      nrp,
+      found: true,
+      nama: 'Memproses...',
+      bagian: 'Sedang Memproses',
+      seksi: 'Sedang Memproses',
+      group: '-',
+      anomalies: [],
+      msg: 'Memproses...',
+      processing: true
+    }));
+    localStorage.removeItem('qm-batch-results');
+    localStorage.removeItem('qm-batch-bulan');
+    localStorage.removeItem('qm-batch-tahun');
+    if (results) results.classList.remove('is-visible');
     state.batchLogs = [];
     resetBatchProfile();
     const logBody = uiAdapter.get('logBody');
@@ -2319,9 +2688,25 @@
     pushLog(`Memulai batch check untuk ${nrps.length} NRP...`);
 
     if (btnCheck) { btnCheck.dataset.running = 'true'; btnCheck.textContent = 'Memproses...'; }
-    if (progress) progress.classList.remove('qm-hidden');
-    if (results) renderSafe(results, '');
-    if (btnExport) btnExport.classList.add('qm-hidden');
+    if (progress) progress.classList.remove('is-hidden');
+
+    // Render the initial pending/processing skeleton immediately
+    _renderBatchResultsImmediate();
+
+    if (results) {
+      const firstCell = results.querySelector('.qm-batch-nrp-link') || results.querySelector('.qm-batch-cell');
+      if (firstCell) firstCell.focus();
+      else results.focus();
+      const scrollContainer = results.closest('.panel-state');
+      if (scrollContainer) {
+        const targetScrollTop = results.offsetTop - (scrollContainer.clientHeight / 2) + (results.clientHeight / 2);
+        scrollContainer.scrollTo({
+          top: Math.max(0, targetScrollTop),
+          behavior: 'smooth'
+        });
+      }
+    }
+    if (btnExport) { btnExport.classList.remove('qm-hidden'); btnExport.disabled = true; btnExport.style.opacity = '0.5'; }
 
     const poolSize = Math.min(APP_CONFIG.BATCH_POOL_SIZE, state.batchQueue.length);
     const workers = [];
@@ -2337,6 +2722,55 @@
     const btnCheck = uiAdapter.get('batchCheckButton');
     if (btnCheck) btnCheck.textContent = 'Membatalkan...';
     finishBatch(state.batchRunId);
+  }
+
+  function handleBatchClear() {
+    if (uiAdapter.get('batchCheckButton')?.dataset.running) {
+      uiAdapter.alert('Harap batalkan proses batch yang sedang berjalan terlebih dahulu.');
+      return;
+    }
+    if (state.batchResults.length === 0) {
+      uiAdapter.alert('Tidak ada data batch untuk dihapus.');
+      return;
+    }
+    if (!uiAdapter.confirm('Apakah Anda yakin ingin menghapus semua hasil pemeriksaan batch ini?')) return;
+
+    state.batchResults = [];
+    state.batchQueue = [];
+    state.batchTotal = 0;
+    state.batchBulan = 0;
+    state.batchTahun = 0;
+    state.batchAborted = false;
+
+    localStorage.removeItem('qm-batch-results');
+    localStorage.removeItem('qm-batch-bulan');
+    localStorage.removeItem('qm-batch-tahun');
+
+    const inputMulti = uiAdapter.get('#qm-input-multi-nrp');
+    if (inputMulti) inputMulti.value = '';
+
+    renderBatchResults();
+
+    const progress = uiAdapter.get('batchProgress');
+    if (progress) progress.classList.add('is-hidden');
+
+    const btnExport = uiAdapter.get('batchExportButton');
+    if (btnExport) {
+      btnExport.classList.add('qm-hidden');
+      btnExport.style.opacity = '0';
+      btnExport.disabled = true;
+    }
+
+    const statusBar = uiAdapter.get('batchStatus');
+    if (statusBar) statusBar.textContent = '';
+
+    const progressBar = uiAdapter.get('batchProgressBar');
+    if (progressBar) progressBar.style.width = '0%';
+
+    const container = uiAdapter.get('batchResults');
+    if (container) {
+      container.classList.remove('is-visible');
+    }
   }
 
   async function processBatchWorker(batchRunId) {
@@ -2418,17 +2852,41 @@
       btnCheck.textContent = 'Proses Batch';
       delete btnCheck.dataset.running;
     }
-    if (progress) progress.classList.add('qm-hidden');
-    if (btnExport && state.batchResults.length > 0) btnExport.classList.remove('qm-hidden');
+    const finishedCount = state.batchResults.filter(r => !r.processing).length;
+    // Don't hide the progress bar immediately if we have export button
+    if (btnExport && finishedCount > 0) {
+      btnExport.classList.remove('qm-hidden');
+      btnExport.disabled = false;
+      btnExport.style.opacity = '1';
+    } else {
+      if (progress) progress.classList.add('is-hidden');
+      if (btnExport) btnExport.classList.add('qm-hidden');
+    }
 
-    if (statusBar) statusBar.textContent = 'Selesai: ' + state.batchResults.length + '/' + state.batchTotal + ' NRP';
+    if (statusBar) statusBar.textContent = 'Selesai: ' + finishedCount + '/' + state.batchTotal + ' NRP';
     if (progressBar) progressBar.style.width = '100%';
 
     if (state.batchAborted) {
       UI.showResult('warning', 'Dibatalkan', 'Proses pemeriksaan batch dihentikan oleh pengguna.');
       pushLog('Proses batch dibatalkan oleh pengguna.', 'error');
     } else {
-      pushLog(`Batch check selesai. Total ${state.batchResults.length} NRP diproses.`);
+      pushLog(`Batch check selesai. Total ${finishedCount} NRP diproses.`);
+      const container = uiAdapter.get('batchResults');
+      const scrollContainer = container ? container.closest('.panel-state') : null;
+      if (container && scrollContainer) {
+        container.classList.remove('is-visible');
+        void container.offsetWidth;
+        container.classList.add('is-visible');
+        const firstCell = container.querySelector('.qm-batch-nrp-link') || container.querySelector('.qm-batch-cell');
+        if (firstCell) firstCell.focus();
+        else container.focus();
+
+        const targetScrollTop = container.offsetTop - (scrollContainer.clientHeight / 2) + (container.clientHeight / 2);
+        scrollContainer.scrollTo({
+          top: Math.max(0, targetScrollTop),
+          behavior: 'smooth'
+        });
+      }
     }
 
     if (state.debug && state.batchProfile) {
@@ -2445,17 +2903,26 @@
   }
 
   function pushBatchResult(item) {
-    state.batchResults.push(item);
+    const idx = state.batchResults.findIndex(r => r.nrp === item.nrp);
+    if (idx !== -1) {
+      state.batchResults[idx] = item;
+    } else {
+      state.batchResults.push(item);
+    }
+    localStorage.setItem('qm-batch-results', JSON.stringify(state.batchResults));
+    localStorage.setItem('qm-batch-bulan', state.batchBulan);
+    localStorage.setItem('qm-batch-tahun', state.batchTahun);
     renderBatchResults();
     updateBatchProgress();
   }
 
   function updateBatchProgress() {
-    const pct = state.batchTotal > 0 ? Math.round((state.batchResults.length / state.batchTotal) * 100) : 0;
+    const finishedCount = state.batchResults.filter(r => !r.processing).length;
+    const pct = state.batchTotal > 0 ? Math.round((finishedCount / state.batchTotal) * 100) : 0;
     const barEl = uiAdapter.get('batchProgressBar');
     const statusEl = uiAdapter.get('batchStatus');
     if (barEl) barEl.style.width = pct + '%';
-    if (statusEl) statusEl.textContent = 'Memproses... ' + state.batchResults.length + '/' + state.batchTotal;
+    if (statusEl) statusEl.textContent = 'Memproses... ' + finishedCount + '/' + state.batchTotal;
   }
 
   let renderBatchTimeout;
@@ -2515,12 +2982,12 @@
     let bagIdx = 0;
     for (const bag in tree) {
       const bagSafeId = 'bag-' + (bagIdx++);
-      html += `<tr class="qm-batch-group-header qm-batch-header-bg" data-target=".${bagSafeId}">`;
+      html += `<tr class="qm-batch-group-header qm-batch-header-bg expanded" data-target=".${bagSafeId}">`;
       html += `<td colspan="5" class="qm-batch-bagian-cell"><div class="qm-flex qm-items-center qm-justify-between qm-w-full"><span>${escapeHtml(bag)}</span><span class="qm-chevron qm-accordion-chevron">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>
               </span></div></td></tr>`;
 
-      html += `<tr class="qm-batch-group-row ${bagSafeId} qm-table-header qm-batch-sub-header-bg qm-hidden">`;
+      html += `<tr class="qm-batch-group-row ${bagSafeId} qm-table-header qm-batch-sub-header-bg qm-table-row">`;
       html += '<td class="qm-batch-cell-header qm-batch-col-nrp">NRP</td>';
       html += '<td class="qm-batch-cell-header qm-batch-col-nama">Nama</td>';
       html += '<td class="qm-batch-cell-header qm-batch-col-ot">Lembur</td>';
@@ -2531,7 +2998,7 @@
       let sekIdx = 0;
       for (const sek in tree[bag]) {
         const sekSafeId = bagSafeId + '-sek-' + (sekIdx++);
-        html += `<tr class="qm-batch-group-row ${bagSafeId} qm-batch-seksi-header qm-batch-sub-header-bg qm-hidden" data-target=".${sekSafeId}">`;
+        html += `<tr class="qm-batch-group-row ${bagSafeId} qm-batch-seksi-header qm-batch-sub-header-bg qm-table-row expanded" data-target=".${sekSafeId}">`;
         html += `<td colspan="5" class="qm-batch-seksi-cell" style="padding-left: 32px;"><div class="qm-flex qm-items-center qm-justify-between qm-w-full"><span>${escapeHtml(sek)} <span class="qm-batch-seksi-count">(${tree[bag][sek].length})</span></span><span class="qm-chevron qm-accordion-chevron">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>
               </span></div></td></tr>`;
@@ -2540,10 +3007,12 @@
           var nrpLink = item.nrp
             ? '<a href="#" class="qm-batch-nrp-link" data-nrp="' + escapeHtml(item.nrp) + '" style="padding-left: 64px;">' + escapeHtml(item.nrp) + '</a>'
             : '-';
-          var nama = item.found ? escapeHtml(item.nama || '-') : '<span class="qm-batch-not-found">Tidak Ditemukan</span>';
+          var nama = item.processing ? '<span class="qm-text-muted" style="opacity: 0.6;">Memproses...</span>' : (item.found ? escapeHtml(item.nama || '-') : '<span class="qm-batch-not-found">Tidak Ditemukan</span>');
           var masalahHtml = '';
 
-          if (item.anomalies && item.anomalies.length > 0) {
+          if (item.processing) {
+            masalahHtml = '<span class="status-pill status-pending" style="display: inline-flex; align-items: center; gap: 6px;"><span class="qm-spinner qm-spinner-xs" style="width: 12px; height: 12px; border-width: 1.5px;"></span>Memproses...</span>';
+          } else if (item.anomalies && item.anomalies.length > 0) {
             const byTgl = {};
             item.anomalies.forEach(a => {
               const t = String(a.tgl);
@@ -2581,11 +3050,11 @@
                 const tglPad = String(tgl).padStart(2, '0');
                 const fDate = firstAnomWithLink.fullDate || `${state.batchTahun}-${String(state.batchBulan).padStart(2, '0')}-${tglPad}`;
 
-                fixBtn = `<button class="qm-fix-dot" title="${escapeHtml(titleStr)}" data-fix-link="${escapeHtml(finalLink)}" data-fix-date="${escapeHtml(tglPad)}" data-full-date="${escapeHtml(fDate)}"></button>`;
+                fixBtn = `<button class="qm-batch-fix-btn" title="${escapeHtml(titleStr)}" data-fix-link="${escapeHtml(finalLink)}" data-fix-date="${escapeHtml(tglPad)}" data-full-date="${escapeHtml(fDate)}">Fix</button>`;
               }
 
               listItems += '<div class="qm-batch-date-row">';
-              listItems += '<div class="qm-batch-date-header qm-flex qm-items-center qm-justify-between"><span style="position: relative; padding-right: 15px;"><b>Tgl ' + escapeHtml(tgl) + '</b>' + fixBtn + '</span><span class="qm-chevron qm-accordion-chevron"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg></span></div>';
+              listItems += '<div class="qm-batch-date-header qm-flex qm-items-center qm-justify-between"><span><b>Tgl ' + escapeHtml(tgl) + '</b>' + fixBtn + '</span><span class="qm-chevron qm-accordion-chevron"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg></span></div>';
               listItems += '<div class="qm-batch-date-content qm-hidden">';
               // Deduplicate anomalies by message for the same date
               const msgMap = new Map();
@@ -2598,32 +3067,39 @@
                 const uniqueCols = [...new Set(cols)].filter(Boolean);
                 const colNames = uniqueCols.map(c => escapeHtml(c)).join(', ');
                 const colPrefix = colNames ? colNames + ': ' : '';
-                listItems += '<div class="qm-batch-anomaly-detail">• ' + colPrefix + escapeHtml(msg) + '</div>';
+                listItems += '<div class="qm-batch-anomaly-detail" style="font-size: 12px">• ' + colPrefix + escapeHtml(msg) + '</div>';
               });
               listItems += '</div></div>';
             }
             masalahHtml = '<div class="qm-batch-masalah-scroll">' + listItems + '</div>';
           } else if (item.found) {
-            masalahHtml = '<span class="qm-batch-no-anomaly">Tidak ada anomali</span>';
+            masalahHtml = '<span class="status-pill status-active">Aktif</span>';
           } else {
-            masalahHtml = '<span class="qm-batch-not-found">' + escapeHtml(item.msg || 'Error') + '</span>';
+            masalahHtml = `<span class="status-pill status-error">${escapeHtml(item.msg || 'Tidak Ditemukan')}</span>`;
           }
 
-          const rk = item.rekaps || { otb: 0, otl: 0, ota: 0, otp: 0, keterangan: {} };
-          const otValues = `B:${rk.otb.toFixed(1)} L:${rk.otl.toFixed(1)} A:${rk.ota.toFixed(1)} P:${rk.otp.toFixed(1)}`;
+          let lemburHtml = '';
+          let ketHtml = '';
+          if (item.processing) {
+            lemburHtml = '<span style="color: var(--color-text-muted); opacity: 0.5;">-</span>';
+            ketHtml = '<span style="color: var(--color-text-muted); opacity: 0.5;">-</span>';
+          } else {
+            const rk = item.rekaps || { otb: 0, otl: 0, ota: 0, otp: 0, keterangan: {} };
+            const otValues = `B: ${rk.otb.toFixed(1)}<br>L: ${rk.otl.toFixed(1)}<br>A: ${rk.ota.toFixed(1)}<br>P: ${rk.otp.toFixed(1)}`;
 
-          const ketKeys = ['CT', 'CH', 'SD', 'I', 'IS', 'IA', 'A'];
-          const ketStr = ketKeys.map(k => `${k}:${rk.keterangan[k] || 0}`).join(' | ');
+            const ketKeys = ['CT', 'CH', 'SD', 'I', 'IS', 'IA', 'A'];
+            const ketStr = ketKeys.map(k => `${k}: ${rk.keterangan[k] || 0}`).join('<br>');
 
-          const lemburHtml = `<div class="qm-text-xs qm-font-mono" style="color: var(--qm-olive);">${otValues}</div>`;
-          const ketHtml = `<div class="qm-text-xs qm-font-mono" style="color: var(--qm-stone); opacity: 0.8;">${ketStr}</div>`;
+            lemburHtml = `<div class="qm-text-xs qm-font-mono" style="color: var(--qm-olive);">${otValues}</div>`;
+            ketHtml = `<div class="qm-text-xs qm-font-mono" style="color: var(--qm-stone); opacity: 0.8;">${ketStr}</div>`;
+          }
 
-          html += `<tr class="qm-batch-group-row ${bagSafeId} ${sekSafeId} qm-batch-item-row qm-hidden">`;
+          html += `<tr class="qm-batch-group-row ${bagSafeId} ${sekSafeId} qm-batch-item-row qm-table-row">`;
           html += '<td class="qm-batch-cell">' + nrpLink + '</td>';
           html += '<td class="qm-batch-cell qm-batch-nama">' + nama + '</td>';
-          html += '<td class="qm-batch-cell">' + lemburHtml + '</td>';
-          html += '<td class="qm-batch-cell">' + ketHtml + '</td>';
-          html += '<td class="qm-batch-cell">' + masalahHtml + '</td>';
+          html += '<td class="qm-batch-cell qm-batch-col-lembur">' + lemburHtml + '</td>';
+          html += '<td class="qm-batch-cell qm-batch-col-ket">' + ketHtml + '</td>';
+          html += '<td class="qm-batch-cell qm-batch-col-masalah">' + masalahHtml + '</td>';
           html += '</tr>';
         });
       }
@@ -2632,6 +3108,20 @@
     html += '</tbody></table>';
 
     renderSafe(container, html);
+    container.classList.remove('is-visible');
+    void container.offsetWidth; // Force DOM reflow
+    container.classList.add('is-visible');
+    const scrollContainer = container.closest('.panel-state');
+    if (scrollContainer && state.batchResults.length === 1) {
+      const firstCell = container.querySelector('.qm-batch-nrp-link') || container.querySelector('.qm-batch-cell');
+      if (firstCell) firstCell.focus();
+      else container.focus();
+      const targetScrollTop = container.offsetTop - (scrollContainer.clientHeight / 2) + (container.clientHeight / 2);
+      scrollContainer.scrollTo({
+        top: Math.max(0, targetScrollTop),
+        behavior: 'smooth'
+      });
+    }
     const duration = finishProfile(prof, { items: state.batchResults.length });
     if (state.batchProfile) state.batchProfile.renderTotal += duration;
   }
@@ -3021,7 +3511,7 @@
         const text = el.textContent.trim();
         let href = el.getAttribute('href');
         const dataTarget = el.getAttribute('data-target');
-        
+
         // If it's a modal button without href, try to construct edit URL
         if (!href && dataTarget && dataTarget.startsWith('#editData')) {
           const id = dataTarget.replace('#editData', '');
@@ -3124,20 +3614,20 @@
             </thead>
             <tbody>
               ${sortedDates.map(dateStr => {
-                const group = grouped[dateStr];
-                const m = group.masuk;
-                const k = group.keluar;
-                
-                const renderTime = (entry) => {
-                  if (!entry) return '<span class="qm-text-muted qm-font-xs">-</span>';
-                  const isDelete = (entry.actions || []).some(a => /hapus|delete/i.test(a.text));
-                  const deleteBtn = isDelete 
-                    ? `<button type="button" class="qm-btn-text qm-text-danger qm-btn-barcode-delete" data-url="${toAbsoluteHrisUrl((entry.actions.find(a => /hapus|delete/i.test(a.text))).href)}" style="margin-left: 4px; font-size: 10px;">&times;</button>`
-                    : '';
-                  return `<span class="qm-font-mono">${escapeHtml(entry.time || '-')}</span>${deleteBtn}`;
-                };
+        const group = grouped[dateStr];
+        const m = group.masuk;
+        const k = group.keluar;
 
-                return `
+        const renderTime = (entry) => {
+          if (!entry) return '<span class="qm-text-muted qm-font-xs">-</span>';
+          const isDelete = (entry.actions || []).some(a => /hapus|delete/i.test(a.text));
+          const deleteBtn = isDelete
+            ? `<button type="button" class="qm-btn-text qm-text-danger qm-btn-barcode-delete" data-url="${toAbsoluteHrisUrl((entry.actions.find(a => /hapus|delete/i.test(a.text))).href)}" style="margin-left: 4px; font-size: 10px;">&times;</button>`
+            : '';
+          return `<span class="qm-font-mono">${escapeHtml(entry.time || '-')}</span>${deleteBtn}`;
+        };
+
+        return `
                   <tr>
                     <td><input type="checkbox" class="qm-hadir-batch-cb" data-indices="${group.indices.join(',')}"></td>
                     <td><span style="font-size: var(--qm-font-xs);">${escapeHtml(dateStr)}</span></td>
@@ -3145,7 +3635,7 @@
                     <td>${renderTime(k)}</td>
                   </tr>
                 `;
-              }).join('')}
+      }).join('')}
             </tbody>
           </table>
         </div>
@@ -3257,7 +3747,7 @@
 
       if (!cb.dataset.indices) return;
       const indices = cb.dataset.indices.split(',').map(n => parseInt(n, 10));
-      
+
       indices.forEach(idx => {
         if (isNaN(idx)) return;
         const entry = current.summary.entries[idx];
@@ -3279,7 +3769,7 @@
           const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
           const d = entry.date;
           const dateMatch = `${String(d.getDate()).padStart(2, '0')}-${months[d.getMonth()]}-${d.getFullYear()}`;
-          
+
           tasks.push({
             index: idx,
             type: isDelete ? 'delete' : 'edit',
@@ -3338,15 +3828,15 @@
     UI.showGlobalLoader('Otomasi', `Mengolah baris ${idx + 1}/${tasks.length}...`);
 
     // Find modal - be more flexible with selectors
-    const modal = document.querySelector('.modal.show, .modal.in, [role="dialog"].show') || 
-                  document.querySelector('.modal-content');
+    const modal = document.querySelector('.modal.show, .modal.in, [role="dialog"].show') ||
+      document.querySelector('.modal-content');
     const isVisible = modal && (modal.offsetWidth > 0 || modal.offsetHeight > 0);
 
     if (isVisible) {
       // Broad selectors for the date/time input
       const timeInput = modal.querySelector('input[name*="tanggal"], input[id*="tanggal"], .tanggal_edit, #tanggal_edit');
       const statusInput = modal.querySelector('select[name*="status"], select[id*="status"], #status_edit, .status_edit');
-      
+
       if (timeInput) {
         const val = timeInput.value;
         // User's example: 2026-04-01 07:00:00.000
@@ -3362,7 +3852,7 @@
         } else {
           newVal = task.time; // Fallback
         }
-        
+
         timeInput.value = newVal;
         // Trigger change event just in case
         timeInput.dispatchEvent(new Event('change', { bubbles: true }));
@@ -3375,9 +3865,9 @@
         setTimeout(() => {
           // Find Submit button by type, class, or text
           const buttons = Array.from(modal.querySelectorAll('button, input[type="submit"]'));
-          const submitBtn = buttons.find(b => 
-            b.type === 'submit' || 
-            b.classList.contains('btn-primary') || 
+          const submitBtn = buttons.find(b =>
+            b.type === 'submit' ||
+            b.classList.contains('btn-primary') ||
             /submit|simpan|save/i.test(b.textContent)
           );
 
@@ -3402,20 +3892,20 @@
     } else {
       // Find the specific row by matching Date and Status
       let targetRow = null;
-      
+
       const headers = Array.from(document.querySelectorAll('table thead th')).map(th => th.textContent.trim().toLowerCase());
       const tanggalIdx = headers.indexOf('tanggal');
       const statusIdx = headers.indexOf('status');
-      
+
       if (tanggalIdx !== -1 && statusIdx !== -1) {
         const rows = document.querySelectorAll('table tbody tr');
         for (const row of rows) {
           const cells = row.querySelectorAll('td');
           if (cells.length <= Math.max(tanggalIdx, statusIdx)) continue;
-          
+
           const rowTanggal = cells[tanggalIdx].textContent.trim();
           const rowStatus = cells[statusIdx].textContent.trim();
-          
+
           if (rowTanggal.includes(task.dateMatch) && rowStatus === task.statusMatch) {
             targetRow = row;
             break;
@@ -3432,8 +3922,8 @@
         if (task.type === 'delete') {
           // Find delete button: btn-danger or text "Hapus/Delete"
           const buttons = Array.from(targetRow.querySelectorAll('button, a.btn'));
-          const delBtn = buttons.find(b => 
-            b.classList.contains('btn-danger') || 
+          const delBtn = buttons.find(b =>
+            b.classList.contains('btn-danger') ||
             /hapus|delete|remove/i.test(b.textContent) ||
             b.querySelector('.fa-trash, .fa-times')
           );
@@ -3667,38 +4157,38 @@
                   <label class="qm-field-label" style="font-size: 9px; margin-bottom: 2px;">Jenis OT</label>
                   <select class="qm-select qm-spkl-inline-jenis" style="height: 24px; padding: 0 4px; font-size: 10px;">
                     <option value="" ${!entry.otCode ? 'selected' : ''}>Pilih Jenis</option>
-                    <option value="1" ${entry.otCode==='1' ? 'selected' : ''}>OT BIASA</option>
-                    <option value="2" ${entry.otCode==='2' ? 'selected' : ''}>LONG SHIFT</option>
-                    <option value="3" ${entry.otCode==='3' ? 'selected' : ''}>NON STOP</option>
-                    <option value="4" ${entry.otCode==='4' ? 'selected' : ''}>OT AWAL</option>
-                    <option value="5A" ${entry.otCode==='5A' ? 'selected' : ''}>NO REST (AWAL)</option>
-                    <option value="5B" ${entry.otCode==='5B' ? 'selected' : ''}>NO REST (TENGAH)</option>
-                    <option value="5C" ${entry.otCode==='5C' ? 'selected' : ''}>NO REST (AKHIR)</option>
-                    <option value="6" ${entry.otCode==='6' ? 'selected' : ''}>STANDBY</option>
-                    <option value="7" ${entry.otCode==='7' ? 'selected' : ''}>LAIN-LAIN</option>
-                    <option value="OT" ${entry.otCode==='OT' ? 'selected' : ''}>OVERTIME</option>
+                    <option value="1" ${entry.otCode === '1' ? 'selected' : ''}>OT BIASA</option>
+                    <option value="2" ${entry.otCode === '2' ? 'selected' : ''}>LONG SHIFT</option>
+                    <option value="3" ${entry.otCode === '3' ? 'selected' : ''}>NON STOP</option>
+                    <option value="4" ${entry.otCode === '4' ? 'selected' : ''}>OT AWAL</option>
+                    <option value="5A" ${entry.otCode === '5A' ? 'selected' : ''}>NO REST (AWAL)</option>
+                    <option value="5B" ${entry.otCode === '5B' ? 'selected' : ''}>NO REST (TENGAH)</option>
+                    <option value="5C" ${entry.otCode === '5C' ? 'selected' : ''}>NO REST (AKHIR)</option>
+                    <option value="6" ${entry.otCode === '6' ? 'selected' : ''}>STANDBY</option>
+                    <option value="7" ${entry.otCode === '7' ? 'selected' : ''}>LAIN-LAIN</option>
+                    <option value="OT" ${entry.otCode === 'OT' ? 'selected' : ''}>OVERTIME</option>
                   </select>
                 </div>
                 <div class="qm-flex-1">
                   <label class="qm-field-label" style="font-size: 9px; margin-bottom: 2px;">Shift</label>
                   <select class="qm-select qm-spkl-inline-shift" style="height: 24px; padding: 0 4px; font-size: 10px;">
                     <option value="" ${!entry.shift ? 'selected' : ''}>Pilih Shift</option>
-                    <option value="1" ${entry.shift==='1' ? 'selected' : ''}>SHIFT I</option>
-                    <option value="2" ${entry.shift==='2' ? 'selected' : ''}>SHIFT II</option>
-                    <option value="3" ${entry.shift==='3' ? 'selected' : ''}>SHIFT III</option>
-                    <option value="4" ${entry.shift==='4' ? 'selected' : ''}>LONG SHIFT I</option>
-                    <option value="5" ${entry.shift==='5' ? 'selected' : ''}>LONG SHIFT II</option>
+                    <option value="1" ${entry.shift === '1' ? 'selected' : ''}>SHIFT I</option>
+                    <option value="2" ${entry.shift === '2' ? 'selected' : ''}>SHIFT II</option>
+                    <option value="3" ${entry.shift === '3' ? 'selected' : ''}>SHIFT III</option>
+                    <option value="4" ${entry.shift === '4' ? 'selected' : ''}>LONG SHIFT I</option>
+                    <option value="5" ${entry.shift === '5' ? 'selected' : ''}>LONG SHIFT II</option>
                   </select>
                 </div>
               </div>
               <div class="qm-flex qm-gap-s">
                 <div class="qm-flex-1">
                   <label class="qm-field-label" style="font-size: 9px; margin-bottom: 2px;">Jam Awal</label>
-                  <input type="time" class="qm-input qm-spkl-inline-awal" value="${entry.jamAwal.includes(':') ? entry.jamAwal.substring(0,5) : ''}" style="height: 24px; padding: 2px 4px; font-size: 10px;">
+                  <input type="time" class="qm-input qm-spkl-inline-awal" value="${entry.jamAwal.includes(':') ? entry.jamAwal.substring(0, 5) : ''}" style="height: 24px; padding: 2px 4px; font-size: 10px;">
                 </div>
                 <div class="qm-flex-1">
                   <label class="qm-field-label" style="font-size: 9px; margin-bottom: 2px;">Jam Akhir</label>
-                  <input type="time" class="qm-input qm-spkl-inline-akhir" value="${entry.jamAkhir.includes(':') ? entry.jamAkhir.substring(0,5) : ''}" style="height: 24px; padding: 2px 4px; font-size: 10px;">
+                  <input type="time" class="qm-input qm-spkl-inline-akhir" value="${entry.jamAkhir.includes(':') ? entry.jamAkhir.substring(0, 5) : ''}" style="height: 24px; padding: 2px 4px; font-size: 10px;">
                 </div>
                 <div class="qm-flex-1">
                   <label class="qm-field-label" style="font-size: 9px; margin-bottom: 2px;">Tambahan</label>
@@ -5362,1332 +5852,1042 @@
    * ============================================================ */
 
   GM_addStyle(`
-    :root {
-      /* --- Design Tokens --- */
-
-      /* Colors: Primary (p), Success, Danger, Warning */
-      /* Prefix p = Anthropic/Claude brand colors */
-      --qm-p-500: #cc785c; /* Coral Brand */
-      --qm-p-600: #a9583e; /* Coral Active */
-      --qm-p-100: #faf9f5; /* Cream Canvas */
-
-      --qm-success: #5db872;
-      --qm-success-bg: #e8f5e9;
-      --qm-danger: #c64545; /* Error Crimson */
-      --qm-danger-bg: #fdf2f2;
-      --qm-warning: #e8a55a; /* Amber Warning */
-      --qm-warning-bg: #fff8e1;
-
-      /* Neutrals: Exclusively Warm-toned */
-      --qm-white: #ffffff;
-      --qm-parchment: #faf9f5;   /* Canvas floor */
-      --qm-ivory: #efe9de;       /* Surface Card */
-      --qm-sand: #e6dfd8;        /* Hairline/Disabled */
-      --qm-cream: #ebe6df;       /* Hairline Soft */
-      --qm-near-black: #141413;  /* Ink */
-      --qm-dark-surface: #181715;
-      --qm-charcoal: #252523;    /* Body Strong */
-      --qm-olive: #3d3d3a;       /* Body */
-      --qm-stone: #6c6a64;       /* Muted */
-      --qm-warm-silver: #8e8b82; /* Muted Soft */
-
-      /* Spacing (s): 8px base editorial scale */
-      --qm-s-xs: 4px;
-      --qm-s-s: 8px;
-      --qm-s-m: 12px;
-      --qm-s-l: 16px;
-      --qm-s-xl: 24px;
-
-      /* Radius (r): Claude's rounded scale */
-      --qm-r-s: 4px;
-      --qm-r-m: 8px;
-      --qm-r-l: 12px;
-      --qm-r-xl: 16px;
-      --qm-r-full: 9999px;
-
-      /* Fonts: Serif for Authority, Sans for Utility */
-      --qm-font-serif: "Anthropic Serif", Georgia, "Times New Roman", serif;
-      --qm-font-sans: "Anthropic Sans", Inter, -apple-system, BlinkMacSystemFont, Arial, sans-serif;
-      --qm-font-mono: "Anthropic Mono", "SF Mono", "Roboto Mono", monospace;
-
-      --qm-font-xs: 11px;
-      --qm-font-s: 13px;
-      --qm-font-m: 15px;
-      --qm-font-l: 17px;
-      --qm-font-xl: 20px;
-
-      /* Transitions: Quiet & Deliberate */
-      --qm-t-fast: 0.15s ease;
-      --qm-t-med: 0.25s cubic-bezier(0.4, 0, 0.2, 1);
-      --qm-t-panel: 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.15);
-
-      /* --- Semantic Variables (Light Default) --- */
-      --qm-bg: var(--qm-parchment);
-      --qm-bg-alt: var(--qm-ivory);
-      --qm-surface: var(--qm-ivory);
-      --qm-pane-bg: var(--qm-parchment);
-      --qm-text: var(--qm-near-black);
-      --qm-text-muted: var(--qm-olive);
-      --qm-border: var(--qm-cream);        /* Border Cream #f0eee6 */
-      --qm-border-warm: var(--qm-sand);   /* Border Warm #e8e6dc */
-      --qm-ring: #d1cfc5;                 /* Ring Warm — DESIGN.md */
-      --qm-ring-subtle: #e8e6dc;          /* Ring Subtle */
-      --qm-ring-deep: #c2c0b6;            /* Ring Deep — active/pressed */
-      --qm-shadow: rgba(20,20,19,0.05);   /* Whisper shadow */
-      --qm-shadow-panel: rgba(20,20,19,0.15);
-      --qm-overlay: rgba(20,20,19,0.3);
-      --qm-input-border: var(--qm-sand);
-      --qm-btn-bg: var(--qm-white);
-      --qm-btn-text: var(--qm-near-black);
-    }
-
-    /* --- Dark Mode Semantic Overrides (Near Black) --- */
-    #qm-panel.qm-dark, #qm-fab.qm-dark, #qm-global-loader.qm-dark {
-      --qm-bg: #0a0a0a;
-      --qm-bg-alt: #141413;
-      --qm-surface: #1c1c1b;
-      --qm-pane-bg: #0a0a0a;
-      --qm-text: #ffffff;
-      --qm-text-muted: #a09e95;
-      --qm-border: #262624;
-      --qm-border-warm: #30302e;
-      --qm-ring: #30302e;
-      --qm-ring-subtle: #262624;
-      --qm-ring-deep: #404040;
-      --qm-shadow: rgba(0,0,0,0.8);
-      --qm-shadow-panel: rgba(0,0,0,0.9);
-      --qm-danger-bg: #4a1414;
-      --qm-input-border: #30302e;
-      --qm-input-bg: #141413;
-      --qm-btn-bg: var(--qm-white);
-      --qm-btn-text: var(--qm-near-black);
-
-      /* Force remap for all legacy/utility uses */
-      --qm-ivory: #0a0a0a;
-      --qm-parchment: #0a0a0a;
-      --qm-white: #141413;
-      --qm-near-black: #ffffff;
-      --qm-charcoal: #f0eee6;
-      --qm-olive: #b0aea5;
-      --qm-stone: #87867f;
-      --qm-cream: #1c1c1b;
-      --qm-sand: #262624;
-    }
-
-    #qm-panel.qm-dark {
-      color: #ffffff;
-
-      .qm-pane, .qm-card, .qm-input, .qm-select, .qm-textarea, .qm-section-title, .qm-field-label {
-        color: #ffffff !important;
-      }
-
-      .qm-input::placeholder, .qm-textarea::placeholder {
-        color: rgba(255, 255, 255, 0.4) !important;
-      }
-
-      .qm-select option {
-        background: #141413;
-        color: #ffffff;
-      }
-
-      #qm-header h6 { color: #ffffff !important; }
-    }
-
-    /* --- Base & Utilities --- */
-    .qm-flex { display: flex; }
-    .qm-flex-col { display: flex; flex-direction: column; }
-    .qm-items-center { align-items: center; }
-    .qm-items-end { align-items: flex-end; }
-    .qm-justify-center { justify-content: center; }
-    .qm-justify-between { justify-content: space-between; }
-    .qm-flex-1 { flex: 1; }
-    .qm-flex-1-5 { flex: 1.5; }
-    .qm-w-full { width: 100%; }
-    .qm-w-140 { width: 140px !important; }
-    .qm-gap-xs { gap: var(--qm-s-xs); }
-    .qm-gap-s { gap: var(--qm-s-s); }
-    .qm-gap-m { gap: var(--qm-s-m); }
-    .qm-gap-l { gap: var(--qm-s-l); }
-    .qm-mb-0 { margin-bottom: 0 !important; }
-    .qm-mb-s { margin-bottom: var(--qm-s-s); }
-    .qm-mb-m { margin-bottom: var(--qm-s-m); }
-    .qm-mb-l { margin-bottom: var(--qm-s-l); }
-    .qm-mb-xl { margin-bottom: var(--qm-s-xl); }
-    .qm-mt-s { margin-top: var(--qm-s-s); }
-    .qm-mt-m { margin-top: var(--qm-s-m); }
-    .qm-ml-s { margin-left: var(--qm-s-s); }
-    .qm-m-0 { margin: 0 !important; }
-    .qm-block { display: block !important; }
-    .qm-text-center { text-align: center; }
-    .qm-font-bold { font-weight: 700; }
-    .qm-font-semibold { font-weight: 600; }
-    .qm-lh-1-3 { line-height: 1.3; }
-    .qm-cursor-pointer { cursor: pointer !important; }
-    .qm-select-none { user-select: none !important; }
-    .qm-hidden { display: none !important; }
-    .qm-visible-block { display: block !important; }
-    .qm-visible-flex { display: flex !important; }
-    .qm-visible-inline-flex { display: inline-flex !important; }
-    .qm-no-scroll { overflow: hidden !important; }
-
-    /* --- Typographic Foundation --- */
-    #qm-panel, #qm-fab, #qm-global-loader {
-      font-family: var(--qm-font-sans);
-      -webkit-font-smoothing: antialiased;
-
-      h1, h2, h3, h4, h5, h6, .qm-section-title {
-        font-family: var(--qm-font-serif);
-        font-weight: 500;
-        letter-spacing: -0.01em;
-        line-height: 1.2;
-      }
-    }
-
-    /* --- Text Styling --- */
-    .qm-text-muted { color: var(--qm-text-muted); }
-    .qm-text-primary { color: var(--qm-p-500) !important; }
-    .qm-text-success { color: var(--qm-success) !important; }
-    .qm-text-danger { color: var(--qm-danger) !important; }
-    .qm-text-warning { color: var(--qm-warning) !important; }
-    .qm-text-s { font-size: var(--qm-font-s) !important; }
-
-    .qm-card {
-      background: var(--qm-white);
-      border-radius: var(--qm-r-l);
-      padding: var(--qm-s-m) var(--qm-s-l);
-      box-shadow: 0px 2px 8px var(--qm-shadow);
-      border: 1px solid var(--qm-border-warm);
-      &.qm-card-bordered { border-style: solid; }
-      &.qm-card-dashed { border-style: dashed; }
-    }
-
-    .qm-section-title {
-      font-family: var(--qm-font-serif);
-      font-size: var(--qm-font-m);
-      font-weight: 600;
-      color: var(--qm-near-black);
-      margin: 0 0 12px 0;
-      display: flex;
-      align-items: center;
-      gap: 8px;
-    }
-
-    .qm-pane-header {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      margin-bottom: 20px;
-      padding-bottom: 12px;
-      border-bottom: 1px solid var(--qm-border-warm);
-      h6 {
-        margin: 0;
-        font-family: var(--qm-font-serif);
-        font-size: 18px;
-        font-weight: 600;
-        color: var(--qm-near-black);
-      }
-      svg { color: var(--qm-p-500); }
-    }
-
-    .qm-badge {
-      font-family: var(--qm-font-sans);
-      font-size: var(--qm-font-xs);
-      padding: 2px 8px;
-      border-radius: var(--qm-r-full);
-      font-weight: 600;
-      white-space: nowrap;
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-
-      &.ok { background: var(--qm-success-bg); color: var(--qm-success); }
-      &.err { background: var(--qm-danger-bg); color: var(--qm-danger); }
-      &#qm-badge-anomali {
-        display: inline-flex; align-items:center; justify-content:center;
-        min-width:16px; height:16px; background:var(--qm-danger);
-        color:#fff; padding:2px; border-radius:50%;
-        font-size:9px; font-weight:bold; line-height:1;
-        position: absolute; top: 2px; right: 2px;
-      }
-    }
-
-    /* --- Form Elements --- */
-    .qm-field-label {
-      font-size: 10px;
-      font-weight: 700;
-      color: var(--qm-stone);
-      margin-bottom: var(--qm-s-xs);
-      display: block;
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-      &.qm-field-label-normal { font-weight: 500; text-transform: none; letter-spacing: normal; font-size: var(--qm-font-m); }
-    }
-
-    .qm-input, .qm-select, .qm-textarea {
-      font-size: var(--qm-font-m);
-      border: 1px solid var(--qm-input-border);
-      border-radius: var(--qm-r-l);
-      padding: 0 14px;
-      width: 100%;
-      height: 42px; /* Fixed editorial height */
-      box-sizing: border-box;
-      background: var(--qm-input-bg, var(--qm-white));
-      color: var(--qm-text);
-      transition: border-color var(--qm-t-fast), box-shadow var(--qm-t-fast), background-color var(--qm-t-fast);
-      outline: none;
-      font-family: var(--qm-font-sans);
-
-      &:focus {
-        border-color: var(--qm-p-500);
-        box-shadow: 0 0 0 3px rgba(201, 100, 66, 0.15);
-      }
-    }
-    .qm-textarea { height: 80px; resize: vertical; padding: 12px 14px; line-height: 1.6; &.qm-textarea-mono { font-family: var(--qm-font-mono); } }
-    .qm-select.qm-text-center { text-align-last: center; }
-    .qm-input-shortcut { cursor: pointer; text-align: center; font-weight: 600; }
-    .qm-config-checkbox { width: 18px; height: 18px; cursor: pointer; accent-color: var(--qm-p-500); }
-    .qm-field-time, .qm-field-shift { padding: 0 12px; }
-
-    /* --- Buttons --- */
-    .qm-btn {
-      border: none;
-      border-radius: var(--qm-r-l);
-      font-size: var(--qm-font-m);
-      font-weight: 500;
-      padding: 0 20px;
-      height: 42px;
-      cursor: pointer;
-      transition: background-color var(--qm-t-fast), transform var(--qm-t-fast), box-shadow var(--qm-t-fast), color var(--qm-t-fast);
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      gap: 8px;
-      width: 100%;
-      color: var(--qm-btn-text);
-      background: var(--qm-btn-bg);
-      box-sizing: border-box;
-      box-shadow: 0px 0px 0px 1px var(--qm-ring);
-
-      &:hover:not(:disabled) {
-        background: var(--qm-sand);
-        box-shadow: 0px 0px 0px 1px var(--qm-ring-subtle), 0px 4px 12px var(--qm-shadow);
-      }
-      &:focus-visible {
-        outline: none;
-        box-shadow: 0 0 0 3px rgba(201, 100, 66, 0.4);
-      }
-      &:disabled { opacity: 0.5; cursor: not-allowed; }
-
-      &.qm-btn-primary {
-        background: var(--qm-p-500);
-        color: #ffffff !important;
-        box-shadow: 0px 1px 2px rgba(201, 100, 66, 0.2);
-        &:hover {
-          background: var(--qm-p-600);
-          box-shadow: 0px 4px 12px rgba(201, 100, 66, 0.2);
-        }
-      }
-      &.qm-btn-success {
-        background: var(--qm-success);
-        color: #fff;
-        box-shadow: 0px 0px 0px 1px var(--qm-success);
-        &:hover:not(:disabled) {
-          background: #4da263;
-          box-shadow: 0px 4px 12px rgba(93, 184, 114, 0.22);
-        }
-      }
-      &.qm-btn-danger {
-        background: var(--qm-danger);
-        color: #fff;
-        box-shadow: 0px 0px 0px 1px var(--qm-danger);
-        &:hover:not(:disabled) {
-          background: #b53333;
-          box-shadow: 0px 4px 12px rgba(198, 69, 69, 0.22);
-        }
-      }
-      &.qm-btn-record { width: auto; min-width: 80px; }
-    }
-
-    /* --- FAB & Backdrop --- */
-    #qm-fab {
-      position: fixed; bottom: 32px; right: 32px; z-index: 99999;
-      width: 58px; height: 58px; background: var(--qm-p-500);
-      border-radius: 50%; color: #fff; cursor: pointer; border: none;
-      box-shadow: 0 4px 20px rgba(201, 100, 66, 0.3);
-      display: flex; align-items: center; justify-content: center;
-      transition: transform var(--qm-t-med), background-color var(--qm-t-med), box-shadow var(--qm-t-med);
-
-      &:hover { transform: scale(1.05); background: var(--qm-p-600); box-shadow: 0 6px 24px rgba(201, 100, 66, 0.4); }
-      &:active { transform: scale(0.95); }
-      &.qm-open {
-        .qm-icon-menu { opacity: 0; transform: rotate(45deg) scale(0.5); }
-        .qm-icon-close { opacity: 1; transform: rotate(0deg) scale(1); }
-      }
-
-      .qm-icon-menu, .qm-icon-close {
-        position: absolute; display: flex; align-items: center; justify-content: center;
-        transition: transform var(--qm-t-med), opacity var(--qm-t-med);
-      }
-      .qm-icon-menu { opacity: 1; transform: rotate(0deg) scale(1); }
-      .qm-icon-close { opacity: 0; transform: rotate(-45deg) scale(0.5); }
-    }
-
-    /* --- Main Panel --- */
-    #qm-panel {
-      position: fixed; top: 60px; left: 50%; z-index: 99998;
-      width: 90%; max-width: 760px; min-width: 320px;
-      height: auto; max-height: calc(100vh - 100px);
-      display: flex; flex-direction: column;
-      background: var(--qm-bg); border-radius: var(--qm-r-xl); box-shadow: 0 20px 80px var(--qm-shadow-panel);
-      overflow: hidden; color: var(--qm-text);
-      transform: translateX(-50%) translateY(10px); opacity: 0; visibility: hidden; pointer-events: none;
-      transition: transform var(--qm-t-panel), opacity var(--qm-t-panel), visibility var(--qm-t-panel);
-      will-change: transform, opacity;
-
-      &.qm-open { transform: translateX(-50%) translateY(0); opacity: 1; visibility: visible; pointer-events: auto; }
-
-      @media (min-width: 1200px) {
-        max-width: 1200px;
-        #qm-sidebar { width: 72px; .qm-tab { width: 52px; height: 52px; svg { width: 24px; height: 24px; } } }
-        .qm-pane { padding: 24px 32px; }
-      }
-
-      @media (max-width: 768px) {
-        top: 20px;
-        width: 95%;
-        max-height: calc(100vh - 40px);
-        #qm-header { padding: 12px 16px; h6 { font-size: 16px; } }
-        #qm-sidebar { width: 50px; .qm-tab { width: 36px; height: 36px; svg { width: 18px; height: 18px; } } }
-        .qm-pane { padding: 14px 16px; }
-      }
-
-      #qm-header {
-        background: var(--qm-ivory); border-bottom: 1px solid var(--qm-border-warm);
-        padding: 16px 20px 16px 24px; display: flex; align-items: center; gap: 12px;
-        flex-shrink: 0;
-
-        /* Brand mark — spike icon area */
-        .qm-header-brand { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; }
-        .qm-header-mark {
-          width: 32px; height: 32px; background: var(--qm-p-500);
-          border-radius: var(--qm-r-m);
-          display: flex; align-items: center; justify-content: center; flex-shrink: 0;
-          svg { color: #fff; }
-        }
-        .qm-header-text { min-width: 0; }
-        h6 { margin: 0; color: var(--qm-text); font-size: 18px; font-weight: 500; letter-spacing: -0.01em; white-space: nowrap; }
-        small { color: var(--qm-text-muted); font-size: var(--qm-font-xs); display: block; margin-top: 2px; text-transform: uppercase; letter-spacing: 0.12em; }
-
-        /* Right-side action cluster */
-        .qm-header-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
-        .qm-header-icon-btn {
-          width: 32px; height: 32px; border-radius: 50%;
-          border: 1px solid var(--qm-border-warm); background: transparent;
-          display: flex; align-items: center; justify-content: center;
-          cursor: pointer; color: var(--qm-stone); transition: all var(--qm-t-fast);
-          &:hover { background: var(--qm-sand); color: var(--qm-near-black); }
-        }
-      }
-
-      #qm-panel-body {
-        display: flex; flex: 1 1 auto; overflow: hidden;
-      }
-
-      /* --- Sidebar Nav --- */
-      #qm-sidebar {
-        display: flex; flex-direction: column; align-items: center;
-        background: var(--qm-ivory); padding: 12px 0; gap: 8px;
-        border-right: 1px solid var(--qm-border-warm);
-        flex-shrink: 0; width: 64px;
-        overflow-y: auto; scrollbar-width: none;
-        &::-webkit-scrollbar { display: none; }
-
-        .qm-tab {
-          display: flex; align-items: center; justify-content: center;
-          width: 44px; height: 44px;
-          color: var(--qm-stone); cursor: pointer; border: none; background: transparent;
-          border-radius: var(--qm-r-m);
-          transition: background-color var(--qm-t-fast), color var(--qm-t-fast); position: relative;
-
-          &.active {
-            background: var(--qm-sand);
-            color: var(--qm-p-500);
-          }
-          &:focus-visible {
-            outline: none;
-            background: var(--qm-sand);
-            box-shadow: inset 0 0 0 2px var(--qm-p-500);
-          }
-          &:hover:not(.active) {
-            background: var(--qm-cream);
-            color: var(--qm-charcoal);
-          }
-
-          /* Loading pulse — bottom strip inside the pill */
-          &.qm-tab-loading::after {
-            content: ''; position: absolute; bottom: 6px; left: 10px; right: 10px;
-            height: 2px; background: var(--qm-p-500);
-            animation: qm-pulse-width 1.2s ease-in-out infinite; border-radius: 2px;
-          }
-
-          svg { flex-shrink: 0; opacity: 0.8; width: 20px; height: 20px; }
-          &.active svg, &:hover svg { opacity: 1; }
-
-          /* Tooltip */
-          &:hover::before {
-            content: attr(title);
-            position: absolute; left: 54px;
-            background: var(--qm-near-black); color: var(--qm-white);
-            padding: 4px 8px; border-radius: 4px; font-size: 12px; font-weight: 500;
-            white-space: nowrap; z-index: 100;
-            pointer-events: none;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
-          }
-        }
-      }
-
-      #qm-content-area {
-        flex: 1 1 auto; position: relative; overflow-y: auto; background: var(--qm-bg);
-        &::-webkit-scrollbar { width: 8px; }
-        &::-webkit-scrollbar-track { background: var(--qm-bg); }
-        &::-webkit-scrollbar-thumb { background: var(--qm-sand); border-radius: 10px; border: 2px solid var(--qm-bg); }
-        &::-webkit-scrollbar-thumb:hover { background: var(--qm-stone); }
-      }
-
-      .qm-pane {
-        display: none; padding: 16px 20px;
-        &.active { display: block; }
-      }
-    }
-
-    /* --- Interactive Elements --- */
-    .qm-accordion-header {
-      transition: background 0.2s;
-      outline: none;
-
-      &:focus-visible { background: var(--qm-sand); box-shadow: inset 0 0 0 2px var(--qm-p-500); }
-      &:hover { background: var(--qm-sand); }
-      &.expanded { border-bottom-color: transparent; }
-      &.expanded .qm-accordion-chevron { transform: rotate(180deg); }
-    }
-
-    .qm-accordion-chevron {
-      transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-      display: flex; align-items: center; justify-content: center;
-      width: 28px; height: 28px; background: var(--qm-white);
-      border-radius: 50%; color: var(--qm-stone); transform: rotate(0deg);
-      box-shadow: 0px 0px 0px 1px var(--qm-cream);
-      &.qm-chevron { width: 18px; height: 18px; background: none !important; box-shadow: none !important; }
-    }
-
-    .qm-anomaly-group-content {
-      max-height: 0; overflow: hidden; opacity: 0; padding: 0 16px;
-      transition: max-height 0.4s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.4s ease;
-      background: var(--qm-bg);
-      &.qm-content-open {
-        max-height: 1000px; opacity: 1; padding: 16px;
-        border-bottom: 1px solid var(--qm-border-warm);
-      }
-    }
-
-    /* --- Global Loader Toast --- */
-    #qm-global-loader {
-      position: fixed; bottom: 40px; left: 50%; transform: translateX(-50%); z-index: 99999;
-      background: var(--qm-surface); border-radius: var(--qm-r-xl);
-      padding: var(--qm-s-l) var(--qm-s-xl);
-      box-shadow: 0 20px 80px rgba(0,0,0,0.3);
-      display: flex; flex-direction: column; gap: var(--qm-s-m);
-      border: 1px solid var(--qm-border-warm);
-      width: 90%; max-width: 500px;
-      animation: qm-toast-in-bottom 0.5s cubic-bezier(0.175, 0.885, 0.32, 1.1);
-      transition: opacity 0.3s, transform 0.3s;
-
-      &.qm-loader-hiding { opacity: 0; transform: translateX(-50%) translateY(20px) scale(0.95); }
-
-      .qm-loader-header { display: flex; align-items: center; gap: var(--qm-s-xl); }
-      .qm-loader-body { display: flex; flex-direction: column; flex: 1; }
-      .qm-loader-title { font-weight: 700; font-size: 16px; color: var(--qm-near-black); line-height: 1.2; margin-bottom: 4px; font-family: var(--qm-font-serif); }
-      .qm-loader-text { font-size: 11px; font-weight: 600; color: var(--qm-stone); line-height: 1.2; text-transform: uppercase; letter-spacing: 0.08em; }
-
-      .qm-loader-footer {
-        display: flex; justify-content: center; margin-top: var(--qm-s-xs);
-        border-top: 1px solid var(--qm-border); padding-top: var(--qm-s-s);
-      }
-    }
-
-    .qm-progress-container {
-      position: relative; height: 12px; background: var(--qm-sand); overflow: hidden;
-      border-radius: var(--qm-r-full); margin: 12px 0; cursor: pointer;
-      box-shadow: inset 0 1px 2px rgba(0,0,0,0.1);
-      .qm-progress-bar {
-        height: 100%; width: 0%; background: linear-gradient(90deg, var(--qm-p-500), var(--qm-p-600));
-        transition: width 0.4s cubic-bezier(0.4, 0, 0.2, 1);
-        box-shadow: 0 0 10px rgba(201, 100, 66, 0.3);
-      }
-      &:hover { filter: brightness(0.98); transform: translateY(-1px); }
-      &:active { transform: translateY(0); }
-    }
-
-    /* --- Batch Results Table --- */
-    .qm-batch-table {
-      width: 100%; border-collapse: collapse; font-size: var(--qm-font-m); table-layout: fixed;
-      .qm-batch-cell { padding: 12px 16px; vertical-align: top; border-bottom: 1px solid var(--qm-cream); }
-      .qm-batch-cell-header { padding: 8px 16px; font-weight: 600; color: var(--qm-stone); font-size: var(--qm-font-xs); text-transform: uppercase; letter-spacing: 0.1em; border-bottom: 2px solid var(--qm-sand); }
-      .qm-batch-bagian-cell { padding: 16px; font-weight: 500; font-family: var(--qm-font-serif); border-bottom: 1.5px solid var(--qm-sand); color: var(--qm-near-black); font-size: 20px; }
-      .qm-batch-seksi-cell { padding: 12px 16px 12px 32px; font-weight: 600; background: var(--qm-ivory); border-bottom: 1px solid var(--qm-cream); color: var(--qm-olive); font-size: var(--qm-font-m); }
-      .qm-batch-nrp-link { color: var(--qm-p-500); font-weight: 700; text-decoration: none; border-bottom: 1px solid transparent; &:hover { border-bottom-color: var(--qm-p-500); } }
-      .qm-batch-nama { font-weight: 600; font-size: var(--qm-font-s); }
-      .qm-batch-fix-btn { background: var(--qm-p-500); color: #fff; border: none; border-radius: var(--qm-r-m); padding: 4px 10px; font-size: 11px; cursor: pointer; white-space: nowrap; margin-left: 8px; font-weight: 600; }
-      .qm-batch-date-content { display: none; padding-left: 16px; margin-bottom: 8px; border-left: 2px solid var(--qm-p-500); }
-      .qm-batch-anomaly-detail { color: var(--qm-olive); font-size: var(--qm-font-s); padding: 2px 0; }
-    }
-
-    #qm-result {
-      margin-top: 24px; border-radius: var(--qm-r-m); padding: 16px 20px;
-      font-size: var(--qm-font-m); display: none; animation: qm-fadein .25s ease;
-      background: var(--qm-ivory); border: 1px solid var(--qm-sand);
-      &.success { border-left: 4px solid var(--qm-success); color: var(--qm-success); }
-      &.danger  { border-left: 4px solid var(--qm-danger); color: var(--qm-danger); }
-      &.warning { border-left: 4px solid var(--qm-warning); color: #e65100; }
-    }
-
-    /* --- History --- */
-    #qm-history {
-      max-height: 180px; overflow-y: auto; margin-top: 24px; font-size: var(--qm-font-s);
-      .qm-history-item {
-        display: flex; align-items: center; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--qm-cream);
-        &:last-child { border-bottom: none; }
-        &:hover .qm-history-label { color: var(--qm-near-black); }
-      }
-      .qm-history-label { color: var(--qm-stone); flex: 1; transition: color 0.2s; }
-    }
-
-    /* --- Special Features --- */
-    .qm-anomaly-cell { border: 2px solid var(--qm-danger) !important; background-color: var(--qm-danger-bg) !important; position: relative !important; }
-    .qm-fix-dot { position: absolute; top: 2px; right: 2px; width: 8px; height: 12px; background-color: var(--qm-p-500); border-radius: 100%; cursor: pointer; box-shadow: 0 0 4px var(--qm-shadow); }
-    .qm-info-box { font-size: 11px; line-height: 1.6; padding: 16px; background: var(--qm-white); border: 1px solid var(--qm-cream); border-radius: var(--qm-r-m); color: var(--qm-stone); }
-    .qm-ot7-box { padding: 20px; background: var(--qm-white); border-radius: var(--qm-r-l); border: 1px solid var(--qm-cream); box-shadow: 0px 0px 0px 1px var(--qm-ring); margin: 12px 0; animation: qm-fadein 0.3s ease; }
-
-    #qm-modal-jk {
-      position: absolute; top: 100%; left: 0; z-index: 1000;
-      width: 400px; background: var(--qm-white); border: 1px solid var(--qm-cream);
-      border-radius: var(--qm-r-l); box-shadow: 0 10px 40px var(--qm-shadow-panel);
-      padding: 24px; margin-top: 8px; animation: qm-fadein 0.2s ease;
-    }
-
-    /* --- Animations --- */
-    .qm-skeleton {
-      background: linear-gradient(90deg, var(--qm-sand) 25%, var(--qm-cream) 50%, var(--qm-sand) 75%);
-      background-size: 200% 100%; animation: qm-shimmer 2s infinite;
-      border-radius: 4px; display: inline-block; min-width: 60px; height: 14px;
-    }
-    @keyframes qm-toast-in { from { opacity: 0; transform: translate3d(40px, 0, 0) scale(0.95); } to { opacity: 1; transform: translate3d(0, 0, 0) scale(1); } }
-    @keyframes qm-toast-in-bottom { from { opacity: 0; transform: translate3d(-50%, 40px, 0) scale(0.9); } to { opacity: 1; transform: translate3d(-50%, 0, 0) scale(1); } }
-    @keyframes qm-fadein { from { opacity:0; transform:translate3d(0, 8px, 0); } to { opacity:1; transform:translate3d(0, 0, 0); } }
-    @keyframes qm-shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
-    @keyframes qm-pulse-width { 0%, 100% { transform: scaleX(0.2); opacity: 0.3; } 50% { transform: scaleX(1); opacity: 1; } }
-    @keyframes qm-spin { to { transform: rotate(360deg); } }
-
-    .qm-spinner {
-      width: 18px; height: 18px;
-      border: 2px solid var(--qm-sand); border-top-color: var(--qm-p-500);
-      border-radius: 50%; animation: qm-spin .8s linear infinite;
-      display: inline-block; vertical-align: middle;
-      &.qm-spinner-white { border-color: rgba(255,255,255,0.2); border-top-color: #fff; }
-    }
-
-    .qm-anomaly-item {
-      display: flex; justify-content: space-between; align-items: center;
-      padding: 12px 20px; background: var(--qm-bg); border-bottom: 1px solid var(--qm-border);
-      gap: 16px; animation: qm-fadein 0.3s ease;
-      &:last-child { border-bottom: none; }
-    }
-    .qm-anomaly-left { display: flex; align-items: center; gap: 8px; flex-shrink: 0; min-width: 70px; }
-    .qm-anomaly-date { font-weight: 700; font-size: 15px; color: var(--qm-near-black); font-family: var(--qm-font-serif); }
-    .qm-anomaly-content { display: flex; flex-wrap: wrap; gap: 8px; flex-grow: 1; align-items: center; }
-    .qm-anomaly-actions { flex-shrink: 0; }
-    .qm-btn-fix-pill {
-      height: 28px; padding: 0 14px; border-radius: 14px;
-      border: 1px solid var(--qm-ring); background: var(--qm-white);
-      color: var(--qm-p-500); font-size: 11px; font-weight: 600;
-      cursor: pointer; transition: all 0.2s; white-space: nowrap;
-      &:hover { background: var(--qm-p-500); color: #fff; border-color: var(--qm-p-500); box-shadow: 0 2px 8px var(--qm-shadow); }
-    }
-    .qm-anomaly-card {
-      background: var(--qm-ivory); padding: 6px 10px; border-radius: 4px;
-      width: auto; min-width: 120px; text-align: left; border: 1px solid var(--qm-border-warm);
-      box-shadow: 0 1px 2px rgba(0,0,0,0.01);
-    }
-    .qm-anomaly-card-type { font-weight: 700; font-size: 12px; color: var(--qm-near-black); margin-bottom: 1px; }
-    .qm-anomaly-card-msg { font-size: 10px; color: var(--qm-stone); line-height: 1.1; }
-
-    .qm-theme-btn {
-      flex: 1; height: 40px; font-weight: 600; font-size: 13px;
-      border: 1px solid var(--qm-border-warm); border-radius: var(--qm-r-m);
-      display: flex; align-items: center; justify-content: center; gap: 8px;
-      cursor: pointer; transition: all 0.2s;
-      &.light { background: #fdfaf3; color: #141413; }
-      &.dark { background: #141413; color: #efe9de; border-color: #30302e; }
-      &.active { box-shadow: 0 0 0 2px var(--qm-p-500) !important; border-color: var(--qm-p-500) !important; }
-    }
-
-    /* --- Log Activity (Terminal Style) --- */
-    .qm-log-body-inline {
-      margin-top: 8px;
-      padding: 16px;
-      background: #181715; /* Surface Dark */
-      border: 1px solid #30302e; /* Hairline for dark */
-      border-radius: var(--qm-r-l);
-      max-height: 350px;
-      overflow-y: auto;
-      font-family: var(--qm-font-mono);
-      font-size: 12px;
-      line-height: 1.6;
-      color: #faf9f5; /* On Dark */
-      box-shadow: inset 0 2px 8px rgba(0,0,0,0.4);
-      scrollbar-width: thin;
-      scrollbar-color: #3d3d3a transparent;
-    }
-    .qm-log-body-inline::-webkit-scrollbar { width: 6px; }
-    .qm-log-body-inline::-webkit-scrollbar-thumb { background: #3d3d3a; border-radius: 3px; }
-
-    .qm-log-item {
-      margin-bottom: 8px;
-      padding-bottom: 8px;
-      border-bottom: 1px solid rgba(255,255,255,0.05);
-      display: flex;
-      gap: 12px;
-      align-items: flex-start;
-    }
-    .qm-log-time {
-      color: #8e8b82; /* Muted Soft */
-      flex-shrink: 0;
-      user-select: none;
-      min-width: 65px;
-    }
-    .qm-log-msg {
-      word-break: break-word;
-      color: #faf9f5;
-    }
-    .qm-log-msg.error, .qm-log-msg.danger { color: #c64545; }
-    .qm-log-msg.success { color: #5db872; }
-    .qm-log-msg.warn { color: #e8a55a; /* Accent Amber */ }
-    .qm-log-msg.debug { color: #6c6a64; }
-
-    .qm-log-actions {
-      padding: 0 4px;
-      align-items: flex-end;
-    }
-    .qm-btn-text {
-      background: none; border: none; padding: 2px 6px;
-      color: var(--qm-text-muted); cursor: pointer;
-      border-radius: var(--qm-r-s);
-      transition: all 0.2s;
-    }
-    .qm-btn-text:hover { background: var(--qm-cream); color: var(--qm-near-black); }
-    .qm-btn-text.qm-text-danger:hover { background: #fdf2f2; color: #b53333; }
-    .qm-btn-inline { width: auto; min-width: 104px; padding: 0 14px; flex: 0 0 auto; }
-
-    /* --- Modal --- */
-    .qm-modal-overlay {
-      position: fixed; top: 0; left: 0; right: 0; bottom: 0;
-      background: rgba(0,0,0,0.5); z-index: 1100;
-      display: flex; align-items: center; justify-content: center;
-      backdrop-filter: blur(2px); animation: qm-fadein 0.2s ease;
-    }
-    .qm-modal-content {
-      width: 100%; max-width: 360px;
-      background: var(--qm-white); border-radius: var(--qm-r-l);
-      box-shadow: 0 20px 60px rgba(0,0,0,0.25);
-      overflow: hidden; animation: qm-modal-pop 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
-    }
-    @keyframes qm-modal-pop { from { opacity: 0; transform: scale(0.9); } to { opacity: 1; transform: scale(1); } }
-    .qm-modal-header {
-      padding: 16px 20px; border-bottom: 1px solid var(--qm-border-warm);
-      display: flex; justify-content: space-between; align-items: center;
-      background: var(--qm-bg-alt);
-    }
-    .qm-modal-header h6 { margin: 0; font-size: 16px; color: var(--qm-near-black); }
-    .qm-modal-close-btn {
-      background: none; border: none; font-size: 24px; color: var(--qm-stone);
-      cursor: pointer; line-height: 1; padding: 4px;
-    }
-    .qm-modal-body { padding: 20px; }
-    .qm-modal-footer {
-      padding: 14px 20px; border-top: 1px solid var(--qm-border-warm);
-      display: flex; justify-content: flex-end; gap: 12px;
-      background: var(--qm-bg-alt);
-    }
-
-    .qm-karyawan-search-row {
-      display: flex;
-      align-items: end;
-      gap: 12px;
-      flex-wrap: wrap;
-    }
-    .qm-karyawan-search-field {
-      flex: 1 1 240px;
-      min-width: 0;
-    }
-    .qm-karyawan-search-action {
-      width: 180px;
-      max-width: 100%;
-      flex: 0 0 auto;
-    }
-    .qm-karyawan-helper {
-      font-size: var(--qm-font-s);
-      color: var(--qm-stone);
-      line-height: 1.5;
-    }
-    .qm-karyawan-results-summary {
-      font-size: var(--qm-font-s);
-      color: var(--qm-stone);
-      margin: 0 0 12px 0;
-    }
-    .qm-karyawan-results-list {
-      display: flex;
-      flex-direction: column;
-      gap: 12px;
-    }
-    .qm-karyawan-empty {
-      font-size: var(--qm-font-s);
-      color: var(--qm-stone);
-      line-height: 1.6;
-    }
-    .qm-karyawan-result-card {
-      padding: 16px 18px;
-    }
-    .qm-karyawan-result-head {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) auto;
-      gap: 16px;
-    }
-    .qm-karyawan-identity-card {
-      min-width: 0;
-      padding: 12px 14px;
-      border: 1px solid var(--qm-border-warm);
-      border-radius: var(--qm-r-m);
-      background: var(--qm-white);
-      box-shadow: inset 0 0 0 1px rgba(201, 100, 66, 0.04);
-    }
-    .qm-karyawan-result-top {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      flex-wrap: wrap;
-      margin-bottom: 6px;
-    }
-    .qm-karyawan-result-nrp {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      min-height: 26px;
-      padding: 0 10px;
-      border-radius: var(--qm-r-full);
-      background: var(--qm-sand);
-      color: var(--qm-charcoal);
-      font-family: var(--qm-font-mono);
-      font-size: var(--qm-font-s);
-      font-weight: 700;
-    }
-    .qm-karyawan-source-badge {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      min-height: 24px;
-      padding: 0 10px;
-      border-radius: var(--qm-r-full);
-      font-size: var(--qm-font-xs);
-      font-weight: 700;
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-    }
-    .qm-karyawan-source-badge.internal {
-      background: var(--qm-bg-alt);
-      color: var(--qm-p-600);
-    }
-    .qm-karyawan-source-badge.outsource {
-      background: #eef5ee;
-      color: #44684f;
-    }
-    .qm-karyawan-result-name {
-      font-size: 16px;
-      font-weight: 700;
-      color: var(--qm-near-black);
-      line-height: 1.4;
-      margin-bottom: 12px;
-    }
-    .qm-karyawan-identity-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
-      gap: 8px 12px;
-    }
-    .qm-karyawan-identity-item {
-      display: flex;
-      flex-direction: column;
-      gap: 4px;
-      min-width: 0;
-    }
-    .qm-karyawan-identity-item span {
-      font-size: var(--qm-font-s);
-      color: var(--qm-stone);
-    }
-    .qm-karyawan-identity-item strong {
-      color: var(--qm-near-black);
-      font-size: var(--qm-font-m);
-      line-height: 1.4;
-      word-break: break-word;
-    }
-    .qm-karyawan-result-actions {
-      display: flex;
-      gap: 8px;
-      align-items: stretch;
-      justify-content: flex-end;
-    }
-    .qm-karyawan-action-active {
-      box-shadow: 0 0 0 2px rgba(201, 100, 66, 0.18);
-    }
-    .qm-hadir-check-card {
-      margin-top: 14px;
-      padding: 14px;
-      border: 1px solid var(--qm-border-warm);
-      border-radius: var(--qm-r-m);
-      background: var(--qm-bg-alt);
-    }
-    .qm-hadir-check-empty {
-      font-size: var(--qm-font-s);
-      color: var(--qm-stone);
-      line-height: 1.6;
-    }
-    .qm-hadir-check-error {
-      color: var(--qm-danger);
-      background: var(--qm-danger-bg);
-      border-color: rgba(198, 69, 69, 0.2);
-      font-size: var(--qm-font-s);
-      line-height: 1.6;
-    }
-    .qm-hadir-check-summary {
-      display: flex;
-      flex-direction: column;
-      gap: 12px;
-    }
-    .qm-hadir-check-head {
-      display: flex;
-      align-items: flex-start;
-      justify-content: space-between;
-      gap: 12px;
-      flex-wrap: wrap;
-    }
-    .qm-hadir-check-title {
-      font-size: 16px;
-      font-weight: 700;
-      color: var(--qm-near-black);
-      line-height: 1.35;
-    }
-    .qm-hadir-check-meta {
-      margin-top: 4px;
-      font-size: var(--qm-font-s);
-      color: var(--qm-stone);
-      line-height: 1.5;
-    }
-    .qm-hadir-check-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
-      gap: 10px;
-    }
-    .qm-hadir-check-stat {
-      display: flex;
-      flex-direction: column;
-      gap: 4px;
-      min-width: 0;
-      padding: 10px 12px;
-      border-radius: var(--qm-r-m);
-      background: var(--qm-white);
-      border: 1px solid var(--qm-border);
-    }
-    .qm-hadir-check-stat span {
-      font-size: var(--qm-font-xs);
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-      color: var(--qm-stone);
-    }
-    .qm-hadir-check-stat strong {
-      font-size: var(--qm-font-s);
-      color: var(--qm-near-black);
-      line-height: 1.5;
-      word-break: break-word;
-      font-family: var(--qm-font-mono);
-    }
-    .qm-hadir-check-detail {
-      margin-top: 14px;
-      padding-top: 14px;
-      border-top: 1px solid var(--qm-border-warm);
-    }
-    .qm-hadir-check-detail-title {
-      margin-bottom: 10px;
-      font-size: var(--qm-font-s);
-      font-weight: 700;
-      color: var(--qm-stone);
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-    }
-    .qm-hadir-check-detail-empty {
-      font-size: var(--qm-font-s);
-      color: var(--qm-stone);
-      line-height: 1.6;
-    }
-    .qm-hadir-check-detail-item {
-      padding: 10px 12px;
-      border-radius: var(--qm-r-m);
-      background: var(--qm-white);
-      border: 1px solid var(--qm-border);
-    }
-    .qm-hadir-check-detail-item + .qm-hadir-check-detail-item {
-      margin-top: 8px;
-    }
-    .qm-hadir-check-detail-top {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 12px;
-      margin-bottom: 6px;
-    }
-    .qm-hadir-check-detail-status {
-      font-size: var(--qm-font-s);
-      font-weight: 700;
-      color: var(--qm-near-black);
-    }
-    .qm-hadir-check-detail-time {
-      font-size: var(--qm-font-m);
-      font-weight: 700;
-      color: var(--qm-charcoal);
-    }
-    
-    /* Attendance Table Styles */
-    .qm-hadir-table-container {
-      background: var(--qm-white);
-      border-radius: var(--qm-r-m);
-      border: 1px solid var(--qm-border);
-      overflow: hidden;
-    }
-    .qm-hadir-table {
-      width: 100%;
-      border-collapse: collapse;
-      font-size: var(--qm-font-s);
-    }
-    .qm-hadir-table th {
-      background: var(--qm-bg-alt);
-      padding: 10px 12px;
-      text-align: left;
-      font-weight: 700;
-      color: var(--qm-stone);
-      text-transform: uppercase;
-      font-size: 10px;
-      letter-spacing: 0.05em;
-      border-bottom: 1px solid var(--qm-border);
-    }
-    .qm-hadir-table td {
-      padding: 10px 12px;
-      border-bottom: 1px solid rgba(0,0,0,0.05);
-      vertical-align: middle;
-    }
-    .qm-hadir-table tr:last-child td {
-      border-bottom: none;
-    }
-    .qm-hadir-table tr:hover {
-      background: #fafafa;
-    }
-    .qm-hadir-check-detail-raw {
-      font-size: var(--qm-font-s);
-      color: var(--qm-stone);
-      line-height: 1.6;
-      word-break: break-word;
-    }
-    .qm-karyawan-panel {
-      margin-top: 16px;
-      padding-top: 16px;
-      border-top: 1px solid var(--qm-border-warm);
-    }
-    .qm-karyawan-panel-title {
-      font-size: var(--qm-font-s);
-      font-weight: 700;
-      color: var(--qm-stone);
-      text-transform: uppercase;
-      margin-bottom: 12px;
-    }
-    .qm-karyawan-detail-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-      gap: 10px;
-    }
-    .qm-karyawan-detail-item {
-      display: flex;
-      flex-direction: column;
-      gap: 4px;
-      padding: 10px 12px;
-      border: 1px solid var(--qm-border-warm);
-      border-radius: var(--qm-r-m);
-      background: var(--qm-white);
-      min-width: 0;
-    }
-    .qm-karyawan-detail-item span {
-      font-size: var(--qm-font-xs);
-      font-weight: 700;
-      color: var(--qm-stone);
-      text-transform: uppercase;
-    }
-    .qm-karyawan-detail-item strong {
-      font-size: var(--qm-font-s);
-      color: var(--qm-near-black);
-      line-height: 1.5;
-      word-break: break-word;
-    }
-    .qm-karyawan-editor-summary {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-      gap: 8px;
-      margin-bottom: 12px;
-    }
-    .qm-karyawan-summary-pill {
-      display: flex;
-      flex-direction: column;
-      gap: 4px;
-      padding: 10px 12px;
-      border: 1px solid var(--qm-border-warm);
-      border-radius: var(--qm-r-m);
-      background: var(--qm-bg);
-      font-size: var(--qm-font-s);
-      color: var(--qm-stone);
-    }
-    .qm-karyawan-summary-pill strong {
-      color: var(--qm-near-black);
-      font-size: var(--qm-font-m);
-    }
-    .qm-karyawan-editor-note {
-      font-size: var(--qm-font-s);
-      margin-bottom: 12px;
-      line-height: 1.5;
-    }
-    .qm-karyawan-editor-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-      gap: 12px;
-      margin-bottom: 12px;
-    }
-    .qm-karyawan-editor-field {
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-      min-width: 0;
-    }
-    .qm-karyawan-save-btn {
-      width: 100%;
-    }
-    @media (max-width: 680px) {
-      .qm-karyawan-result-head {
-        grid-template-columns: 1fr;
-      }
-      .qm-karyawan-result-actions {
-        width: 100%;
-      }
-      .qm-karyawan-result-actions .qm-btn-inline {
-        flex: 1 1 0;
-        width: auto;
-      }
-      .qm-karyawan-search-action {
-        width: 100%;
-      }
-    }
-
-    #qm-btn-show-logs.qm-active {
-      background: #181715 !important;
-      color: #faf9f5 !important;
-      border-color: #181715 !important;
-    }
-
-    .qm-spike-mark {
-      color: var(--qm-p-500);
-      flex-shrink: 0;
-      width: 14px; height: 14px;
-      margin-right: 10px;
-      display: inline-block;
-      vertical-align: middle;
-    }
-
-    .qm-serif {
-      font-family: var(--qm-font-serif) !important;
-      letter-spacing: -0.02em !important;
-    }
-
-    /* --- Footer --- */
-    #qm-footer {
-      padding: 10px 24px;
-      background: var(--qm-bg-alt);
-      border-top: 1px solid var(--qm-border-warm);
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      flex-shrink: 0;
-    }
-
-    .qm-footer-left, .qm-footer-right {
-      display: flex;
-      align-items: center;
-    }
-
-    /* --- Switch Component --- */
-    .qm-switch {
-      position: relative;
-      display: inline-block;
-      width: 28px;
-      height: 16px;
-    }
-    .qm-switch input { opacity: 0; width: 0; height: 0; }
-    .qm-slider {
-      position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0;
-      background-color: var(--qm-sand); transition: .3s; border-radius: 20px;
-    }
-    .qm-slider:before {
-      position: absolute; content: ""; height: 10px; width: 10px; left: 3px; bottom: 3px;
-      background-color: white; transition: .3s; border-radius: 50%;
-    }
-    input:checked + .qm-slider { background-color: var(--qm-p-500); }
-    input:checked + .qm-slider:before { transform: translateX(12px); }
-
-  `);
+
+:root {
+  --font-sans: "Plus Jakarta Sans", "Segoe UI", sans-serif;
+  --color-page-start: #f3f0ea;
+  --color-page-end: #ebdfcf;
+  --color-surface: rgba(255, 255, 255, 0.95);
+  --color-surface-strong: #ffffff;
+  --color-surface-soft: #faf7f2;
+  --color-border: rgba(75, 63, 47, 0.14);
+  --color-border-strong: rgba(75, 63, 47, 0.2);
+  --color-text: #3f3a33;
+  --color-text-muted: #6f675d;
+  --color-text-soft: #a59d93;
+  --color-accent: #dfeef7;
+  --color-accent-strong: #b7d7eb;
+  --color-tag-red-bg: #fdeceb;
+  --color-tag-red-text: #d16258;
+  --color-tag-orange-bg: #fff1e6;
+  --color-tag-orange-text: #dc8d42;
+  --color-tag-violet-bg: #efedff;
+  --color-tag-violet-text: #7567d8;
+  --shadow-panel: 0 24px 64px rgba(52, 43, 33, 0.18), 0 4px 12px rgba(52, 43, 33, 0.08);
+  --shadow-card: 0 1px 0 rgba(255, 255, 255, 0.85) inset, 0 0 0 1px rgba(75, 63, 47, 0.12);
+  --radius-panel: 22px;
+  --radius-card: 12px;
+  --radius-pill: 10px;
+  --color-tag-blue-bg: #e7f4ff;
+  --color-tag-blue-text: #4a8dc2;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-7: 28px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+  --panel-max-width: 820px;
+  --transition-fast: 180ms ease;
+}
+
+#qa-shell {
+  all: initial; /* Reset everything inside shell */
+}
+
+#qa-shell * {
+  box-sizing: border-box;
+  font-family: var(--font-sans);
+}
+
+#qa-shell button,
+#qa-shell input {
+  font: inherit;
+  margin: 0;
+}
+
+#qa-shell button {
+  border: 0;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+  padding: 0;
+}
+
+.qa-wrapper {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  z-index: 999999;
+  pointer-events: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.qa-wrapper.is-hidden {
+  display: none !important;
+}
+
+.command-menu {
+  width: min(90%, var(--panel-max-width));
+  height: min(544px, calc(100vh - 80px));
+  display: flex;
+  flex-direction: column;
+  background: var(--color-surface);
+  backdrop-filter: blur(24px);
+  border: 1px solid rgba(255, 255, 255, 0.8);
+  border-radius: var(--radius-panel);
+  box-shadow: var(--shadow-panel);
+  overflow: hidden;
+  transform-origin: center;
+  pointer-events: auto;
+  will-change: transform, opacity;
+}
+
+.search-bar,
+.menu-footer {
+  flex-shrink: 0;
+  min-height: 62px;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: 12px 20px;
+}
+
+.search-bar {
+  border-bottom: 1px solid var(--color-border);
+}
+
+.search-input-wrap {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.search-icon,
+.icon-button svg,
+.result-icon svg,
+.quick-action-icon svg,
+.empty-state-icon svg,
+.tab-chip svg {
+  width: 22px;
+  height: 22px;
+  display: block;
+}
+
+.search-icon {
+  color: var(--color-text);
+  opacity: 0.8;
+}
+
+.search-input {
+  width: 100%;
+  padding: 0;
+  border: 0 !important;
+  outline: 0 !important;
+  background: transparent !important;
+  font-size: 1.1rem;
+  line-height: 1.4;
+  color: var(--color-text) !important;
+  box-shadow: none !important;
+}
+
+.search-input::placeholder {
+  color: var(--color-text-soft);
+}
+
+.icon-button {
+  width: 36px;
+  height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-text-muted);
+  border-radius: 10px;
+  border: 1px solid transparent;
+  transition: all var(--transition-fast);
+}
+
+.icon-button:hover {
+  color: var(--color-text);
+  background: rgba(255, 255, 255, 0.7);
+}
+
+.is-hidden {
+  display: none !important;
+}
+
+.qm-hidden {
+  display: none !important;
+}
+
+.menu-body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+  position: relative;
+}
+
+.panel-state {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  overflow-y: auto;
+  padding: 0;
+  background: var(--color-surface);
+  transition: opacity 200ms ease, transform 200ms ease;
+}
+
+@keyframes pop-out {
+  from { opacity: 0; transform: scale(0.95); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+@keyframes pop-in {
+  from { opacity: 1; transform: scale(1); }
+  to { opacity: 0; transform: scale(0.95); }
+}
+
+.panel-state.is-entering { animation: pop-out 260ms cubic-bezier(0.2, 0, 0, 1) both; }
+.panel-state.is-exiting { animation: pop-in 200ms cubic-bezier(0.4, 0, 1, 1) both; }
+
+.detail-header {
+  min-height: 62px;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.back-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  color: var(--color-text-muted);
+  background: transparent;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+}
+
+.back-button svg {
+  width: 18px;
+  height: 18px;
+}
+
+.back-button:hover { color: var(--color-text); }
+.detail-title {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: var(--color-text);
+  padding-left: 12px;
+}
+
+.empty-state {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 40px;
+}
+
+.empty-state-icon { margin-bottom: 20px; color: var(--color-text-muted); opacity: 0.6; }
+.empty-state-title { margin: 0; font-size: 1.8rem; font-weight: 700; text-align: center; color: var(--color-text); }
+.empty-state-subtitle { margin: 12px 0 0; font-size: 1rem; color: var(--color-text-muted); text-align: center; }
+
+.quick-action-grid {
+  width: 100%;
+  max-width: 720px;
+  margin-top: 32px;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+}
+
+.quick-action {
+  min-height: 88px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 16px;
+  background: var(--color-surface-strong);
+  border-radius: var(--radius-card);
+  box-shadow: var(--shadow-card);
+  transition: all var(--transition-fast);
+}
+
+.quick-action:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 12px 24px rgba(52, 43, 33, 0.12);
+}
+
+.quick-action-label { font-size: 0.95rem; font-weight: 600; color: var(--color-text); }
+
+.results-panel { display: flex; flex-direction: column; padding: 20px; }
+.results-group-title { margin: 0 0 12px; font-size: 0.9rem; font-weight: 700; color: var(--color-text-soft); text-transform: uppercase; letter-spacing: 0.05em; }
+.results-list { display: flex; flex-direction: column; gap: 6px; }
+
+.result-item {
+  min-height: 52px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 16px;
+  border-radius: 12px;
+  background: transparent;
+  transition: all var(--transition-fast);
+}
+
+.result-item:hover { background: rgba(255, 255, 255, 0.6); transform: translateX(4px); }
+.result-content { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.result-label { font-size: 1rem; font-weight: 600; color: var(--color-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.result-tag { padding: 4px 10px; border-radius: 8px; font-size: 0.75rem; font-weight: 700; }
+
+.tag-red { background: var(--color-tag-red-bg); color: var(--color-tag-red-text); }
+.tag-orange { background: var(--color-tag-orange-bg); color: var(--color-tag-orange-text); }
+.tag-violet { background: var(--color-tag-violet-bg); color: var(--color-tag-violet-text); }
+.tag-blue { background: var(--color-tag-blue-bg); color: var(--color-tag-blue-text); }
+
+.menu-footer {
+  justify-content: space-between;
+  border-top: 1px solid var(--color-border);
+  background: rgba(255, 255, 255, 0.4);
+}
+
+.progress-bar-container {
+  width: 100%;
+  height: 44px;
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 16px;
+}
+
+.progress-bar-track { 
+  flex: 1;
+  height: 28px;
+  position: relative;
+  background: var(--color-surface-soft);
+  border-radius: 8px;
+  border: 1px solid var(--color-border);
+  overflow: hidden;
+}
+
+.progress-bar-fill { 
+  height: 100%;
+  background: var(--color-accent-strong);
+  width: 0%;
+  transition: width 0.2s ease-out;
+}
+
+.progress-status-text {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: var(--color-text);
+  white-space: nowrap;
+  pointer-events: none;
+  text-shadow: 0 0 4px rgba(255,255,255,0.4);
+}
+
+.qm-batch-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  background: var(--color-surface);
+  overflow: hidden;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.02);
+  margin-top: 12px;
+  transition: box-shadow 0.2s ease, border-color 0.2s ease;
+}
+
+.qm-batch-table:focus-within, #qm-batch-results:focus-within .qm-batch-table {
+  outline: none;
+}
+
+.qm-batch-nrp-link {
+  color: #1976D2;
+  text-decoration: none;
+  font-weight: 600;
+  transition: color 0.2s ease;
+}
+
+.qm-batch-nrp-link:hover {
+  text-decoration: underline;
+  color: #1565C0;
+}
+
+.qm-batch-nrp-link:focus {
+  outline: none !important;
+  box-shadow: none !important;
+}
+
+#qm-batch-results:focus {
+  outline: none;
+}
+
+#qm-batch-results {
+  opacity: 0;
+  transform: translateY(12px);
+  will-change: transform, opacity;
+}
+
+#qm-batch-results.is-visible {
+  animation: qm-fade-in-slide-up 0.5s cubic-bezier(0.16, 1, 0.3, 1) forwards !important;
+}
+
+@keyframes qm-fade-in-slide-up {
+  from {
+    opacity: 0;
+    transform: translateY(16px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.qm-batch-fix-btn {
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  background: var(--color-tag-red-bg, #fdeceb) !important;
+  color: var(--color-tag-red-text, #d16258) !important;
+  border: 1px solid var(--color-tag-red-text, #d16258) !important;
+  padding: 3px 10px !important;
+  font-size: 11px !important;
+  font-weight: 700 !important;
+  border-radius: 12px !important;
+  cursor: pointer !important;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1) !important;
+  margin-left: 10px !important;
+  vertical-align: middle !important;
+  outline: none !important;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.02) !important;
+  position: static !important;
+}
+
+.qm-batch-fix-btn:hover {
+  background: var(--color-tag-red-text, #d16258) !important;
+  color: #ffffff !important;
+  box-shadow: 0 4px 8px rgba(209, 98, 88, 0.25) !important;
+  transform: translateY(-1px) !important;
+}
+
+.qm-batch-fix-btn:active {
+  transform: translateY(0px) !important;
+}
+
+.qm-table-header td {
+  background: #F9F8F6 !important;
+  text-transform: uppercase;
+  font-size: 0.65rem !important;
+  font-weight: 700 !important;
+  letter-spacing: 0.08em;
+  color: var(--color-text-muted);
+  padding: 10px 16px !important;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.qm-batch-cell {
+  padding: 12px 16px !important;
+  border-bottom: 1px solid var(--color-border);
+  vertical-align: middle;
+}
+
+.qm-batch-table tr:last-child td {
+  border-bottom: none;
+}
+
+.qm-batch-group-header td, .qm-batch-seksi-header td {
+  font-weight: 700;
+  font-size: 0.9rem;
+  background: var(--color-surface-soft);
+  cursor: pointer;
+  padding: 12px 16px !important;
+}
+
+/* Status Pills */
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 10px;
+  border-radius: 12px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  white-space: nowrap;
+  text-transform: capitalize;
+}
+
+.status-active { background: #E3F2FD; color: #1976D2; }
+.status-warning { background: #FFF3E0; color: #F57C00; }
+.status-error { background: #FFEBEE; color: #D32F2F; }
+.status-neutral { background: #F5F5F5; color: #616161; }
+
+.qm-batch-item-row:hover td {
+  background: var(--color-surface-soft);
+}
+
+.qm-table-row { display: table-row !important; }
+
+.qm-accordion-chevron {
+  transition: transform 0.2s ease;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.expanded .qm-accordion-chevron { 
+  transform: rotate(180deg); 
+}
+
+.qm-batch-group-header, .qm-batch-seksi-header {
+  cursor: pointer;
+  user-select: none;
+}
+
+.qm-batch-group-header:hover td, .qm-batch-seksi-header:hover td {
+  background: rgba(122, 165, 194, 0.1) !important;
+}
+
+#qm-btn-batch-clear:hover {
+  background: #FFEBEB !important;
+  border-color: #EF9A9A !important;
+}
+
+#qm-btn-batch-clear:active {
+  background: #FFCDD2 !important;
+}
+
+#qm-btn-batch-check:hover {
+  background: #EEEEEE !important;
+  opacity: 0.9;
+}
+
+.qm-batch-date-header {
+  cursor: pointer;
+  padding: 4px 0;
+  user-select: none;
+}
+.qm-batch-date-header:hover {
+  opacity: 0.8;
+}
+.qm-batch-date-content {
+  padding-left: 12px;
+  margin-top: 6px;
+  border-left: 2px solid var(--color-border);
+}
+
+.qm-batch-col-lembur, .qm-batch-col-ket {
+  padding-left: 8px !important;
+  padding-right: 8px !important;
+  width: 1%;
+  white-space: pre-wrap;
+}
+
+.qm-batch-col-masalah {
+  font-size: 12px !important;
+}
+
+.floating-menu-btn {
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  position: fixed;
+  z-index: 999999;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--color-surface-strong);
+  border: 1px solid var(--color-border);
+  box-shadow: var(--shadow-panel);
+  transition: all var(--transition-fast);
+  padding: 0;
+}
+
+.floating-menu-btn:hover { transform: translateY(-2px) scale(1.05); box-shadow: 0 12px 32px rgba(52, 43, 33, 0.2); }
+.floating-menu-btn svg { width: 26px; height: 26px; color: var(--color-text-muted); }
+
+.button-is-hidden { opacity: 0; visibility: hidden; pointer-events: none; transform: scale(0.8); }
+
+@keyframes menu-open-from-button {
+  from { opacity: 0; transform: translate(var(--menu-origin-x), var(--menu-origin-y)) scale(0.2); }
+  to { opacity: 1; transform: translate(0, 0) scale(1); }
+}
+
+@keyframes menu-close-to-button {
+  from { opacity: 1; transform: translate(0, 0) scale(1); }
+  to { opacity: 0; transform: translate(var(--menu-origin-x), var(--menu-origin-y)) scale(0.2); }
+}
+
+.is-opening { animation: menu-open-from-button 280ms cubic-bezier(0.2, 0.9, 0.2, 1) both; }
+.is-closing { animation: menu-close-to-button 280ms cubic-bezier(0.4, 0, 0.2, 1) both; }
+
+@media (max-width: 640px) {
+  .quick-action-grid { grid-template-columns: repeat(2, 1fr); }
+}
+
+/* --- Special Features / Anomali --- */
+.qm-anomaly-cell {
+  border: 2px solid var(--color-tag-red-text, #d16258) !important;
+  background-color: var(--color-tag-red-bg, #fdeceb) !important;
+  position: relative !important;
+}
+.qm-fix-dot {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 14px;
+  height: 14px;
+  background: linear-gradient(135deg, var(--color-tag-red-text, #d16258), #b34a41);
+  border-radius: 50%;
+  cursor: pointer;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.15), 0 0 0 1px rgba(0,0,0,0.05);
+  border: 1.5px solid #ffffff;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  z-index: 10;
+}
+.qm-fix-dot:hover {
+  transform: scale(1.3) rotate(15deg);
+  background: linear-gradient(135deg, var(--color-text, #3f3a33), #1a1612);
+  box-shadow: 0 3px 6px rgba(0,0,0,0.25), 0 0 0 1.5px rgba(0,0,0,0.1);
+}
+.qm-row-highlight {
+  background-color: var(--color-accent, #dfeef7) !important;
+}
+
+/* Premium Cari Karyawan Split Layout */
+.qm-karyawan-split-layout {
+  display: grid;
+  grid-template-columns: 1.25fr 1fr;
+  gap: 24px;
+  width: 100%;
+  align-items: stretch;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+@media (max-width: 768px) {
+  .qm-karyawan-split-layout {
+    grid-template-columns: 1fr;
+    gap: 24px;
+  }
+}
+
+/* Premium Forms & Input Elements */
+.qm-form-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 20px;
+}
+
+.qm-form-label {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--color-text-muted);
+}
+
+.qm-premium-input {
+  width: 100%;
+  padding: 10px 14px;
+  font-size: 0.95rem;
+  background: var(--color-surface-strong, #ffffff) !important;
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  color: var(--color-text);
+  outline: none;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.02);
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.qm-premium-input:focus {
+  border-color: var(--color-accent-strong);
+  box-shadow: 0 0 0 3px rgba(183, 215, 235, 0.3);
+}
+
+.qm-premium-select {
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 24 24' stroke='%236f675d' stroke-width='2'%3E%3Cpath stroke-linecap='round' stroke-linejoin='round' d='M19 9l-7 7-7-7'%3E%3C/path%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 14px center;
+  background-size: 16px;
+  padding-right: 40px !important;
+}
+
+/* Premium Buttons & Button Rows */
+.qm-button-row {
+  display: flex;
+  gap: 12px;
+  margin-top: 24px;
+}
+
+.qm-premium-btn {
+  padding: 10px 20px;
+  font-size: 0.95rem;
+  font-weight: 600;
+  border-radius: 10px;
+  cursor: pointer;
+  border: none;
+  transition: transform 0.15s, opacity 0.15s, box-shadow 0.15s;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.qm-premium-btn:active {
+  transform: scale(0.97);
+}
+
+.qm-premium-btn-primary {
+  background: var(--color-accent-strong);
+  color: #1a5276;
+  border: 1px solid rgba(0, 0, 0, 0.04);
+}
+
+.qm-premium-btn-primary:hover {
+  opacity: 0.92;
+  box-shadow: 0 4px 12px rgba(183, 215, 235, 0.3);
+}
+
+.qm-premium-btn-secondary {
+  background: #faf8f5;
+  color: var(--color-text-muted);
+  border: 1px solid var(--color-border);
+}
+
+.qm-premium-btn-secondary:hover {
+  background: #f5f2ec;
+}
+
+/* Reusable Premium Buttons */
+.qm-btn-premium-primary {
+  padding: 10px 24px !important;
+  background: var(--color-accent-strong, #b2d1e5) !important;
+  color: #1a5276 !important;
+  border: none !important;
+  border-radius: 8px !important;
+  font-weight: 600 !important;
+  font-size: 0.95rem !important;
+  cursor: pointer !important;
+  transition: opacity 0.2s !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  text-decoration: none !important;
+}
+.qm-btn-premium-primary:hover {
+  opacity: 0.9 !important;
+}
+.qm-btn-premium-primary:active {
+  opacity: 0.8 !important;
+}
+
+.qm-btn-premium-secondary {
+  padding: 10px 24px !important;
+  background: var(--color-surface-soft, #f9f8f6) !important;
+  color: var(--color-text-muted, #555) !important;
+  border: 1px solid var(--color-border) !important;
+  border-radius: 8px !important;
+  font-weight: 600 !important;
+  font-size: 0.95rem !important;
+  cursor: pointer !important;
+  transition: opacity 0.2s !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  text-decoration: none !important;
+}
+.qm-btn-premium-secondary:hover {
+  background: #eee !important;
+  opacity: 0.9 !important;
+}
+.qm-btn-premium-secondary:active {
+  opacity: 0.8 !important;
+}
+
+.qm-btn-premium-danger {
+  padding: 10px 24px !important;
+  background: #FFF5F5 !important;
+  color: #E53935 !important;
+  border: 1px solid #FFCDD2 !important;
+  border-radius: 8px !important;
+  font-weight: 600 !important;
+  font-size: 0.95rem !important;
+  cursor: pointer !important;
+  transition: all 0.2s ease !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  text-decoration: none !important;
+}
+.qm-btn-premium-danger:hover {
+  background: #FFEBEB !important;
+  border-color: #EF9A9A !important;
+}
+.qm-btn-premium-danger:active {
+  background: #FFCDD2 !important;
+}
+
+/* Premium Collapsible Group Headers */
+.qm-preview-cards {
+  background: var(--color-surface-soft, #f9f8f6) !important;
+  border: 1px solid var(--color-border) !important;
+  border-radius: 8px !important;
+  padding: 12px 16px !important;
+  font-weight: 600 !important;
+  font-size: 0.95rem !important;
+  color: var(--color-text) !important;
+  cursor: pointer !important;
+  display: flex !important;
+  justify-content: space-between !important;
+  align-items: center !important;
+  margin-bottom: 8px !important;
+  transition: background 0.2s, box-shadow 0.2s !important;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.02) !important;
+}
+.qm-preview-cards:hover {
+  background: #f0ede8 !important;
+  box-shadow: 0 4px 8px rgba(0,0,0,0.05) !important;
+}
+
+/* Scrollable Detail & Editor Panels */
+.qm-karyawan-panel {
+  
+  padding-right: 8px !important;
+}
+/* Premium Live Preview Card */
+.qm-premium-preview-card {
+  background: linear-gradient(135deg, #ffffff 0%, #faf8f5 100%);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-card);
+  padding: 12px 16px;
+  box-shadow: var(--shadow-card);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  position: relative;
+  overflow: hidden;
+}
+
+.qm-preview-avatar {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  background: #e1f5fe;
+  color: #0288d1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 1.1rem;
+  flex-shrink: 0;
+}
+
+.qm-preview-name {
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: var(--color-text);
+  line-height: 1.3;
+}
+
+.qm-preview-subtitle {
+  font-size: 0.85rem;
+  color: var(--color-text-muted);
+  margin-top: 3px;
+}
+
+.qm-preview-meta {
+  font-size: 0.85rem;
+  color: var(--color-text-soft);
+  margin-top: 2px;
+}
+
+.qm-preview-tag {
+  font-size: 0.75rem;
+  padding: 2px 8px;
+  border-radius: 12px;
+  line-height: 1.2;
+  font-weight: 600;
+}
+
+/* Premium Directory Items (Existing Team Members Style) */
+.qm-directory-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.qm-directory-item {
+  background: #ffffff;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-card);
+  padding: 12px 16px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.01);
+  cursor: pointer;
+  transition: border-color 0.2s, background-color 0.2s;
+}
+
+.qm-directory-item:hover {
+  border-color: var(--color-border-strong);
+  background: #faf8f5;
+}
+
+.qm-directory-item.active {
+  border-color: var(--color-accent-strong);
+  background: #e7f4ff;
+}
+
+.qm-directory-avatar {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 600;
+  font-size: 0.85rem;
+  flex-shrink: 0;
+}
+
+.qm-directory-name {
+  font-weight: 600;
+  color: var(--color-text);
+  font-size: 0.9rem;
+}
+
+.qm-directory-subtitle {
+  font-size: 0.8rem;
+  color: var(--color-text-muted);
+  margin-top: 1px;
+}
+
+.qm-section-header {
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin: 0 0 12px 0;
+}
+
+`);
 
   /** Claude-style Spike Mark SVG (4-spoke radial). */
   const SPIKE_SVG = `<svg class="qm-spike-mark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round"><line x1="12" y1="4" x2="12" y2="20"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="6.34" y1="6.34" x2="17.66" y2="17.66"/><line x1="6.34" y1="17.66" x2="17.66" y2="6.34"/></svg>`;
 
-  const HTML = `
-    <div id="qm-widget">
-      <button id="qm-fab" title="Quick Menu" aria-label="Quick Menu">
-        <div class="qm-icon-menu">
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><circle cx="17.5" cy="17.5" r="3.5"/><line x1="17.5" y1="15.5" x2="17.5" y2="19.5"/><line x1="15.5" y1="17.5" x2="19.5" y2="17.5"/></svg>
+  const VIEW_CEK_NRP = `<div id="qm-pane-cek-nrp" class="qm-pane" style="padding: 24px 32px; display: flex; flex-direction: column; gap: 32px;">
+    <!-- Single Check Group -->
+    <div>
+      <h3 style="margin: 0 0 16px 0; font-size: 1.05rem; font-weight: 700; color: var(--color-text);">Pencarian Tunggal</h3>
+      
+      <div style="display: flex; gap: 16px; margin-bottom: 16px;">
+        <div style="flex: 1;">
+          <label style="display:block; font-size:0.85rem; font-weight:600; color:var(--color-text-muted); margin-bottom:8px;">Bulan</label>
+          <select id="qm-input-bulan" style="width:100%; padding:10px 14px; border:1px solid var(--color-border); border-radius:8px; font-size:1rem; background:transparent; color:var(--color-text); outline:none; transition: border-color 0.2s;"></select>
         </div>
-        <div class="qm-icon-close">
-          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-        </div>
-      </button>
-
-      <div id="qm-panel" role="dialog" aria-label="Quick Menu Panel">
-      <div id="qm-header">
-        <div class="qm-header-brand">
-          <div class="qm-header-mark">
-            ${SPIKE_SVG}
-          </div>
-          <div class="qm-header-text">
-            <h6 class="qm-serif">Quick Menu</h6>
-            <small>HRIS KTI</small>
-          </div>
-        </div>
-        <div class="qm-header-actions">
-          <button class="qm-header-icon-btn" id="qm-btn-close-header" title="Tutup panel" aria-label="Tutup panel">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-          </button>
+        <div style="flex: 1;">
+          <label style="display:block; font-size:0.85rem; font-weight:600; color:var(--color-text-muted); margin-bottom:8px;">Tahun</label>
+          <select id="qm-input-tahun" style="width:100%; padding:10px 14px; border:1px solid var(--color-border); border-radius:8px; font-size:1rem; background:transparent; color:var(--color-text); outline:none; transition: border-color 0.2s;"></select>
         </div>
       </div>
 
-      <div id="qm-panel-body">
-        <div id="qm-sidebar" role="tablist">
-          <button class="qm-tab active" data-pane="check-nrp" role="tab" title="Cek NRP">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-          </button>
-          <button class="qm-tab" data-pane="karyawan" role="tab" title="Karyawan">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M22 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a4 4 0 0 1 0 7.75"></path></svg>
-          </button>
-          <button class="qm-tab" data-pane="spkl" role="tab" title="SPKL">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
-          </button>
-          <button class="qm-tab" data-pane="kehadiran" role="tab" title="Kehadiran">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
-          </button>
-          <button class="qm-tab" data-pane="distribusi" role="tab" title="Distribusi">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="17 1 21 5 17 9"></polyline><path d="M3 11V9a4 4 0 0 1 4-4h14"></path><polyline points="7 23 3 19 7 15"></polyline><path d="M21 13v2a4 4 0 0 1-4 4H3"></path></svg>
-          </button>
-          <button class="qm-tab" data-pane="anomali" role="tab" title="Anomali">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-            <span id="qm-badge-anomali"></span>
-          </button>
-          <button class="qm-tab" data-pane="config" role="tab" title="Pengaturan">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-          </button>
-        </div>
-        <div id="qm-content-area">
-          <div id="qm-pane-check-nrp" class="qm-pane active">
-            <div class="qm-pane-header">
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-              <h6 class="qm-serif">Cek NRP</h6>
-            </div>
-        <!-- 1. Header Bulan/Tahun -->
-        <div class="qm-card qm-flex qm-items-center qm-justify-center qm-gap-m qm-mb-m">
-          <div class="qm-flex-1">
-            <select id="qm-input-bulan" class="qm-select qm-text-center qm-font-semibold"></select>
-          </div>
-          <div class="qm-flex-1">
-            <select id="qm-input-tahun" class="qm-select qm-text-center qm-font-semibold"></select>
-          </div>
-        </div>
-
-        <!-- 2. Seksi Per NRP -->
-        <div class="qm-card qm-mb-m qm-card-bordered">
-          <h6 class="qm-section-title qm-mb-s qm-serif">${SPIKE_SVG} Per NRP</h6>
-          <div class="qm-flex qm-items-end qm-gap-m">
-            <div class="qm-w-140">
-              <input id="qm-input-nrp" type="text" placeholder="NRP" maxlength="8" autocomplete="off" spellcheck="false" class="qm-input">
-            </div>
-            <div class="qm-flex-1">
-               <button id="qm-btn-check" type="button" class="qm-btn qm-btn-primary"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg> Cek NRP</button>
-            </div>
-          </div>
-          <div id="qm-result" class="qm-mt-s">
-            <div id="qm-result-title"></div>
-            <div id="qm-result-body"></div>
-          </div>
-          <div id="qm-history" class="qm-mt-s"></div>
-        </div>
-
-        <!-- 3. Seksi Banyak NRP -->
-        <div class="qm-card qm-mb-m qm-card-dashed">
-          <h6 class="qm-section-title qm-mb-s qm-serif">${SPIKE_SVG} Banyak NRP</h6>
-          <div class="qm-mb-s">
-            <textarea id="qm-input-multi-nrp" placeholder="Daftar NRP (pisah dengan enter/koma)" rows="4" class="qm-textarea"></textarea>
-          </div>
-          <button id="qm-btn-batch-check" type="button" class="qm-btn qm-btn-primary">Proses Batch</button>
-
-          <div id="qm-batch-progress" class="qm-mt-m qm-hidden">
-            <div class="qm-batch-progress-container">
-              <div id="qm-batch-progress-bar" class="qm-progress-bar"></div>
-            </div>
-            <div id="qm-batch-status">Memproses... 0/0</div>
-          </div>
-
-          <div id="qm-batch-results" class="qm-mt-m qm-batch-results-container"></div>
-          <button id="qm-btn-export-batch" type="button" class="qm-btn qm-btn-success qm-mt-s qm-batch-export-btn qm-hidden">Export Hasil (.xlsx)</button>
-        </div>
+      <div style="margin-bottom: 24px;">
+        <label style="display:block; font-size:0.85rem; font-weight:600; color:var(--color-text-muted); margin-bottom:8px;">NRP</label>
+        <input id="qm-input-nrp" type="text" placeholder="Masukkan 4/8 digit NRP" maxlength="8" autocomplete="off" spellcheck="false" style="width:100%; padding:10px 14px; border:1px solid var(--color-border); border-radius:8px; font-size:1rem; background:transparent; color:var(--color-text); outline:none; transition: border-color 0.2s;">
       </div>
 
-      <div id="qm-pane-karyawan" class="qm-pane">
-        <div class="qm-pane-header">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M22 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a4 4 0 0 1 0 7.75"></path></svg>
-          <h6 class="qm-serif">Karyawan</h6>
-        </div>
-        <div class="qm-card qm-mb-m qm-card-bordered">
-          <h6 class="qm-section-title qm-mb-s qm-serif">${SPIKE_SVG} Cari Data Personal</h6>
-          <div class="qm-karyawan-search-row">
-            <div class="qm-karyawan-search-field">
-              <label class="qm-field-label">NRP atau Nama</label>
-              <input id="qm-input-karyawan-search" type="text" placeholder="NRP 4/8 digit atau nama karyawan" autocomplete="off" spellcheck="false" class="qm-input">
-            </div>
-            <div class="qm-karyawan-search-action">
-              <button id="qm-btn-karyawan-search" type="button" class="qm-btn qm-btn-primary">Cari Karyawan</button>
-            </div>
-          </div>
-          <div class="qm-karyawan-helper qm-mt-s">Pencarian NRP akan langsung memilih halaman internal atau outsource. Pencarian nama akan memeriksa keduanya, lalu menampilkan tombol Detail profil dan Edit HRIS untuk quick edit JK/KK.</div>
-        </div>
-        <div id="qm-karyawan-results"></div>
+      <div style="display: flex; gap: 12px;">
+        <button id="qm-btn-check" type="button" class="qm-btn-premium-primary">Cek NRP</button>
       </div>
 
-      <div id="qm-pane-spkl" class="qm-pane">
+      <div id="qm-result" style="display: none; margin-top: 16px;">
+        <div id="qm-result-title"></div>
+        <div id="qm-result-body"></div>
+      </div>
+      <div id="qm-history" style="margin-top: 16px;"></div>
+    </div>
+
+    <hr style="border: 0; border-top: 1px solid var(--color-border); margin: 0;">
+
+    <!-- Batch Check Group -->
+    <div>
+      <h3 style="margin: 0 0 16px 0; font-size: 1.05rem; font-weight: 700; color: var(--color-text);">Pencarian Massal</h3>
+      <div style="margin-bottom: 24px;">
+        <label style="display:block; font-size:0.85rem; font-weight:600; color:var(--color-text-muted); margin-bottom:8px;">Daftar NRP</label>
+        <textarea id="qm-input-multi-nrp" placeholder="Pisahkan dengan enter atau koma" rows="4" style="width:100%; padding:10px 14px; border:1px solid var(--color-border); border-radius:8px; font-size:1rem; background:transparent; color:var(--color-text); outline:none; transition: border-color 0.2s; resize: vertical;"></textarea>
+      </div>
+
+      <div style="display: flex; gap: 12px;">
+        <button id="qm-btn-batch-check" type="button" class="qm-btn-premium-secondary">Proses Batch</button>
+        <button id="qm-btn-batch-clear" type="button" class="qm-btn-premium-danger">Hapus Batch</button>
+      </div>
+
+      <div id="qm-batch-results" style="margin-top: 16px; outline: none;" tabindex="-1"></div>
+    </div>
+  </div>`;
+  const VIEW_CEK_KARY = `<div id="qm-pane-cek-kary" class="qm-pane" style="padding: 16px 24px 24px; display: flex; flex-direction: column; height: 100%; overflow: hidden; box-sizing: border-box;">
+    <div class="qm-karyawan-split-layout">
+      <!-- Left Column: Search Form & Details -->
+      <div style="display: flex; flex-direction: column; gap: 12px; height: 100%; overflow-y: auto; padding-right: 8px; box-sizing: border-box; min-height: 0;">
+        <div class="qm-card" style="padding: 16px 20px; display: flex; flex-direction: column; gap: 12px; flex-shrink: 0;">
+          <h3 style="margin: 0; font-size: 1.1rem; font-weight: 600; color: var(--color-text);">Cari Data Personal</h3>
+          
+          <div class="qm-form-group" style="margin-bottom: 0;">
+            <label class="qm-form-label" style="font-size: 0.8rem; margin-bottom: 4px;">NRP atau Nama Karyawan</label>
+            <input id="qm-input-karyawan-search" type="text" class="qm-premium-input" placeholder="e.g. 80001234 atau Jane Cooper" autocomplete="off" spellcheck="false" style="padding: 8px 12px; font-size: 0.9rem;">
+          </div>
+          
+          <div class="qm-button-row" style="gap: 8px;">
+            <button id="qm-btn-karyawan-search" type="button" class="qm-btn-premium-primary" style="flex:1; padding: 8px 16px !important; font-size: 0.9rem !important;">Cari Karyawan</button>
+            <button id="qm-btn-karyawan-reset" type="button" class="qm-btn-premium-secondary" style="flex:1; padding: 8px 16px !important; font-size: 0.9rem !important;">Reset</button>
+          </div>
+        </div>
+
+        <div id="qm-karyawan-left-panel" style="padding: 0 4px;">
+          <div style="font-size: 0.85rem; color: var(--color-text-muted); line-height: 1.5; padding: 16px; background: #faf8f5; border-radius: 8px; border: 1px dashed var(--color-border);">
+            Pencarian NRP akan memeriksa database internal & outsource, lalu menampilkan profil detail & quick edit JK/KK.
+          </div>
+        </div>
+      </div>
+      
+      <!-- Right Column: Results Directory -->
+      <div style="display: flex; flex-direction: column; gap: 12px; height: 100%; overflow-y: auto; padding-right: 8px; box-sizing: border-box; min-height: 0;">
+        <h3 id="qm-karyawan-directory-title" class="qm-section-header" style="margin: 0; font-size: 1.1rem; font-weight: 600; color: var(--color-text); padding-bottom: 4px; text-transform: none; letter-spacing: normal;">Hasil Pencarian</h3>
+        <div id="qm-karyawan-results" class="qm-directory-list" style="display: flex; flex-direction: column; gap: 8px;"></div>
+      </div>
+    </div>
+  </div>`;
+  const VIEW_SPKL = `<div id="qm-pane-spkl" class="qm-pane">
         <div class="qm-pane-header">
           ${SPIKE_SVG}
           <h6 class="qm-serif">SPKL</h6>
@@ -6844,9 +7044,8 @@
             </button>
           </div>
         </div>
-      </div>
-
-      <div id="qm-pane-kehadiran" class="qm-pane">
+      </div>`;
+  const VIEW_KEHADIRAN = `<div id="qm-pane-kehadiran" class="qm-pane">
         <div class="qm-pane-header">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
           <h6>Kehadiran</h6>
@@ -6980,9 +7179,8 @@
             <button id="qm-btn-hadir-many-proses" type="button" class="qm-btn qm-btn-primary">Proses Banyak NRP</button>
           </div>
         </div>
-      </div>
-
-      <div id="qm-pane-distribusi" class="qm-pane">
+      </div>`;
+  const VIEW_DISTRIBUSI = `<div id="qm-pane-distribusi" class="qm-pane">
         <div class="qm-pane-header">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="17 1 21 5 17 9"></polyline><path d="M3 11V9a4 4 0 0 1 4-4h14"></path><polyline points="7 23 3 19 7 15"></polyline><path d="M21 13v2a4 4 0 0 1-4 4H3"></path></svg>
           <h6>Distribusi</h6>
@@ -7140,18 +7338,8 @@
             <button id="qm-btn-KK-update" type="button" class="qm-btn qm-btn-primary">Update Kalender</button>
           </div>
         </div>
-      </div>
-      <div id="qm-pane-anomali" class="qm-pane">
-        <div class="qm-pane-header">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-          <h6>Anomali</h6>
-        </div>
-        <div id="qm-anomali-list">
-          <div class="qm-text-center qm-text-muted qm-anomali-empty-state">Tabel kehadiran belum dimuat atau tidak ada anomali.</div>
-        </div>
-      </div>
-
-      <div id="qm-pane-config" class="qm-pane">
+      </div>`;
+  const VIEW_SETTINGS = `<div id="qm-pane-config" class="qm-pane">
         <div class="qm-mb-l">
           <label class="qm-field-label">Shortcut Akses Cepat</label>
           <div class="qm-flex qm-gap-m">
@@ -7197,63 +7385,439 @@
         </div>
       </div>
       </div> <!-- End qm-content-area -->
-      </div> <!-- End qm-panel-body -->
+      </div> <!-- End qm-panel-body -->`;
 
-      <div id="qm-footer">
-        <div class="qm-footer-left">
-          <span class="qm-badge qm-badge-outline qm-font-mono" style="font-size: 9px; opacity: 0.6; border-color: rgba(0,0,0,0.1)">v1.3.0</span>
+  const HTML = `
+<div id="qa-shell">
+  <button id="qa-floating-btn" class="floating-menu-btn button-is-hidden" aria-label="Open menu"></button>
+  <div id="qa-menu-container" class="qa-wrapper is-hidden">
+    <main class="command-menu" aria-label="Quick actions">
+      <header class="search-bar">
+        <div class="search-input-wrap">
+          <span class="search-icon"></span>
+          <input id="qa-search" class="search-input" type="search" placeholder="Search actions..." autocomplete="off" spellcheck="false" />
         </div>
-        <div class="qm-footer-right">
-          <div class="qm-flex qm-items-center qm-gap-m">
-            <label class="qm-switch">
-              <input type="checkbox" id="qm-config-debug-mode-footer">
-              <span class="qm-slider"></span>
-            </label>
-            <span style="font-size: 11px; color: var(--qm-stone)">Debug</span>
+        <button id="qa-search-clear" class="icon-button is-hidden" type="button" aria-label="Clear search">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 6L18 18M18 6L6 18"></path></svg>
+        </button>
+      </header>
+
+      <header class="detail-header is-hidden">
+        <button id="qa-back-btn" class="back-button" type="button">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"></line><polyline points="12 19 5 12 12 5"></polyline></svg>
+          <span>Back</span>
+        </button>
+        <h2 id="qa-detail-title" class="detail-title">Action</h2>
+      </header>
+
+      <section class="menu-body">
+        <div id="qa-empty-state" class="panel-state"></div>
+        <div id="qa-results-state" class="panel-state is-hidden"></div>
+        <div id="qa-detail-state" class="panel-state is-hidden"></div>
+      </section>
+
+      <footer id="qa-footer" class="menu-footer is-hidden">
+        <div class="progress-bar-container">
+          <div class="progress-bar-track">
+            <div id="qa-progress-fill" class="progress-bar-fill"></div>
+            <div id="qa-progress-status" class="progress-status-text">Working...</div>
           </div>
+          <button id="qm-btn-export-batch" type="button" class="qm-hidden" style="padding: 8px 16px; background: var(--color-accent); color: #1a5276; border: none; border-radius: 8px; font-weight: 700; font-size: 0.85rem; cursor: pointer; white-space: nowrap; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">Export (.xlsx)</button>
         </div>
-      </div>
+      </footer>
+    </main>
+  </div>
+    <div id="qa-views-pool" style="display:none;">
+      ${VIEW_CEK_KARY}
+      ${VIEW_SPKL}
+      ${VIEW_KEHADIRAN}
+      ${VIEW_DISTRIBUSI}
+      ${VIEW_SETTINGS}
     </div>
+  </div>
+`;
 
-    <!-- Hadir Edit Modal -->
-    <div id="qm-modal-hadir-edit" class="qm-modal-overlay qm-hidden">
-      <div class="qm-modal-content">
-        <div class="qm-modal-header">
-          <h6 class="qm-serif">Edit Data Kehadiran</h6>
-          <button type="button" class="qm-modal-close-btn">&times;</button>
-        </div>
-        <div class="qm-modal-body">
-          <div class="qm-mb-m">
-            <div class="qm-text-s qm-text-muted qm-mb-s">Edit akan diterapkan ke semua data yang dipilih. Kosongkan nilai yang tidak ingin diubah.</div>
-          </div>
-          <div class="qm-flex qm-gap-m qm-mb-m">
-            <div class="qm-flex-1">
-              <label class="qm-field-label">Jam Masuk</label>
-              <input id="qm-edit-hadir-jam-masuk" type="time" class="qm-input">
+  // --- QA ENGINE ---
+  // 3. ICONS
+  const ICONS = {
+    search: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="6.5"></circle><path d="M16 16L21 21"></path></svg>`,
+    grid: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="6.2" cy="6.2" r="1.4"></circle><circle cx="12" cy="6.2" r="1.4"></circle><circle cx="17.8" cy="6.2" r="1.4"></circle><circle cx="6.2" cy="12" r="1.4"></circle><circle cx="12" cy="12" r="1.4"></circle><circle cx="17.8" cy="12" r="1.4"></circle><circle cx="6.2" cy="17.8" r="1.4"></circle><circle cx="12" cy="17.8" r="1.4"></circle><circle cx="17.8" cy="17.8" r="1.4"></circle></svg>`,
+    lightbulb: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18H15M10 21H14M8.5 14.6C7.12 13.43 6.25 11.69 6.25 9.75C6.25 6.3 8.97 3.5 12.33 3.5C15.7 3.5 18.42 6.3 18.42 9.75C18.42 11.71 17.53 13.46 16.13 14.62C15.34 15.28 15 15.77 15 16.5V17.25H9.67V16.5C9.67 15.77 9.33 15.28 8.5 14.6Z"></path></svg>`,
+    user: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>`,
+    file: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>`,
+    clock: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>`,
+    map: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="1 6 1 22 8 18 16 22 23 18 23 2 16 6 8 2 1 6"></polygon><line x1="8" y1="2" x2="8" y2="18"></line><line x1="16" y1="6" x2="16" y2="22"></line></svg>`,
+    settings: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>`,
+    userCheck: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="8.5" cy="7" r="4"></circle><polyline points="17 11 19 13 23 9"></polyline></svg>`,
+  };
+
+  // 4. CORE ENGINE
+  const qaState = {
+    minimized: true,
+    activePage: null,
+    actions: [],
+    results: []
+  };
+
+  let els = {};
+
+
+
+  // Initialization
+  function initQaEngine() {
+    els = {
+      floatingBtn: document.querySelector('#qa-floating-btn'),
+      menuContainer: document.querySelector('#qa-menu-container'),
+      menu: document.querySelector('#qa-menu-container .command-menu'),
+      search: document.querySelector('#qa-search'),
+      searchClear: document.querySelector('#qa-search-clear'),
+      emptyState: document.querySelector('#qa-empty-state'),
+      resultsState: document.querySelector('#qa-results-state'),
+      detailState: document.querySelector('#qa-detail-state'),
+      detailHeader: document.querySelector('.detail-header'),
+      searchBar: document.querySelector('.search-bar'),
+      detailTitle: document.querySelector('#qa-detail-title'),
+      backBtn: document.querySelector('#qa-back-btn'),
+      footer: document.querySelector('#qa-footer'),
+      progressFill: document.querySelector('#qa-progress-fill'),
+      progressStatus: document.querySelector('#qa-progress-status'),
+      searchIcon: document.querySelector('.search-icon')
+    };
+
+    // Init icons
+    if (els.searchIcon) els.searchIcon.innerHTML = ICONS.search;
+    if (els.floatingBtn) els.floatingBtn.innerHTML = ICONS.grid;
+
+    const savedPos = JSON.parse(localStorage.getItem('qa-pos') || '{"top":200, "edge":"right"}');
+    if (els.floatingBtn) {
+      els.floatingBtn.style.top = savedPos.top + 'px';
+      if (savedPos.edge === 'right') els.floatingBtn.style.right = '20px';
+      else els.floatingBtn.style.left = '20px';
+      els.floatingBtn.classList.remove('button-is-hidden');
+    }
+
+    // Explicitly guarantee hidden menu state on initialization
+    qaState.minimized = true;
+    if (els.menuContainer) {
+      els.menuContainer.classList.add('is-hidden');
+    }
+
+    renderEmptyState();
+    setupEvents();
+  }
+
+  function setupEvents() {
+    els.floatingBtn.onclick = toggleMenu;
+    els.search.oninput = (e) => syncView(e.target.value);
+    els.searchClear.onclick = () => { els.search.value = ''; syncView(''); els.search.focus(); };
+    els.backBtn.onclick = () => goBack();
+
+    // Event delegation for actions
+    els.menu.addEventListener('click', (e) => {
+      const btn = e.target.closest('.quick-action, .result-item');
+      if (btn && btn.dataset.action) {
+        window.QA.onActionClick(btn.dataset.action);
+      }
+    });
+
+    document.addEventListener('keydown', (e) => {
+      // Escape to close
+      if (e.key === 'Escape' && !qaState.minimized) {
+        if (qaState.activePage) goBack(); else toggleMenu();
+      }
+
+      // Ctrl+Shift+Z to toggle
+      if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === 'z') {
+        e.preventDefault();
+        toggleMenu();
+      }
+    });
+
+    // Click outside to close
+    document.addEventListener('pointerdown', (e) => {
+      if (!qaState.minimized && !els.menu.contains(e.target) && !els.floatingBtn.contains(e.target)) {
+        toggleMenu();
+      }
+    });
+
+    // Drag logic for floating button
+    let isDragging = false, startY, startTop;
+    els.floatingBtn.onpointerdown = (e) => {
+      isDragging = false; startY = e.clientY; startTop = parseInt(els.floatingBtn.style.top);
+      els.floatingBtn.setPointerCapture(e.pointerId);
+      els.floatingBtn.onpointermove = (em) => {
+        const dy = em.clientY - startY;
+        if (Math.abs(dy) > 5) isDragging = true;
+        els.floatingBtn.style.top = Math.max(0, Math.min(window.innerHeight - 50, startTop + dy)) + 'px';
+      };
+    };
+    els.floatingBtn.onpointerup = (e) => {
+      els.floatingBtn.onpointermove = null;
+      els.floatingBtn.releasePointerCapture(e.pointerId);
+      if (isDragging) {
+        localStorage.setItem('qa-pos', JSON.stringify({ top: parseInt(els.floatingBtn.style.top), edge: els.floatingBtn.style.right ? 'right' : 'left' }));
+      }
+    };
+  }
+
+  function showHomePage() {
+    goBack(true);
+    if (els.search) els.search.value = '';
+    syncView('');
+  }
+
+  function toggleMenu() {
+    qaState.minimized = !qaState.minimized;
+    if (!qaState.minimized) {
+      showHomePage();
+      els.menuContainer.classList.remove('is-hidden');
+      els.menu.classList.add('is-opening');
+      els.floatingBtn.classList.add('button-is-hidden');
+
+      setTimeout(() => {
+        els.menu.classList.remove('is-opening');
+        els.search.focus();
+      }, 280);
+    } else {
+      els.menu.classList.add('is-closing');
+      setTimeout(() => {
+        els.menuContainer.classList.add('is-hidden');
+        els.menu.classList.remove('is-closing');
+        els.floatingBtn.classList.remove('button-is-hidden');
+      }, 280);
+    }
+  }
+
+  function syncView(query) {
+    const hasQuery = query.trim().length > 0;
+    els.searchClear.classList.toggle('is-hidden', !hasQuery);
+
+    // If typing while in a page, go back to search view
+    if (hasQuery && qaState.activePage) {
+      goBack(true);
+    }
+
+    if (qaState.activePage) return;
+
+    const filtered = filterActions(query);
+    const hasResults = hasQuery && filtered.length > 0;
+
+    renderEmptyState(query, hasResults);
+    if (hasResults) renderResults(filtered);
+
+    els.emptyState.classList.toggle('is-hidden', hasResults);
+    els.resultsState.classList.toggle('is-hidden', !hasResults);
+  }
+
+  function filterActions(query) {
+    const q = normalizeSearchText(query);
+    if (!q) return [];
+
+    const seen = new Set();
+    return [...qaState.actions, ...qaState.results]
+      .filter(item => {
+        if (!item || seen.has(item.label) || !item._searchText.includes(q)) return false;
+        seen.add(item.label);
+        return true;
+      })
+      .sort((a, b) => getSearchRank(a, q) - getSearchRank(b, q) || a.label.localeCompare(b.label));
+  }
+
+  function normalizeSearchText(value) {
+    return String(value || '')
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^a-z0-9]+/g, ' ')
+      .trim();
+  }
+
+  function buildSearchText(item) {
+    return normalizeSearchText([
+      item.label,
+      item.description,
+      ...(Array.isArray(item.keywords) ? item.keywords : [])
+    ].join(' '));
+  }
+
+  function indexSearchItems(items) {
+    return (Array.isArray(items) ? items : []).map(item => ({
+      ...item,
+      _searchLabel: normalizeSearchText(item && item.label),
+      _searchText: buildSearchText(item || {})
+    }));
+  }
+
+  function getSearchRank(item, query) {
+    if (item._searchLabel === query) return 0;
+    if (item._searchLabel.startsWith(query)) return 1;
+    if (item._searchLabel.includes(query)) return 2;
+    return 3;
+  }
+
+  function renderEmptyState(query = "", hasResults = false) {
+    const title = query && !hasResults ? "No results" : "Quick Actions";
+    const subtitle = query && !hasResults ? "Try a different search" : "Select an action below or start typing";
+
+    els.emptyState.innerHTML = `
+            <div class="empty-state">
+                <div class="empty-state-icon">${ICONS.lightbulb}</div>
+                <h1 class="empty-state-title">${title}</h1>
+                <p class="empty-state-subtitle">${subtitle}</p>
+                <div class="quick-action-grid">
+                    ${qaState.actions.slice(0, 6).map(a => `
+                        <button class="quick-action" data-action="${a.label}">
+                            <span class="quick-action-icon">${a.iconMarkup || ICONS.grid}</span>
+                            <span class="quick-action-label">${a.label}</span>
+                        </button>
+                    `).join('')}
+                </div>
             </div>
-            <div class="qm-flex-1">
-              <label class="qm-field-label">Jam Keluar</label>
-              <input id="qm-edit-hadir-jam-keluar" type="time" class="qm-input">
-            </div>
-          </div>
-          <div class="qm-mb-m">
-            <label class="qm-field-label">Status (Set ke dua Jam)</label>
-            <select id="qm-edit-hadir-status" class="qm-select">
-              <option value="">Abaikan / Tidak Ubah Status</option>
-              <option value="1">Masuk</option>
-              <option value="0">Keluar</option>
-            </select>
-          </div>
-        </div>
-        <div class="qm-modal-footer">
-          <button type="button" class="qm-modal-cancel-btn qm-btn qm-btn-outline">Batal</button>
-          <button type="button" id="qm-btn-hadir-edit-save" class="qm-btn qm-btn-primary">Simpan</button>
-        </div>
-      </div>
-    </div>
-    </div>
+        `;
+  }
 
-  `;
+  function renderResults(list) {
+    els.resultsState.innerHTML = `
+            <div class="results-panel">
+                <h2 class="results-group-title">Matches</h2>
+                <div class="results-list">
+                    ${list.map(item => `
+                        <button class="result-item" data-action="${item.label}">
+                            <div class="result-content">
+                                <span class="result-label">${item.label}</span>
+                            </div>
+                            <span class="result-tag tag-${item.tagTone || 'blue'}">${item.tag || 'Action'}</span>
+                        </button>
+                    `).join('')}
+                </div>
+            </div>
+        `;
+  }
+
+  function goBack(fast = false) {
+    if (els.footer) els.footer.classList.add('is-hidden');
+    if (fast) {
+      qaState.activePage = null;
+      els.detailState.classList.add('is-hidden');
+      els.detailHeader.classList.add('is-hidden');
+      els.searchBar.classList.remove('is-hidden');
+      return;
+    }
+
+    // Immediately update states to show the home page behind the fading-out detail panel
+    qaState.activePage = null;
+    els.detailHeader.classList.add('is-hidden');
+    els.searchBar.classList.remove('is-hidden');
+    syncView(els.search.value);
+
+    els.detailState.classList.remove('is-hidden'); // Ensure detailState remains visible during transition
+    els.detailState.classList.add('is-exiting');
+
+    setTimeout(() => {
+      els.detailState.classList.add('is-hidden');
+      els.detailState.classList.remove('is-exiting');
+    }, 200);
+  }
+
+  // 5. PUBLIC API (Method 2: window.QA)
+  window.QA = {
+    registerActions: (actions) => { qaState.actions = indexSearchItems(actions); renderEmptyState(); },
+    registerResults: (results) => { qaState.results = indexSearchItems(results); },
+    onActionClick: (label) => {
+      const action = qaState.actions.find(a => a.label === label) || qaState.results.find(r => r.label === label);
+      if (action && action.onClick) {
+        action.onClick(action);
+      } else {
+        window.QA.renderDetail(label, `<div style="padding: 40px; text-align:center;"><h3 style="color:var(--color-text);">${label}</h3><p style="color:var(--color-text-muted);">This action is ready for implementation logic.</p></div>`);
+      }
+    },
+    renderDetail: (label, htmlContent) => {
+      qaState.activePage = label;
+      els.searchBar.classList.add('is-hidden');
+      els.detailHeader.classList.remove('is-hidden');
+      els.detailTitle.textContent = label;
+      els.emptyState.classList.add('is-hidden');
+      els.resultsState.classList.add('is-hidden');
+      els.detailState.classList.remove('is-hidden');
+      els.detailState.classList.add('is-entering');
+      setTimeout(() => {
+        els.detailState.classList.remove('is-entering');
+      }, 260);
+
+      const pool = document.getElementById('qa-views-pool') || document.body;
+
+      // Parse the HTML content to find/create the pane element
+      const temp = document.createElement('div');
+      temp.innerHTML = htmlContent.trim();
+      let paneEl = temp.firstElementChild;
+
+      if (!paneEl) {
+        paneEl = document.createElement('div');
+        paneEl.innerHTML = htmlContent;
+      }
+
+      // Ensure the pane has class 'qm-pane' and an ID
+      paneEl.classList.add('qm-pane');
+      if (!paneEl.id) {
+        paneEl.id = 'qm-pane-dynamic-' + label.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+      }
+
+      const paneId = paneEl.id;
+
+      // Check if this pane already exists in the DOM
+      let targetEl = document.getElementById(paneId);
+      if (!targetEl) {
+        targetEl = paneEl;
+        pool.appendChild(targetEl);
+      }
+
+      // Move all current children of detailState back to pool
+      const activePanes = els.detailState.querySelectorAll('.qm-pane');
+      activePanes.forEach(p => {
+        p.style.display = 'none';
+        p.classList.remove('active');
+        pool.appendChild(p);
+      });
+
+      // Show and append the target pane to detailState
+      targetEl.style.display = 'block';
+      targetEl.classList.add('active');
+      els.detailState.appendChild(targetEl);
+
+      // Ensure Month/Year selects are populated if they exist in the new content
+      const now = new Date();
+      const currentMonth = now.getMonth() + 1;
+      const currentYear = now.getFullYear();
+      const monthNames = ['Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni', 'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'];
+      const monthOptions = monthNames.map((name, i) => `<option value="${i + 1}" ${i + 1 === currentMonth ? 'selected' : ''}>${name}</option>`).join('');
+      let yearOptions = '';
+      for (let y = currentYear - 2; y <= currentYear + 1; y++) {
+        yearOptions += `<option value="${y}" ${y === currentYear ? 'selected' : ''}>${y}</option>`;
+      }
+
+      const mSelect = targetEl.querySelector('#qm-input-bulan');
+      const ySelect = targetEl.querySelector('#qm-input-tahun');
+      if (mSelect && !mSelect.children.length) mSelect.innerHTML = monthOptions;
+      if (ySelect && !ySelect.children.length) ySelect.innerHTML = yearOptions;
+    },
+    startProgress: (label, duration = 3000) => {
+      els.footer.classList.remove('is-hidden');
+      if (els.progressStatus) els.progressStatus.textContent = label + '...';
+      let p = 0;
+      const step = 100 / (duration / 100);
+      const iv = setInterval(() => {
+        p += step;
+        if (p > 100) p = 100;
+        if (els.progressFill) els.progressFill.style.width = p + '%';
+        if (p >= 100) {
+          clearInterval(iv);
+          setTimeout(() => els.footer.classList.add('is-hidden'), 600);
+        }
+      }, 100);
+    }
+  };
+
+
 
   const PANEL_ELEMENTS = Object.freeze({
     panelShell: '#qm-panel, #qm-fab',
@@ -7261,8 +7825,8 @@
     allPanes: '.qm-pane',
     activePane: '.qm-pane.active',
     accordionHeaders: '.qm-accordion-header',
-    fab: '#qm-fab',
-    panel: '#qm-panel',
+    fab: '#qa-floating-btn',
+    panel: '.command-menu',
     header: '#qm-header',
     result: '#qm-result',
     resultTitle: '#qm-result-title',
@@ -7334,11 +7898,12 @@
     distribusiKkContainer: '#qm-dist-KK-options-container',
     anomalyBadge: '#qm-badge-anomali',
     anomalyList: '#qm-anomali-list',
-    batchProgressBar: '#qm-batch-progress-bar',
-    batchStatus: '#qm-batch-status',
+    batchProgressBar: '#qa-progress-fill',
+    batchStatus: '#qa-progress-status',
     batchResults: '#qm-batch-results',
-    batchProgress: '#qm-batch-progress',
+    batchProgress: '#qa-footer',
     batchCheckButton: '#qm-btn-batch-check',
+    batchClearButton: '#qm-btn-batch-clear',
     batchExportButton: '#qm-btn-export-batch',
     configCollapseMenu: '#qm-config-collapse-menu',
     themeLightButton: '#qm-btn-theme-light',
@@ -7599,6 +8164,60 @@
       }, delay);
     },
 
+    startProgress(label, total = 0) {
+      if (els.footer) {
+        els.footer.classList.remove('is-hidden');
+      }
+      if (els.progressStatus) {
+        els.progressStatus.textContent = label;
+      }
+      if (els.progressFill) {
+        els.progressFill.style.width = '0%';
+      }
+
+      if (total > 0 && typeof total === 'number' && total < 100) {
+        // total is item count, we will use updateProgress to manually drive it
+      } else {
+        // total is duration in ms, auto-progress
+        const duration = typeof total === 'number' && total > 100 ? total : 3000;
+        let p = 0;
+        const step = 100 / (duration / 100);
+        if (this._progressInterval) clearInterval(this._progressInterval);
+        this._progressInterval = setInterval(() => {
+          p += step;
+          if (p > 100) p = 100;
+          if (els.progressFill) els.progressFill.style.width = p + '%';
+          if (p >= 100) {
+            clearInterval(this._progressInterval);
+            setTimeout(() => {
+              if (els.footer) els.footer.classList.add('is-hidden');
+            }, 600);
+          }
+        }, 100);
+      }
+    },
+
+    updateProgress(current, total, statusText) {
+      if (this._progressInterval) clearInterval(this._progressInterval);
+      const pct = total > 0 ? Math.round((current / total) * 100) : 0;
+      if (els.progressFill) {
+        els.progressFill.style.width = pct + '%';
+      }
+      if (els.progressStatus) {
+        els.progressStatus.textContent = statusText || `Memproses... ${current}/${total}`;
+      }
+    },
+
+    endProgress() {
+      if (this._progressInterval) clearInterval(this._progressInterval);
+      if (els.progressFill) {
+        els.progressFill.style.width = '100%';
+      }
+      setTimeout(() => {
+        if (els.footer) els.footer.classList.add('is-hidden');
+      }, 600);
+    },
+
     renderHistory() {
       const histEl = uiAdapter.get('history');
       if (!histEl) return;
@@ -7746,7 +8365,7 @@
 
     // 3. Show loading in summary area
     const resBody = uiAdapter.get('resultBody');
-    if (resBody && uiAdapter.get('checkNrpPane')?.classList.contains('active')) {
+    if (resBody && state.activeTab === 'check-nrp') {
       uiAdapter.html('resultBody', '<div class="qm-flex qm-items-center qm-gap-s qm-p-m"><span class="qm-spinner"></span> <span>Memuat data karyawan...</span></div>');
     }
 
@@ -8058,25 +8677,59 @@
       cachedEditHtml = html; // Cache HTML for later saveJkMaster use
       const doc = parseHTML(html);
 
+      // --- BROWSER DIAGNOSTIC LOGS ---
+      const title = doc.querySelector('title')?.textContent.trim() || '';
+      const h1 = doc.querySelector('h1')?.textContent.trim() || '';
+      console.log(`[QM DIAGNOSTIC] fetchJkOptions: URL=${editUrl}, Size=${html.length} chars, Title="${title}", H1="${h1}"`);
+
+      const allSelects = Array.from(doc.querySelectorAll('select')).map(s => s.name || s.id || 'no-name');
+      console.log(`[QM DIAGNOSTIC] Found select fields:`, allSelects);
+
+      if (doc.querySelector('input[type="password"]') || title.toLowerCase().includes('login')) {
+        throw new Error('Sesi login kedaluwarsa. Silakan login kembali di tab HRIS.');
+      }
+      // -------------------------------
+
       // Try multiple possible selectors
       const possibleNames = ['kerja_hour_code', 'kode_jam_kerja', 'jam_kerja', 'kerja_hour'];
       for (const name of possibleNames) {
         select = doc.querySelector(`select[name="${name}"], [name="${name}"]`);
         if (select) break;
       }
+      if (false) {
+        let altUrl = '';
+        if (editUrl.includes('/editgeneral/')) {
+          altUrl = editUrl.replace('/editgeneral/', '/edit/');
+        } else if (editUrl.includes('/edit/')) {
+          altUrl = editUrl.replace('/edit/', '/editgeneral/');
+        }
 
-      // Diagnostics if still not found
-      if (!select) {
-        const title = doc.title || 'Tanpa Judul';
-        const h1 = doc.querySelector('h1, h2, h3')?.textContent.trim() || 'Tanpa Header';
-        Logger.warn(`Gagal menemukan JK di ${editUrl}. Judul Page: ${title}, Header: ${h1}`);
+        if (altUrl) {
+          console.log(`[QM INFO] JK select not found in ${editUrl}. Trying alternative URL: ${altUrl}`);
+          try {
+            const altHtml = await hrisFetch(altUrl);
+            const altDoc = parseHTML(altHtml);
+            for (const name of possibleNames) {
+              const altSelect = altDoc.querySelector(`select[name="${name}"], [name="${name}"]`);
+              if (altSelect) {
+                select = altSelect;
+                editUrl = altUrl; // Update to the successful URL
+                cachedEditHtml = altHtml;
+                break;
+              }
+            }
+          } catch (altErr) {
+            console.error(`[QM ERROR] fetchJkOptions fallback error:`, altErr);
+          }
+        }
       }
     } catch (e) {
-      Logger.warn(`Gagal mengambil JK dari ${editUrl}`, e);
+      console.error(`[QM ERROR] fetchJkOptions error:`, e);
+
     }
 
     if (!select) {
-      throw new Error(`Elemen pilihan jam kerja tidak ditemukan di ${editUrl}. Pastikan Anda memiliki akses edit.`);
+      throw new Error(`Elemen pilihan jam kerja tidak ditemukan (Mungkin karyawan outsource / tanpa akses edit).`);
     }
 
     const options = Array.from(select.querySelectorAll('option')).map(opt => ({
@@ -8452,6 +9105,37 @@
       }
     }
 
+    if (false) {
+      let altUrl = '';
+      if (editUrl.includes('/editgeneral/')) {
+        altUrl = editUrl.replace('/editgeneral/', '/edit/');
+      } else if (editUrl.includes('/edit/')) {
+        altUrl = editUrl.replace('/edit/', '/editgeneral/');
+      }
+
+      if (altUrl) {
+        Logger.info(`Form not found in ${editUrl}. Trying alternative URL: ${altUrl}`);
+        try {
+          const altHtml = await hrisFetch(altUrl);
+          const altDoc = parseHTML(altHtml);
+          for (const name of possibleNames) {
+            const el = altDoc.querySelector(`[name="${name}"]`);
+            if (el) {
+              const altForm = el.closest('form');
+              if (altForm) {
+                form = altForm;
+                editUrl = altUrl;
+                cachedEditHtml = altHtml;
+                break;
+              }
+            }
+          }
+        } catch (altErr) {
+          Logger.error(`[QM ERROR] saveJkMaster fallback error:`, altErr);
+        }
+      }
+    }
+
     if (!form) {
       Logger.error(`Gagal menemukan form edit master data di ${editUrl}`);
       throw new Error('Form edit data tidak ditemukan.');
@@ -8577,9 +9261,43 @@
 
     const html = await hrisFetch(editUrl);
     const doc = parseHTML(html);
-    const select = doc.querySelector('select[name="kode_kalender_kerja"]');
 
-    if (!select) throw new Error('Elemen kode_kalender_kerja tidak ditemukan di ' + editUrl);
+    // --- DOM Validation ---
+    const title = doc.querySelector('title')?.textContent.trim() || '';
+    if (doc.querySelector('input[type="password"]') || title.toLowerCase().includes('login')) {
+      throw new Error('Sesi login kedaluwarsa. Silakan login kembali di tab HRIS.');
+    }
+    // ----------------------
+    let select = doc.querySelector('select[name="kode_kalender_kerja"]');
+
+    if (false) {
+      let altUrl = '';
+      if (editUrl.includes('/editgeneral/')) {
+        altUrl = editUrl.replace('/editgeneral/', '/edit/');
+      } else if (editUrl.includes('/edit/')) {
+        altUrl = editUrl.replace('/edit/', '/editgeneral/');
+      }
+
+      if (altUrl) {
+        console.log(`[QM INFO] KK select not found in ${editUrl}. Trying alternative URL: ${altUrl}`);
+        try {
+          const altHtml = await hrisFetch(altUrl);
+          const altDoc = parseHTML(altHtml);
+          const altSelect = altDoc.querySelector('select[name="kode_kalender_kerja"]');
+          if (altSelect) {
+            select = altSelect;
+          }
+        } catch (altErr) {
+          console.error(`[QM ERROR] fetchKKOptions fallback error:`, altErr);
+        }
+      }
+    }
+
+    if (!select) {
+      const allSelects = Array.from(doc.querySelectorAll('select')).map(s => s.name || s.id || 'no-name');
+      console.warn(`[QM WARNING] Kalender Kerja select not found. Selects present:`, allSelects);
+      throw new Error('Elemen kode_kalender_kerja tidak ditemukan (Mungkin karyawan outsource / tanpa akses edit).');
+    }
 
     const options = Array.from(select.querySelectorAll('option')).map(opt => ({
       val: opt.value,
@@ -8643,14 +9361,40 @@
 
   async function saveKKMaster(nrp, KK) {
     const emp = await fetchEmployee(nrp);
-    const editUrl = emp.editUrl || employeeEditUrl(nrp, emp.id);
+    let editUrl = emp.editUrl || employeeEditUrl(nrp, emp.id);
 
-    const html = await hrisFetch(editUrl);
+    let html = await hrisFetch(editUrl);
     if (html.includes('id="login-form"') || html.includes('name="login_form"') || html.includes('login-box')) {
       throw new Error('Sesi berakhir. Silakan login kembali.');
     }
-    const doc = parseHTML(html);
-    const select = doc.querySelector('select[name="kode_kalender_kerja"]');
+    let doc = parseHTML(html);
+    let select = doc.querySelector('select[name="kode_kalender_kerja"]');
+
+    if (false) {
+      let altUrl = '';
+      if (editUrl.includes('/editgeneral/')) {
+        altUrl = editUrl.replace('/editgeneral/', '/edit/');
+      } else if (editUrl.includes('/edit/')) {
+        altUrl = editUrl.replace('/edit/', '/editgeneral/');
+      }
+
+      if (altUrl) {
+        Logger.info(`Kalender Kerja select not found in ${editUrl}. Trying alternative URL: ${altUrl}`);
+        try {
+          const altHtml = await hrisFetch(altUrl);
+          const altDoc = parseHTML(altHtml);
+          const altSelect = altDoc.querySelector('select[name="kode_kalender_kerja"]');
+          if (altSelect) {
+            editUrl = altUrl;
+            html = altHtml;
+            doc = altDoc;
+            select = altSelect;
+          }
+        } catch (altErr) {
+          Logger.error(`[QM ERROR] saveKKMaster fallback error:`, altErr);
+        }
+      }
+    }
     const form = select?.closest('form') || doc.querySelector('form');
 
     if (!form) throw new Error('Form edit tidak ditemukan.');
@@ -9015,12 +9759,16 @@
       syncGlobalInputs(query, bulan, tahun);
     }
 
+    // Start progress bar in footer
+    UI.startProgress('Mencari Karyawan...', 1200);
+
     try {
       state.karyawanResults = await searchEmployees(query);
     } catch (e) {
       state.karyawanError = e.message || 'Gagal mencari data karyawan.';
     } finally {
       state.karyawanLoading = false;
+      UI.endProgress();
       renderKaryawanResults();
     }
   }
@@ -9028,7 +9776,8 @@
   function handleNrpLookup(input = panelReaders.lookup()) {
     const nrp = String(input?.nrp || '').trim();
     const bulan = String(input?.bulan || '').trim();
-    if (!nrp || !bulan) { UI.showResult('warning', 'Data Tidak Lengkap', 'Silakan masukkan NRP dan Bulan terlebih dahulu.'); return; }
+    if (!nrp) { uiAdapter.alert('NRP is empty'); return; }
+    if (!bulan) { UI.showResult('warning', 'Data Tidak Lengkap', 'Silakan masukkan Bulan terlebih dahulu.'); return; }
     if (!/^\d+$/.test(nrp) || (nrp.length !== 4 && nrp.length !== 8)) { UI.showResult('warning', 'Format Tidak Valid', 'Hanya menerima 4 dan 8 angka NRP'); return; }
     UI.setLoading(true);
     sessionStorage.setItem(STORAGE.AUTO_NRP, nrp);
@@ -9240,7 +9989,7 @@
 
       const idx = parseInt(cb.dataset.index, 10);
       if (isNaN(idx)) return;
-      
+
       const entry = current.summary.entries[idx];
       if (!entry) return;
 
@@ -9305,7 +10054,7 @@
 
     const currentUrl = window.location.href.split('?')[0];
     const targetBase = (flow.meta.baseUrl || '').split('?')[0];
-    
+
     if (currentUrl !== targetBase && !window.location.href.includes('/spkl')) {
       window.location.href = flow.meta.baseUrl;
       return;
@@ -9313,8 +10062,8 @@
 
     UI.showGlobalLoader('Otomasi', `Mengolah baris ${idx + 1}/${tasks.length}...`);
 
-    const modal = document.querySelector('.modal.show, .modal.in, [role="dialog"].show') || 
-                  document.querySelector('.modal-content');
+    const modal = document.querySelector('.modal.show, .modal.in, [role="dialog"].show') ||
+      document.querySelector('.modal-content');
     const isVisible = modal && (modal.offsetWidth > 0 || modal.offsetHeight > 0);
 
     if (isVisible) {
@@ -9332,16 +10081,16 @@
         if (timeInputs.length >= 2) inputs.akhir = timeInputs[1];
       }
       if (inputs.akhir && task.akhir) { inputs.akhir.value = task.akhir; inputs.akhir.dispatchEvent(new Event('change', { bubbles: true })); }
-      
+
       if (inputs.jenis_ot && task.jenis) { inputs.jenis_ot.value = task.jenis; inputs.jenis_ot.dispatchEvent(new Event('change', { bubbles: true })); }
       if (inputs.shift && task.shift) { inputs.shift.value = task.shift; inputs.shift.dispatchEvent(new Event('change', { bubbles: true })); }
       if (inputs.tambahan && task.tambahan) { inputs.tambahan.value = task.tambahan; inputs.tambahan.dispatchEvent(new Event('change', { bubbles: true })); }
 
       setTimeout(() => {
         const buttons = Array.from(modal.querySelectorAll('button, input[type="submit"]'));
-        const submitBtn = buttons.find(b => 
-          b.type === 'submit' || 
-          b.classList.contains('btn-primary') || 
+        const submitBtn = buttons.find(b =>
+          b.type === 'submit' ||
+          b.classList.contains('btn-primary') ||
           /submit|simpan|save/i.test(b.textContent)
         );
 
@@ -9360,7 +10109,7 @@
       if (task.modalTarget) {
         editBtn = document.querySelector(`button[data-target="${task.modalTarget}"], [data-target="${task.modalTarget}"]`);
       }
-      
+
       if (editBtn) {
         editBtn.click();
         setTimeout(resumeSpklPageLoop, 300);
@@ -9437,7 +10186,7 @@
     var nrp = this.getAttribute('data-nrp');
     if (!nrp) return;
     var url = attendanceUrl(state.batchBulan, state.batchTahun, nrp);
-    window.open(url, '_blank');
+    window.location.href = url;
   }
 
   function handleBatchFixClick(e) {
@@ -9701,6 +10450,7 @@
     exportCurrent: handleExportAnomali,
     startBatchCheck: startBatchAnomalyCheck,
     cancelBatchCheck: handleBatchCancel,
+    clearBatchResults: handleBatchClear,
     processBatchWorker,
     finishBatch,
     pushBatchResult,
@@ -9798,10 +10548,64 @@
   });
 
   function activatePane(pane) {
-    if (!pane) return;
-    uiAdapter.activatePane(pane);
-    localStorage.setItem('qm_last_tab', pane);
-    PANE_REGISTRY[pane]?.onActivate?.();
+    if (!window.QA) return;
+
+    if (pane === 'check-nrp') {
+      window.QA.onActionClick('Cek NRP');
+      return;
+    }
+
+    if (pane === 'karyawan' || pane === 'cek-kary') {
+      window.QA.onActionClick('Cari Karyawan');
+      return;
+    }
+
+    // Map old pane ids to action labels for the header
+    const labels = {
+      'karyawan': 'Cari Karyawan',
+      'spkl': 'SPKL Tools',
+      'kehadiran': 'Automasi Kehadiran',
+      'distribusi': 'Distribusi Jam Kerja',
+      'config': 'Settings'
+    };
+
+    const targetLabel = labels[pane] || 'Action';
+    qaState.activePage = targetLabel;
+
+    const pool = document.getElementById('qa-views-pool');
+    const detailState = els.detailState;
+    if (!pool || !detailState) return;
+
+    // First, move all existing children of detailState back to pool
+    const activePanes = detailState.querySelectorAll('.qm-pane');
+    activePanes.forEach(p => {
+      p.style.display = 'none';
+      p.classList.remove('active');
+      pool.appendChild(p);
+    });
+
+    // Find the requested pane
+    const targetId = 'qm-pane-' + pane;
+    const targetEl = pool.querySelector('#' + targetId);
+    if (targetEl) {
+      targetEl.style.display = 'block';
+      targetEl.classList.add('active');
+      detailState.appendChild(targetEl);
+    }
+
+    // QA UI transitions
+    els.searchBar.classList.add('is-hidden');
+    els.detailHeader.classList.remove('is-hidden');
+    els.detailTitle.textContent = targetLabel;
+    els.emptyState.classList.add('is-hidden');
+    els.resultsState.classList.add('is-hidden');
+    els.detailState.classList.remove('is-hidden');
+    els.detailState.classList.add('is-entering');
+    setTimeout(() => {
+      els.detailState.classList.remove('is-entering');
+    }, 260);
+
+    state.activeTab = pane;
   }
 
   const UI_EVENT_BINDINGS = Object.freeze([
@@ -9890,11 +10694,10 @@
       }
     },
     {
-      event: 'keydown', selector: '#qm-input-nrp', handler(e) {
+      event: 'keydown', selector: '#qm-input-nrp, #qm-input-bulan, #qm-input-tahun', handler(e) {
         if (e.key !== 'Enter') return;
         e.preventDefault();
-        const nrp = this.value.trim();
-        if (nrp.length >= 4) refreshGlobalData(nrp);
+        CEK_NRP.runLookup(panelReaders.lookup());
       }
     },
     {
@@ -9980,6 +10783,14 @@
       }
     },
     {
+      event: 'keydown', selector: '#qm-input-karyawan-search', handler(e) {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          CEK_NRP.searchByQuery(panelReaders.karyawanSearch());
+        }
+      }
+    },
+    {
       event: 'change', selector: '#qm-input-bulan, #qm-input-tahun, #qm-fix-spkl-bulan, #qm-fix-spkl-tahun, #qm-input-hadir-bulan-bln', handler() {
         const isMonthField = this.id === 'qm-input-bulan' || this.id === 'qm-fix-spkl-bulan' || this.id === 'qm-input-hadir-bulan-bln';
         const isYearField = this.id === 'qm-input-tahun' || this.id === 'qm-fix-spkl-tahun';
@@ -9990,6 +10801,49 @@
     { event: 'click', selector: '.qm-karyawan-detail-btn', handler() { CEK_NRP.toggleDetail(this.dataset.key || ''); } },
     { event: 'click', selector: '.qm-karyawan-edit-btn', handler() { CEK_NRP.toggleEditor(this.dataset.key || ''); } },
     { event: 'click', selector: '.qm-karyawan-save-btn', handler() { CEK_NRP.saveEditor(panelReaders.karyawanSave(this.dataset.key || '')); } },
+    {
+      event: 'click', selector: '.qm-group-header-card', handler() {
+        const group = this.dataset.group;
+        if (!state.karyawanGroupsExpanded) {
+          state.karyawanGroupsExpanded = { internal: false, outsource: false };
+        }
+        state.karyawanGroupsExpanded[group] = !state.karyawanGroupsExpanded[group];
+        renderKaryawanResults();
+      }
+    },
+    {
+      event: 'click', selector: '#qm-btn-karyawan-reset', handler() {
+        state.karyawanResults = [];
+        state.karyawanQuery = '';
+        state.karyawanActivePanel = null;
+        state.karyawanError = null;
+        const input = document.getElementById('qm-input-karyawan-search');
+        if (input) input.value = '';
+        renderKaryawanResults();
+      }
+    },
+    {
+      event: 'click', selector: '.qm-directory-item', handler(e) {
+        if (e.target.closest('button') || e.target.closest('.qm-preview-tag')) return;
+        const key = this.dataset.key || '';
+        if (!key) return;
+        const result = state.karyawanResults.find(r => r.key === key);
+        if (result && result.nrp) {
+          clearEmployeeCache(result.nrp);
+          const activeMode = state.karyawanActivePanel?.mode || 'detail';
+          state.karyawanActivePanel = { key, mode: activeMode };
+          if (activeMode === 'edit') {
+            loadKaryawanEditor(key, result.nrp, result.id, result.source === 'outsource');
+          } else {
+            loadKaryawanDetail(key, result.nrp, result.profileUrl);
+          }
+          setTimeout(() => {
+            const leftPanel = document.getElementById('qm-karyawan-left-panel');
+            if (leftPanel) leftPanel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+          }, 50);
+        }
+      }
+    },
     { event: 'click', selector: '.qm-fix-dot', handler: handleFixDotClick },
     { event: 'click', selector: '.qm-btn-fix-pill', handler: handleFixDotClick },
     {
@@ -10012,6 +10866,7 @@
         this.textContent = 'Memproses...';
       }
     },
+    { event: 'click', selector: '#qm-btn-batch-clear', handler: ANOMALI.clearBatchResults },
     { event: 'click', selector: '#qm-btn-export-batch', handler: ANOMALI.exportBatchResults },
     { event: 'click', selector: '.qm-batch-nrp-link', handler: ANOMALI.handleBatchNrpClick },
     { event: 'click', selector: '.qm-batch-fix-btn', handler: ANOMALI.handleBatchFixClick },
@@ -10037,42 +10892,63 @@
     },
     {
       event: 'click', selector: '.qm-batch-group-header', handler() {
-        const rows = document.querySelectorAll(this.dataset.target);
+        const table = this.closest('table');
+        if (!table) return;
+        const rows = table.querySelectorAll(this.dataset.target);
         const isExpanded = this.classList.contains('expanded');
         this.classList.toggle('expanded');
         rows.forEach(r => {
           if (isExpanded) {
             r.classList.add('qm-hidden');
             r.classList.remove('qm-table-row', 'expanded');
-          } else if (r.classList.contains('qm-batch-seksi-header')) {
-            r.classList.remove('qm-hidden');
-            r.classList.add('qm-table-row');
+            if (r.classList.contains('qm-batch-seksi-header')) {
+              const childRows = table.querySelectorAll(r.dataset.target);
+              childRows.forEach(cr => {
+                cr.classList.add('qm-hidden');
+                cr.classList.remove('qm-table-row');
+              });
+            }
           } else {
-            r.classList.add('qm-hidden');
-            r.classList.remove('qm-table-row');
+            if (r.classList.contains('qm-table-header') || r.classList.contains('qm-batch-seksi-header')) {
+              r.classList.remove('qm-hidden');
+              r.classList.add('qm-table-row');
+            }
           }
         });
       }
     },
     {
       event: 'click', selector: '.qm-batch-seksi-header', handler() {
-        const rows = document.querySelectorAll(this.dataset.target);
+        const table = this.closest('table');
+        if (!table) return;
+        const rows = table.querySelectorAll(this.dataset.target);
         const isExpanded = this.classList.contains('expanded');
         this.classList.toggle('expanded');
         rows.forEach(r => {
-          r.classList.toggle('qm-hidden', isExpanded);
-          r.classList.toggle('qm-table-row', !isExpanded);
+          if (isExpanded) {
+            r.classList.add('qm-hidden');
+            r.classList.remove('qm-table-row');
+          } else {
+            r.classList.remove('qm-hidden');
+            r.classList.add('qm-table-row');
+          }
         });
       }
     },
     {
       event: 'click', selector: '.qm-batch-date-header', handler(e) {
-        if (e.target.closest('.qm-batch-fix-btn')) return;
+        if (e.target.closest('.qm-fix-dot') || e.target.closest('.qm-batch-fix-btn')) return;
         const content = this.nextElementSibling;
+        const isExpanded = this.classList.contains('expanded');
         this.classList.toggle('expanded');
         if (content) {
-          content.classList.toggle('qm-hidden');
-          content.classList.toggle('qm-visible-block');
+          if (isExpanded) {
+            content.classList.add('qm-hidden');
+            content.classList.remove('qm-visible-block');
+          } else {
+            content.classList.remove('qm-hidden');
+            content.classList.add('qm-visible-block');
+          }
         }
       }
     },
@@ -10213,6 +11089,31 @@
 
     initDraggable();
 
+    // Prefill batch results if they exist in localStorage
+    try {
+      const savedResults = localStorage.getItem('qm-batch-results');
+      if (savedResults) {
+        state.batchResults = JSON.parse(savedResults);
+        state.batchBulan = parseInt(localStorage.getItem('qm-batch-bulan')) || 0;
+        state.batchTahun = parseInt(localStorage.getItem('qm-batch-tahun')) || 0;
+
+        if (state.batchBulan) {
+          const bulEl = uiAdapter.get('globalMonth');
+          if (bulEl) bulEl.value = state.batchBulan;
+        }
+        if (state.batchTahun) {
+          const tahEl = uiAdapter.get('globalYear');
+          if (tahEl) tahEl.value = state.batchTahun;
+        }
+
+        renderBatchResults();
+        const container = uiAdapter.get('batchResults');
+        if (container) container.classList.add('is-visible');
+      }
+    } catch (e) {
+      console.error('Failed to restore batch results:', e);
+    }
+
     const lastTab = localStorage.getItem('qm_last_tab') || 'check-nrp';
     activatePane(lastTab);
   }
@@ -10248,7 +11149,91 @@
     runStartupAutomations();
     handleAutomationReturnState();
 
-    if (mountPanel()) initializePanelDefaults();
+    if (mountPanel()) {
+      initQaEngine();
+
+      // Register QA Actions mapping legacy panes
+      if (window.QA) {
+        window.QA.registerActions([
+          {
+            label: 'Cek NRP',
+            iconMarkup: ICONS.userCheck,
+            description: 'Check employee attendance anomalies by NRP, month, and year.',
+            keywords: ['nrp', 'cek nrp', 'absensi', 'anomalies', 'kehadiran', 'batch', 'barcode', 'employee check'],
+            onClick: () => {
+              window.QA.renderDetail('Cek NRP', VIEW_CEK_NRP);
+              localStorage.setItem('qm_last_tab', 'check-nrp');
+              if (typeof CEK_NRP !== 'undefined') {
+                CEK_NRP.prefillSearch(true);
+                CEK_NRP.renderResults();
+              }
+              if (typeof refreshGlobalData === 'function') {
+                refreshGlobalData('', '', '', 'check-nrp');
+              }
+              if (state.batchBulan) {
+                const bulEl = uiAdapter.get('globalMonth');
+                if (bulEl) bulEl.value = state.batchBulan;
+              }
+              if (state.batchTahun) {
+                const tahEl = uiAdapter.get('globalYear');
+                if (tahEl) tahEl.value = state.batchTahun;
+              }
+              if (typeof renderBatchResults === 'function') {
+                renderBatchResults();
+              }
+            }
+          },
+          {
+            label: 'Cari Karyawan',
+            iconMarkup: ICONS.user,
+            description: 'Find employee records by NRP or employee name.',
+            keywords: ['karyawan', 'employee', 'pegawai', 'nama', 'nrp', 'profile', 'data karyawan'],
+            onClick: () => {
+              window.QA.renderDetail('Cari Karyawan', VIEW_CEK_KARY);
+              localStorage.setItem('qm_last_tab', 'cek-kary');
+              if (typeof CEK_NRP !== 'undefined') {
+                CEK_NRP.prefillSearch(true);
+                CEK_NRP.renderResults();
+              }
+              if (typeof refreshGlobalData === 'function') {
+                refreshGlobalData('', '', '', 'cek-kary');
+              }
+            }
+          },
+          {
+            label: 'SPKL Tools',
+            iconMarkup: ICONS.file,
+            description: 'Review and fix SPKL overtime entries and approval status.',
+            keywords: ['spkl', 'overtime', 'ot', 'lembur', 'approval', 'fix spkl', 'status spkl'],
+            onClick: () => activatePane('spkl')
+          },
+          {
+            label: 'Automasi Kehadiran',
+            iconMarkup: ICONS.clock,
+            description: 'Automate attendance corrections, barcode entries, and schedule checks.',
+            keywords: ['kehadiran', 'attendance', 'absen', 'barcode', 'masuk', 'pulang', 'shift', 'auto hadir'],
+            onClick: () => activatePane('kehadiran')
+          },
+          {
+            label: 'Distribusi Jam Kerja',
+            iconMarkup: ICONS.map,
+            description: 'Run work-hour distribution and calendar assignment automation.',
+            keywords: ['distribusi', 'jam kerja', 'kalender kerja', 'kk', 'schedule', 'calendar', 'assign shift'],
+            onClick: () => activatePane('distribusi')
+          },
+          {
+            label: 'Settings',
+            iconMarkup: ICONS.settings,
+            description: 'Configure quick menu behavior, preferences, and saved options.',
+            keywords: ['settings', 'config', 'configuration', 'pengaturan', 'preferensi', 'options'],
+            onClick: () => activatePane('config')
+          }
+        ]);
+      }
+
+      initializePanelDefaults();
+    }
+
 
     ANOMALI.detect();
 
